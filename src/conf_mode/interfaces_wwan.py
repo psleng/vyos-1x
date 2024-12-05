@@ -136,8 +136,11 @@ def apply(wwan):
             sleep(0.250)
 
     if 'shutdown_required' in wwan:
-        # we only need the modem number. wwan0 -> 0, wwan1 -> 1
-        modem = wwan['ifname'].lstrip('wwan')
+        # deprecated: we only need the modem number. wwan0 -> 0, wwan1 -> 1
+        # modem = wwan['ifname'].lstrip('wwan')
+        # get the modem index of the first modem, assuming only one modem detected
+        tmp = cmd('mmcli -L')
+        modem = tmp.split("/Modem/")[1].split()[0]
         base_cmd = f'mmcli --modem {modem}'
         # Number of bearers is limited - always disconnect first
         cmd(f'{base_cmd} --simple-disconnect')
