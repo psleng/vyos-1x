@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 #
-# Copyright (C) 2020-2024 VyOS maintainers and contributors
+# Copyright (C) 2020-2025 VyOS maintainers and contributors
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2 or later as
@@ -15,6 +15,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import os
+import re
 import unittest
 
 from json import loads
@@ -22,6 +23,9 @@ from json import loads
 from base_vyostest_shim import VyOSUnitTestSHIM
 
 from vyos.configsession import ConfigSessionError
+from vyos.kea import kea_add_lease
+from vyos.kea import kea_delete_lease
+from vyos.utils.process import cmd
 from vyos.utils.process import process_named_running
 from vyos.utils.file import read_file
 from vyos.template import inc_ip
@@ -31,6 +35,7 @@ PROCESS_NAME = 'kea-dhcp4'
 CTRL_PROCESS_NAME = 'kea-ctrl-agent'
 KEA4_CONF = '/run/kea/kea-dhcp4.conf'
 KEA4_CTRL = '/run/kea/dhcp4-ctrl-socket'
+HOSTSD_CLIENT = '/usr/bin/vyos-hostsd-client'
 base_path = ['service', 'dhcp-server']
 interface = 'dum8765'
 subnet = '192.0.2.0/25'
@@ -842,6 +847,72 @@ class TestServiceDHCPServer(VyOSUnitTestSHIM.TestCase):
         self.cli_delete(['vrf', 'name', 'SMOKE-DHCP'])
         self.cli_commit()
 
+    def test_dhcp_hostsd_lease_sync(self):
+        shared_net_name = 'SMOKE-LEASE-SYNC'
+        domain_name = 'sync.private'
+
+        client_range = range(1, 4)
+        subnet_range_start = inc_ip(subnet, 10)
+        subnet_range_stop  = inc_ip(subnet, 20)
+
+        def internal_cleanup():
+            for seq in client_range:
+                ip_addr = inc_ip(subnet, seq)
+                kea_delete_lease(4, ip_addr)
+                cmd(f'{HOSTSD_CLIENT} --delete-hosts --tag dhcp-server-{ip_addr} --apply')
+
+        self.addClassCleanup(internal_cleanup)
+
+        pool = base_path + ['shared-network-name', shared_net_name, 'subnet', subnet]
+        self.cli_set(pool + ['subnet-id', '1'])
+        self.cli_set(pool + ['option', 'domain-name', domain_name])
+        self.cli_set(pool + ['range', '0', 'start', subnet_range_start])
+        self.cli_set(pool + ['range', '0', 'stop', subnet_range_stop])
+
+        # commit changes
+        self.cli_commit()
+
+        config = read_file(KEA4_CONF)
+        obj = loads(config)
+
+        self.verify_config_value(obj, ['Dhcp4', 'shared-networks'], 'name', shared_net_name)
+        self.verify_config_value(obj, ['Dhcp4', 'shared-networks', 0, 'subnet4'], 'subnet', subnet)
+        self.verify_config_value(obj, ['Dhcp4', 'shared-networks', 0, 'subnet4'], 'id', 1)
+
+        # Verify options
+        self.verify_config_object(
+                obj,
+                ['Dhcp4', 'shared-networks', 0, 'subnet4', 0, 'option-data'],
+                {'name': 'domain-name', 'data': domain_name})
+        self.verify_config_object(
+                obj,
+                ['Dhcp4', 'shared-networks', 0, 'subnet4', 0, 'pools'],
+                {'pool': f'{subnet_range_start} - {subnet_range_stop}'})
+
+        # Check for running process
+        self.assertTrue(process_named_running(PROCESS_NAME))
+
+        # All up and running, now test vyos-hostsd store
+
+        # 1. Inject leases into kea
+        for seq in client_range:
+            client = f'client{seq}'
+            mac = f'00:50:00:00:00:{seq:02}'
+            ip = inc_ip(subnet, seq)
+            kea_add_lease(4, ip, host_name=client, mac_address=mac)
+
+        # 2. Verify that leases are not available in vyos-hostsd
+        tag_regex = re.escape(f'dhcp-server-{subnet.rsplit(".", 1)[0]}')
+        host_json = cmd(f'{HOSTSD_CLIENT} --get-hosts {tag_regex}')
+        self.assertFalse(host_json.strip('{}'))
+
+        # 3. Restart the service to trigger vyos-hostsd sync and wait for it to start
+        self.assertTrue(process_named_running(PROCESS_NAME, timeout=30))
+
+        # 4. Verify that leases are synced and available in vyos-hostsd
+        tag_regex = re.escape(f'dhcp-server-{subnet.rsplit(".", 1)[0]}')
+        host_json = cmd(f'{HOSTSD_CLIENT} --get-hosts {tag_regex}')
+        self.assertTrue(host_json)
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
