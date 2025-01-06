@@ -1,5 +1,5 @@
 # configtree -- a standalone VyOS config file manipulation library (Python bindings)
-# Copyright (C) 2018-2024 VyOS maintainers and contributors
+# Copyright (C) 2018-2025 VyOS maintainers and contributors
 #
 # This library is free software; you can redistribute it and/or modify it under the terms of
 # the GNU Lesser General Public License as published by the Free Software Foundation;
@@ -497,6 +497,56 @@ def reference_tree_to_json(from_dir, to_file, internal_cache='', libpath=LIBPATH
         res = __reference_tree_to_json(
             internal_cache.encode(), from_dir.encode(), to_file.encode()
         )
+    except Exception as e:
+        raise ConfigTreeError(e)
+    if res == 1:
+        msg = __get_error().decode()
+        raise ConfigTreeError(msg)
+
+
+def merge_reference_tree_cache(cache_dir, primary_name, result_name, libpath=LIBPATH):
+    try:
+        __lib = cdll.LoadLibrary(libpath)
+        __merge_reference_tree_cache = __lib.merge_reference_tree_cache
+        __merge_reference_tree_cache.argtypes = [c_char_p, c_char_p, c_char_p]
+        __get_error = __lib.get_error
+        __get_error.argtypes = []
+        __get_error.restype = c_char_p
+        res = __merge_reference_tree_cache(
+            cache_dir.encode(), primary_name.encode(), result_name.encode()
+        )
+    except Exception as e:
+        raise ConfigTreeError(e)
+    if res == 1:
+        msg = __get_error().decode()
+        raise ConfigTreeError(msg)
+
+
+def interface_definitions_to_cache(from_dir, cache_path, libpath=LIBPATH):
+    try:
+        __lib = cdll.LoadLibrary(libpath)
+        __interface_definitions_to_cache = __lib.interface_definitions_to_cache
+        __interface_definitions_to_cache.argtypes = [c_char_p, c_char_p]
+        __get_error = __lib.get_error
+        __get_error.argtypes = []
+        __get_error.restype = c_char_p
+        res = __interface_definitions_to_cache(from_dir.encode(), cache_path.encode())
+    except Exception as e:
+        raise ConfigTreeError(e)
+    if res == 1:
+        msg = __get_error().decode()
+        raise ConfigTreeError(msg)
+
+
+def reference_tree_cache_to_json(cache_path, render_file, libpath=LIBPATH):
+    try:
+        __lib = cdll.LoadLibrary(libpath)
+        __reference_tree_cache_to_json = __lib.reference_tree_cache_to_json
+        __reference_tree_cache_to_json.argtypes = [c_char_p, c_char_p]
+        __get_error = __lib.get_error
+        __get_error.argtypes = []
+        __get_error.restype = c_char_p
+        res = __reference_tree_cache_to_json(cache_path.encode(), render_file.encode())
     except Exception as e:
         raise ConfigTreeError(e)
     if res == 1:
