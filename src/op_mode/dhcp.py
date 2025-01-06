@@ -19,6 +19,7 @@ import sys
 import typing
 
 from datetime import datetime
+from datetime import timezone
 from glob import glob
 from ipaddress import ip_address
 from tabulate import tabulate
@@ -110,10 +111,8 @@ def _get_formatted_server_leases(raw_data, family='inet'):
             ipaddr = lease.get('ip')
             hw_addr = lease.get('mac')
             state = lease.get('state')
-            start = lease.get('start')
-            start = _utc_to_local(start).strftime('%Y/%m/%d %H:%M:%S')
-            end = lease.get('end')
-            end = _utc_to_local(end).strftime('%Y/%m/%d %H:%M:%S') if end else '-'
+            start = datetime.fromtimestamp(lease.get('start'), timezone.utc)
+            end = datetime.fromtimestamp(lease.get('end'), timezone.utc) if lease.get('end') else '-'
             remain = lease.get('remaining')
             pool = lease.get('pool')
             hostname = lease.get('hostname')
@@ -138,10 +137,8 @@ def _get_formatted_server_leases(raw_data, family='inet'):
         for lease in raw_data:
             ipaddr = lease.get('ip')
             state = lease.get('state')
-            start = lease.get('last_communication')
-            start = _utc_to_local(start).strftime('%Y/%m/%d %H:%M:%S')
-            end = lease.get('end')
-            end = _utc_to_local(end).strftime('%Y/%m/%d %H:%M:%S')
+            start = datetime.fromtimestamp(lease.get('last_communication'), timezone.utc)
+            end = datetime.fromtimestamp(lease.get('end'), timezone.utc) if lease.get('end') else '-'
             remain = lease.get('remaining')
             lease_type = lease.get('type')
             pool = lease.get('pool')

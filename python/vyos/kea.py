@@ -476,9 +476,7 @@ def kea_get_server_leases(config, inet, pools=[], state=[], origin=None) -> list
         lifetime = lease['valid-lft']
         expiry = lease['cltt'] + lifetime
 
-        lease['start_timestamp'] = datetime.fromtimestamp(
-            expiry - lifetime, timezone.utc
-        )
+        lease['start_timestamp'] = datetime.fromtimestamp(lease['cltt'], timezone.utc)
         lease['expire_timestamp'] = (
             datetime.fromtimestamp(expiry, timezone.utc) if expiry else None
         )
@@ -515,14 +513,10 @@ def kea_get_server_leases(config, inet, pools=[], state=[], origin=None) -> list
         data_lease['remaining'] = '-'
 
         if lease['valid-lft'] > 0:
-            data_lease['remaining'] = lease['expire_timestamp'] - datetime.now(
-                timezone.utc
-            )
-
-            if data_lease['remaining'].days >= 0:
+            if lease['expire_timestamp'] > datetime.now(timezone.utc):
                 # substraction gives us a timedelta object which can't be formatted with strftime
                 # so we use str(), split gets rid of the microseconds
-                data_lease['remaining'] = str(data_lease['remaining']).split('.')[0]
+                data_lease['remaining'] = str(lease['expire_timestamp'] - datetime.now(timezone.utc)).split('.')[0]
 
         # Do not add old leases
         if (
