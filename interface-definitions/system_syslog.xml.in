@@ -106,45 +106,6 @@
               </leafNode>
             </children>
           </node>
-          <tagNode name="file">
-            <properties>
-              <help>Logging to a file</help>
-              <constraint>
-                <regex>[a-zA-Z0-9\-_.]{1,255}</regex>
-              </constraint>
-              <constraintErrorMessage>illegal characters in filename or filename longer than 255 characters</constraintErrorMessage>
-            </properties>
-            <children>
-              <node name="archive">
-                <properties>
-                  <help>Log file size and rotation characteristics</help>
-                </properties>
-                <children>
-                  <leafNode name="file">
-                    <properties>
-                      <help>Number of saved files</help>
-                      <constraint>
-                        <regex>[0-9]+</regex>
-                      </constraint>
-                      <constraintErrorMessage>illegal characters in number of files</constraintErrorMessage>
-                    </properties>
-                    <defaultValue>5</defaultValue>
-                  </leafNode>
-                  <leafNode name="size">
-                    <properties>
-                      <help>Size of log files in kbytes</help>
-                      <constraint>
-                        <regex>[0-9]+</regex>
-                      </constraint>
-                      <constraintErrorMessage>illegal characters in size</constraintErrorMessage>
-                    </properties>
-                    <defaultValue>256</defaultValue>
-                  </leafNode>
-                </children>
-              </node>
-              #include <include/syslog-facility.xml.i>
-            </children>
-          </tagNode>
           <node name="console">
             <properties>
               <help>logging to serial console</help>
