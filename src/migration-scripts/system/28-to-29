@@ -27,3 +27,6 @@ def migrate(config: ConfigTree) -> None:
 
     if config.exists(base + ['file']):
         config.delete(base + ['file'])
+
+    if config.exists(base + ['user']):
+        config.delete(base + ['user'])

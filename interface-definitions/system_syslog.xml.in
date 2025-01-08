@@ -8,25 +8,6 @@
           <priority>400</priority>
         </properties>
         <children>
-          <tagNode name="user">
-            <properties>
-              <help>Logging to specific terminal of given user</help>
-              <completionHelp>
-                <path>system login user</path>
-              </completionHelp>
-              <valueHelp>
-                <format>txt</format>
-                <description>Local user account</description>
-              </valueHelp>
-              <constraint>
-                #include <include/constraint/login-username.xml.i>
-              </constraint>
-              <constraintErrorMessage>illegal characters in user</constraintErrorMessage>
-            </properties>
-            <children>
-              #include <include/syslog-facility.xml.i>
-            </children>
-          </tagNode>
           <tagNode name="host">
             <properties>
               <help>Logging to remote host</help>

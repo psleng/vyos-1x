@@ -49,16 +49,3 @@ $outchannel global,/var/log/messages,262144,/usr/sbin/logrotate {{ logrotate }}
 {%         endif %}
 {%     endfor %}
 {% endif %}
-
-{% if user is defined and user is not none %}
-# Log to user terminal
-{%     for username, user_options in user.items() %}
-{%         set tmp = [] %}
-{%         if user_options.facility is vyos_defined %}
-{%             for facility, facility_options in user_options.facility.items() %}
-{%                 set _ = tmp.append(facility.replace('all', '*') + '.' + facility_options.level.replace('all', '*')) %}
-{%             endfor %}
-{%         endif %}
-{{ tmp | join(';') }} :omusrmsg:{{ username }}
-{%     endfor %}
-{% endif %}
