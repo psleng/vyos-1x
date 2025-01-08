@@ -33,19 +33,19 @@ $outchannel global,/var/log/messages,262144,/usr/sbin/logrotate {{ logrotate }}
 {{ tmp | join(';') }} /dev/console
 {% endif %}
 
-{% if host is vyos_defined %}
+{% if remote is vyos_defined %}
 # Remote logging
-{%     for host_name, host_options in host.items() %}
+{%     for remote_name, remote_options in remote.items() %}
 {%         set tmp = [] %}
-{%         if host_options.facility is vyos_defined %}
-{%             for facility, facility_options in host_options.facility.items() %}
+{%         if remote_options.facility is vyos_defined %}
+{%             for facility, facility_options in remote_options.facility.items() %}
 {%                 set _ = tmp.append(facility.replace('all', '*') + '.' + facility_options.level.replace('all', '*')) %}
 {%             endfor %}
 {%         endif %}
-{%         if host_options.protocol is vyos_defined('tcp') %}
-{{ tmp | join(';') }} @@{{ '(o)' if host_options.format.octet_counted is vyos_defined }}{{ host_name | bracketize_ipv6 }}:{{ host_options.port }}{{ ';RSYSLOG_SyslogProtocol23Format' if host_options.format.include_timezone is vyos_defined }}
+{%         if remote_options.protocol is vyos_defined('tcp') %}
+{{ tmp | join(';') }} @@{{ '(o)' if remote_options.format.octet_counted is vyos_defined }}{{ remote_name | bracketize_ipv6 }}:{{ remote_options.port }}{{ ';RSYSLOG_SyslogProtocol23Format' if remote_options.format.include_timezone is vyos_defined }}
 {%         else %}
-{{ tmp | join(';') }} @{{ host_name | bracketize_ipv6 }}:{{ host_options.port }}{{ ';RSYSLOG_SyslogProtocol23Format' if host_options.format.include_timezone is vyos_defined }}
+{{ tmp | join(';') }} @{{ remote_name | bracketize_ipv6 }}:{{ remote_options.port }}{{ ';RSYSLOG_SyslogProtocol23Format' if remote_options.format.include_timezone is vyos_defined }}
 {%         endif %}
 {%     endfor %}
 {% endif %}
