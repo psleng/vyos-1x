@@ -70,9 +70,6 @@ def verify(wireguard):
     if 'private_key' not in wireguard:
         raise ConfigError('Wireguard private-key not defined')
 
-    if 'peer' not in wireguard:
-        raise ConfigError('At least one Wireguard peer is required!')
-
     if 'port' in wireguard and 'port_changed' in wireguard:
         listen_port = int(wireguard['port'])
         if check_port_availability('0.0.0.0', listen_port, 'udp') is not True:
@@ -80,28 +77,29 @@ def verify(wireguard):
                                'cannot be used for the interface!')
 
     # run checks on individual configured WireGuard peer
-    public_keys = []
-    for tmp in wireguard['peer']:
-        peer = wireguard['peer'][tmp]
+    if 'peer' in wireguard:
+        public_keys = []
+        for tmp in wireguard['peer']:
+            peer = wireguard['peer'][tmp]
 
-        if 'allowed_ips' not in peer:
-            raise ConfigError(f'Wireguard allowed-ips required for peer "{tmp}"!')
+            if 'allowed_ips' not in peer:
+                raise ConfigError(f'Wireguard allowed-ips required for peer "{tmp}"!')
 
-        if 'public_key' not in peer:
-            raise ConfigError(f'Wireguard public-key required for peer "{tmp}"!')
+            if 'public_key' not in peer:
+                raise ConfigError(f'Wireguard public-key required for peer "{tmp}"!')
 
-        if ('address' in peer and 'port' not in peer) or ('port' in peer and 'address' not in peer):
-            raise ConfigError('Both Wireguard port and address must be defined '
-                              f'for peer "{tmp}" if either one of them is set!')
+            if ('address' in peer and 'port' not in peer) or ('port' in peer and 'address' not in peer):
+                raise ConfigError('Both Wireguard port and address must be defined '
+                                  f'for peer "{tmp}" if either one of them is set!')
 
-        if peer['public_key'] in public_keys:
-            raise ConfigError(f'Duplicate public-key defined on peer "{tmp}"')
+            if peer['public_key'] in public_keys:
+                raise ConfigError(f'Duplicate public-key defined on peer "{tmp}"')
 
-        if 'disable' not in peer:
-            if is_wireguard_key_pair(wireguard['private_key'], peer['public_key']):
-                raise ConfigError(f'Peer "{tmp}" has the same public key as the interface "{wireguard["ifname"]}"')
+            if 'disable' not in peer:
+                if is_wireguard_key_pair(wireguard['private_key'], peer['public_key']):
+                    raise ConfigError(f'Peer "{tmp}" has the same public key as the interface "{wireguard["ifname"]}"')
 
-        public_keys.append(peer['public_key'])
+            public_keys.append(peer['public_key'])
 
 def generate(wireguard):
     return None

@@ -87,6 +87,10 @@ def dhcp_slice_range(exclude_list, range_dict):
                 'start' : range_start,
                 'stop' : str(ip_address(e) -1)
             }
+
+            if 'option' in range_dict:
+                r['option'] = range_dict['option']
+
             # On the next run our address range will start one address after
             # the exclude address
             range_start = str(ip_address(e) + 1)
@@ -104,6 +108,10 @@ def dhcp_slice_range(exclude_list, range_dict):
                   'start': str(ip_address(e) + 1),
                   'stop': str(range_stop)
                 }
+
+                if 'option' in range_dict:
+                    r['option'] = range_dict['option']
+
                 if not (ip_address(r['start']) > ip_address(r['stop'])):
                     output.append(r)
         else:

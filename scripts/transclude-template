@@ -23,6 +23,7 @@
 import os
 import re
 import sys
+import glob
 
 regexp = re.compile(r'^ *#include <(.+)>$')
 
@@ -34,7 +35,9 @@ def parse_file(filename):
             if line:
                 result = regexp.match(line)
                 if result:
-                    lines += parse_file(os.path.join(directory, result.group(1)))
+                    res = os.path.join(directory, result.group(1))
+                    for g in sorted(glob.glob(res)):
+                        lines += parse_file(g)
                 else:
                     lines += line
             else:

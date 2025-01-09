@@ -119,21 +119,17 @@ int main(int argc, char* argv[])
 
     zmq_send(requester, string_node_data_msg, strlen(string_node_data_msg), 0);
     zmq_recv(requester, error_code, 1, 0);
-    debug_print("Received node data receipt\n");
+    debug_print("Received node data receipt with error_code\n");
 
     char msg_size_str[7];
-    zmq_send(requester, "msg_size", 8, 0);
     zmq_recv(requester, msg_size_str, 6, 0);
     msg_size_str[6] = '\0';
     int msg_size = (int)strtol(msg_size_str, NULL, 16);
     debug_print("msg_size: %d\n", msg_size);
 
-    if (msg_size > 0) {
-        zmq_send(requester, "send", 4, 0);
-        char *msg = s_recv_string(requester, msg_size);
-        printf("%s", msg);
-        free(msg);
-    }
+    char *msg = s_recv_string(requester, msg_size);
+    printf("%s", msg);
+    free(msg);
 
     free(string_node_data_msg);
 

@@ -23,6 +23,7 @@ from vyos.utils.system import sysctl_read
 
 base_path = ['system', 'option']
 
+
 class TestSystemOption(VyOSUnitTestSHIM.TestCase):
     def tearDown(self):
         self.cli_delete(base_path)
@@ -59,6 +60,7 @@ class TestSystemOption(VyOSUnitTestSHIM.TestCase):
 
     def test_performance(self):
         tuned_service = 'tuned.service'
+        path = ['system', 'sysctl', 'parameter']
 
         self.assertFalse(is_systemd_service_active(tuned_service))
 
@@ -67,11 +69,11 @@ class TestSystemOption(VyOSUnitTestSHIM.TestCase):
         gc_thresh2 = '262000'
         gc_thresh3 = '524000'
 
-        self.cli_set(['system', 'sysctl', 'parameter', 'net.ipv4.neigh.default.gc_thresh1', 'value', gc_thresh1])
-        self.cli_set(['system', 'sysctl', 'parameter', 'net.ipv4.neigh.default.gc_thresh2', 'value', gc_thresh2])
-        self.cli_set(['system', 'sysctl', 'parameter', 'net.ipv4.neigh.default.gc_thresh3', 'value', gc_thresh3])
+        self.cli_set(path + ['net.ipv4.neigh.default.gc_thresh1', 'value', gc_thresh1])
+        self.cli_set(path + ['net.ipv4.neigh.default.gc_thresh2', 'value', gc_thresh2])
+        self.cli_set(path + ['net.ipv4.neigh.default.gc_thresh3', 'value', gc_thresh3])
 
-        self.cli_set(base_path + ['performance', 'throughput'])
+        self.cli_set(base_path + ['performance', 'network-throughput'])
         self.cli_commit()
 
         self.assertTrue(is_systemd_service_active(tuned_service))

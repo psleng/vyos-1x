@@ -23,9 +23,10 @@ from tabulate import tabulate
 
 from vyos.utils.process import cmd
 from vyos.utils.process import rc_cmd
-from vyos.utils.process	import call
+from vyos.utils.process import call
 
 import vyos.opmode
+
 
 def _get_json_data():
     """
@@ -43,7 +44,7 @@ def _get_raw_data_summary():
     return data_dict
 
 
-def _get_raw_data_vlan(tunnel:bool=False):
+def _get_raw_data_vlan(tunnel: bool = False):
     """
     :returns dict
     """
@@ -54,13 +55,17 @@ def _get_raw_data_vlan(tunnel:bool=False):
     data_dict = json.loads(json_data)
     return data_dict
 
+
 def _get_raw_data_vni() -> dict:
     """
     :returns dict
     """
-    json_data = cmd(f'bridge --json vni show')
+    code, json_data = rc_cmd(f'bridge --json vni show')
+    if code != 0:
+        raise vyos.opmode.UnconfiguredObject('VNI is not configured')
     data_dict = json.loads(json_data)
     return data_dict
+
 
 def _get_raw_data_fdb(bridge):
     """Get MAC-address for the bridge brX
@@ -70,7 +75,9 @@ def _get_raw_data_fdb(bridge):
     # From iproute2 fdb.c, fdb_show() will only exit(-1) in case of
     # non-existent bridge device; raise error.
     if code == 255:
-        raise vyos.opmode.UnconfiguredObject(f"bridge {bridge} does not exist in the system")
+        raise vyos.opmode.UnconfiguredObject(
+            f'bridge {bridge} does not exist in the system'
+        )
     data_dict = json.loads(json_data)
     return data_dict
 
@@ -116,8 +123,8 @@ def _get_formatted_output_summary(data):
             flags = ','.join(option.get('flags')).lower()
             prio = option.get('priority')
             member_entries.append([interface, state, mtu, flags, prio])
-        member_headers = ["Member", "State", "MTU", "Flags", "Prio"]
-        output_members = tabulate(member_entries, member_headers, numalign="left")
+        member_headers = ['Member', 'State', 'MTU', 'Flags', 'Prio']
+        output_members = tabulate(member_entries, member_headers, numalign='left')
         output_bridge = f"""Bridge interface {bridge}:
 {output_members}
 
@@ -138,12 +145,13 @@ def _get_formatted_output_vlan(data):
                 vlan_end = vlan_entry.get('vlanEnd')
                 vlan = f'{vlan}-{vlan_end}'
             flags_raw = vlan_entry.get('flags')
-            flags = ', '.join(flags_raw if isinstance(flags_raw,list) else "").lower()
+            flags = ', '.join(flags_raw if isinstance(flags_raw, list) else '').lower()
             data_entries.append([interface, vlan, flags])
 
-    headers = ["Interface", "VLAN", "Flags"]
+    headers = ['Interface', 'VLAN', 'Flags']
     output = tabulate(data_entries, headers)
     return output
+
 
 def _get_formatted_output_vlan_tunnel(data):
     data_entries = []
@@ -166,9 +174,10 @@ def _get_formatted_output_vlan_tunnel(data):
                 #                 200    200
                 data_entries.append(['', vlan, vni])
 
-    headers = ["Interface", "VLAN", "VNI"]
+    headers = ['Interface', 'VLAN', 'VNI']
     output = tabulate(data_entries, headers)
     return output
+
 
 def _get_formatted_output_vni(data):
     data_entries = []
@@ -182,9 +191,10 @@ def _get_formatted_output_vni(data):
                 vlan = f'{vlan}-{vlan_end}'
             data_entries.append([interface, vlan])
 
-    headers = ["Interface", "VNI"]
+    headers = ['Interface', 'VNI']
     output = tabulate(data_entries, headers)
     return output
+
 
 def _get_formatted_output_fdb(data):
     data_entries = []
@@ -195,8 +205,8 @@ def _get_formatted_output_fdb(data):
         flags = ','.join(entry['flags'])
         data_entries.append([interface, mac, state, flags])
 
-    headers = ["Interface", "Mac address", "State", "Flags"]
-    output = tabulate(data_entries, headers, numalign="left")
+    headers = ['Interface', 'Mac address', 'State', 'Flags']
+    output = tabulate(data_entries, headers, numalign='left')
     return output
 
 
@@ -209,27 +219,32 @@ def _get_formatted_output_mdb(data):
             state = mdb_entry.get('state')
             flags = ','.join(mdb_entry.get('flags'))
             data_entries.append([interface, group, state, flags])
-    headers = ["Interface", "Group", "State", "Flags"]
+    headers = ['Interface', 'Group', 'State', 'Flags']
     output = tabulate(data_entries, headers)
     return output
+
 
 def _get_bridge_detail(iface):
     """Get interface detail statistics"""
     return call(f'vtysh -c "show interface {iface}"')
 
+
 def _get_bridge_detail_nexthop_group(iface):
     """Get interface detail nexthop_group statistics"""
     return call(f'vtysh -c "show interface {iface} nexthop-group"')
+
 
 def _get_bridge_detail_nexthop_group_raw(iface):
     out = cmd(f'vtysh -c "show interface {iface} nexthop-group"')
     return out
 
+
 def _get_bridge_detail_raw(iface):
     """Get interface detail json statistics"""
-    data =  cmd(f'vtysh -c "show interface {iface} json"')
+    data = cmd(f'vtysh -c "show interface {iface} json"')
     data_dict = json.loads(data)
     return data_dict
+
 
 def show(raw: bool):
     bridge_data = _get_raw_data_summary()
@@ -249,12 +264,14 @@ def show_vlan(raw: bool, tunnel: typing.Optional[bool]):
         else:
             return _get_formatted_output_vlan(bridge_vlan)
 
+
 def show_vni(raw: bool):
     bridge_vni = _get_raw_data_vni()
     if raw:
         return bridge_vni
     else:
         return _get_formatted_output_vni(bridge_vni)
+
 
 def show_fdb(raw: bool, interface: str):
     fdb_data = _get_raw_data_fdb(interface)
@@ -271,6 +288,7 @@ def show_mdb(raw: bool, interface: str):
     else:
         return _get_formatted_output_mdb(mdb_data)
 
+
 def show_detail(raw: bool, nexthop_group: typing.Optional[bool], interface: str):
     if raw:
         if nexthop_group:
@@ -282,6 +300,7 @@ def show_detail(raw: bool, nexthop_group: typing.Optional[bool], interface: str)
             return _get_bridge_detail_nexthop_group(interface)
         else:
             return _get_bridge_detail(interface)
+
 
 if __name__ == '__main__':
     try:

@@ -84,7 +84,7 @@ class TestNAT(VyOSUnitTestSHIM.TestCase):
         address_group = 'smoketest_addr'
         address_group_member = '192.0.2.1'
         interface_group = 'smoketest_ifaces'
-        interface_group_member = 'bond.99'
+        interface_group_member = 'eth0'
 
         self.cli_set(['firewall', 'group', 'address-group', address_group, 'address', address_group_member])
         self.cli_set(['firewall', 'group', 'interface-group', interface_group, 'interface', interface_group_member])

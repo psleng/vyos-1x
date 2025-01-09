@@ -50,6 +50,7 @@ from vyos import airbag
 airbag.enable()
 
 vyos_certbot_dir = directories['certbot']
+vyos_ca_certificates_dir = directories['ca_certificates']
 
 # keys to recursively search for under specified path
 sync_search = [
@@ -149,35 +150,15 @@ def get_config(config=None):
     if len(argv) > 1 and argv[1] == 'certbot_renew':
         pki['certbot_renew'] = {}
 
-    tmp = node_changed(conf, base + ['ca'], recursive=True, expand_nodes=Diff.DELETE | Diff.ADD)
-    if tmp:
-        if 'changed' not in pki: pki.update({'changed':{}})
-        pki['changed'].update({'ca' : tmp})
+    changed_keys = ['ca', 'certificate', 'dh', 'key-pair', 'openssh', 'openvpn']
 
-    tmp = node_changed(conf, base + ['certificate'], recursive=True, expand_nodes=Diff.DELETE | Diff.ADD)
-    if tmp:
-        if 'changed' not in pki: pki.update({'changed':{}})
-        pki['changed'].update({'certificate' : tmp})
+    for key in changed_keys:
+        tmp = node_changed(conf, base + [key], recursive=True, expand_nodes=Diff.DELETE | Diff.ADD)
 
-    tmp = node_changed(conf, base + ['dh'], recursive=True, expand_nodes=Diff.DELETE | Diff.ADD)
-    if tmp:
-        if 'changed' not in pki: pki.update({'changed':{}})
-        pki['changed'].update({'dh' : tmp})
+        if 'changed' not in pki:
+            pki.update({'changed':{}})
 
-    tmp = node_changed(conf, base + ['key-pair'], recursive=True, expand_nodes=Diff.DELETE | Diff.ADD)
-    if tmp:
-        if 'changed' not in pki: pki.update({'changed':{}})
-        pki['changed'].update({'key_pair' : tmp})
-
-    tmp = node_changed(conf, base + ['openssh'], recursive=True, expand_nodes=Diff.DELETE | Diff.ADD)
-    if tmp:
-        if 'changed' not in pki: pki.update({'changed':{}})
-        pki['changed'].update({'openssh' : tmp})
-
-    tmp = node_changed(conf, base + ['openvpn', 'shared-secret'], recursive=True, expand_nodes=Diff.DELETE | Diff.ADD)
-    if tmp:
-        if 'changed' not in pki: pki.update({'changed':{}})
-        pki['changed'].update({'openvpn' : tmp})
+        pki['changed'].update({key.replace('-', '_') : tmp})
 
     # We only merge on the defaults of there is a configuration at all
     if conf.exists(base):
@@ -417,9 +398,32 @@ def verify(pki):
 
     return None
 
+def cleanup_system_ca():
+    if not os.path.exists(vyos_ca_certificates_dir):
+        os.mkdir(vyos_ca_certificates_dir)
+    else:
+        for filename in os.listdir(vyos_ca_certificates_dir):
+            full_path = os.path.join(vyos_ca_certificates_dir, filename)
+            if os.path.isfile(full_path):
+                os.unlink(full_path)
+
 def generate(pki):
     if not pki:
+        cleanup_system_ca()
         return None
+
+    # Create or cleanup CA install directory
+    if 'changed' in pki and 'ca' in pki['changed']:
+        cleanup_system_ca()
+
+        if 'ca' in pki:
+            for ca, ca_conf in pki['ca'].items():
+                if 'system_install' in ca_conf:
+                    ca_obj = load_certificate(ca_conf['certificate'])
+                    ca_path = os.path.join(vyos_ca_certificates_dir, f'{ca}.crt')
+
+                    with open(ca_path, 'w') as f:
+                        f.write(encode_certificate(ca_obj))
 
     # Certbot renewal only needs to re-trigger the services to load up the
     # new PEM file
@@ -487,6 +491,7 @@ def apply(pki):
     systemd_certbot_name = 'certbot.timer'
     if not pki:
         call(f'systemctl stop {systemd_certbot_name}')
+        call('update-ca-certificates')
         return None
 
     has_certbot = False
@@ -503,6 +508,10 @@ def apply(pki):
 
     if 'changed' in pki:
         call_dependents()
+
+        # Rebuild ca-certificates bundle
+        if 'ca' in pki['changed']:
+            call('update-ca-certificates')
 
     return None
 

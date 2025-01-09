@@ -47,7 +47,7 @@
           <properties>
             <help>Server name</help>
             <constraint>
-              <regex>[-_a-zA-Z0-9]+</regex>
+              #include <include/constraint/alpha-numeric-hyphen-underscore.xml.i>
             </constraint>
             <constraintErrorMessage>Server name must be alphanumeric and can contain hyphen and underscores</constraintErrorMessage>
           </properties>

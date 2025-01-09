@@ -235,3 +235,29 @@ def convert_data(data) -> dict | list | tuple | str | int | float | bool | None:
     # which cannot be converted to JSON
     # for example: complex | range | memoryview
     return
+
+
+def encode_to_base64(input_string):
+    """
+    Encodes a given string to its base64 representation.
+
+    Args:
+        input_string (str): The string to be encoded.
+
+    Returns:
+        str: The base64-encoded version of the input string.
+
+    Example:
+        input_string = "Hello, World!"
+        encoded_string = encode_to_base64(input_string)
+        print(encoded_string)  # Output: SGVsbG8sIFdvcmxkIQ==
+    """
+    import base64
+    # Convert the string to bytes
+    byte_string = input_string.encode('utf-8')
+
+    # Encode the byte string to base64
+    encoded_string = base64.b64encode(byte_string)
+
+    # Decode the base64 bytes back to a string
+    return encoded_string.decode('utf-8')

@@ -258,6 +258,8 @@ def apply(conntrack):
 
     if 'log' in conntrack:
         call(f'systemctl restart vyos-conntrack-logger.service')
+    else:
+        call(f'systemctl stop vyos-conntrack-logger.service')
 
     return None
 

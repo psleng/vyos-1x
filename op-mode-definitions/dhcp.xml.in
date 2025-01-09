@@ -228,6 +228,23 @@
                   </tagNode>
                 </children>
               </node>
+              <node name="statistics">
+                <properties>
+                  <help>Show DHCPv6 server statistics</help>
+                </properties>
+                <command>${vyos_op_scripts_dir}/dhcp.py show_pool_statistics --family inet6</command>
+                <children>
+                  <tagNode name="pool">
+                    <properties>
+                      <help>Show DHCPv6 server statistics for a specific pool</help>
+                      <completionHelp>
+                        <path>service dhcpv6-server shared-network-name</path>
+                      </completionHelp>
+                    </properties>
+                    <command>${vyos_op_scripts_dir}/dhcp.py show_pool_statistics --family inet6 --pool $6</command>
+                  </tagNode>
+                </children>
+              </node>
             </children>
           </node>
         </children>

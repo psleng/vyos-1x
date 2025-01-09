@@ -37,6 +37,8 @@ from vyos.configsource import ConfigSourceString
 from vyos.configsource import ConfigSourceError
 from vyos.configdiff import get_commit_scripts
 from vyos.config import Config
+from vyos.frrender import FRRender
+from vyos.frrender import get_frrender_dict
 from vyos import ConfigError
 
 CFG_GROUP = 'vyattacfg'
@@ -56,6 +58,7 @@ else:
 
 SOCKET_PATH = 'ipc:///run/vyos-configd.sock'
 MAX_MSG_SIZE = 65535
+PAD_MSG_SIZE = 6
 
 # Response error codes
 R_SUCCESS = 1
@@ -256,25 +259,14 @@ def process_node_data(config, data, _last: bool = False) -> tuple[int, str]:
 
 
 def send_result(sock, err, msg):
-    msg_size = min(MAX_MSG_SIZE, len(msg)) if msg else 0
+    msg = msg if msg else ''
+    msg_size = min(MAX_MSG_SIZE, len(msg))
 
-    err_rep = err.to_bytes(1, byteorder=sys.byteorder)
-    logger.debug(f'Sending reply: {err}')
-    sock.send(err_rep)
+    err_rep = err.to_bytes(1)
+    msg_size_rep = f'{msg_size:#0{PAD_MSG_SIZE}x}'
 
-    # size req from vyshim client
-    size_req = sock.recv().decode()
-    logger.debug(f'Received request: {size_req}')
-    msg_size_rep = hex(msg_size).encode()
-    sock.send(msg_size_rep)
-    logger.debug(f'Sending reply: {msg_size}')
-
-    if msg_size > 0:
-        # send req is sent from vyshim client only if msg_size > 0
-        send_req = sock.recv().decode()
-        logger.debug(f'Received request: {send_req}')
-        sock.send(msg.encode())
-        logger.debug('Sending reply with output')
+    logger.debug(f'Sending reply: error_code {err} with output')
+    sock.send_multipart([err_rep, msg_size_rep.encode(), msg.encode()])
 
     write_stdout_log(script_stdout_log, msg)
 
@@ -317,8 +309,10 @@ if __name__ == '__main__':
     remove_if_file(configd_env_file)
     os.symlink(configd_env_set_file, configd_env_file)
 
-    config = None
+    # We only need one long-lived instance of FRRender
+    frr = FRRender()
 
+    config = None
     while True:
         #  Wait for next request from client
         msg = socket.recv().decode()
@@ -336,5 +330,12 @@ if __name__ == '__main__':
             if message['last'] and config:
                 scripts_called = getattr(config, 'scripts_called', [])
                 logger.debug(f'scripts_called: {scripts_called}')
+
+                if res == R_SUCCESS:
+                    tmp = get_frrender_dict(config)
+                    if frr.generate(tmp):
+                        # only apply a new FRR configuration if anything changed
+                        # in comparison to the previous applied configuration
+                        frr.apply()
         else:
             logger.critical(f'Unexpected message: {message}')

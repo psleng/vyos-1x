@@ -36,11 +36,13 @@ directories = {
   'isc_dhclient_dir' : '/run/dhclient',
   'dhcp6_client_dir' : '/run/dhcp6c',
   'vyos_configdir' : '/opt/vyatta/config',
-  'completion_dir' : f'{base_dir}/completion'
+  'completion_dir' : f'{base_dir}/completion',
+  'ca_certificates' : '/usr/local/share/ca-certificates/vyos'
 }
 
 config_status = '/tmp/vyos-config-status'
 api_config_state = '/run/http-api-state'
+frr_debug_enable = '/tmp/vyos.frr.debug'
 
 cfg_group = 'vyattacfg'
 

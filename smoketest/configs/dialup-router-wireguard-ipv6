@@ -1470,7 +1470,7 @@ system {
     }
     option {
         ctrl-alt-delete ignore
-        performance latency
+        performance network-latency
         reboot-on-panic
         startup-beep
     }

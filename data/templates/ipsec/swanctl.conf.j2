@@ -87,7 +87,11 @@ secrets {
         id-{{ gen_uuid }} = "{{ id }}"
 {%             endfor %}
 {%         endif %}
+{%         if psk_config.secret_type is vyos_defined('base64') %}
+        secret = 0s{{ psk_config.secret }}
+{%         elif psk_config.secret_type is vyos_defined('plaintext') %}
         secret = "{{ psk_config.secret }}"
+{%         endif %}
     }
 {%     endfor %}
 {% endif %}

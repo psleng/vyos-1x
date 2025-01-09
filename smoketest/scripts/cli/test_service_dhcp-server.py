@@ -557,6 +557,7 @@ class TestServiceDHCPServer(VyOSUnitTestSHIM.TestCase):
         self.cli_set(pool + ['subnet-id', '1'])
         self.cli_set(pool + ['option', 'default-router', router])
         self.cli_set(pool + ['exclude', router])
+        self.cli_set(pool + ['range', '0', 'option', 'default-router', router])
         self.cli_set(pool + ['range', '0', 'start', range_0_start])
         self.cli_set(pool + ['range', '0', 'stop', range_0_stop])
 
@@ -569,6 +570,11 @@ class TestServiceDHCPServer(VyOSUnitTestSHIM.TestCase):
         self.verify_config_value(obj, ['Dhcp4', 'shared-networks'], 'name', 'EXCLUDE-TEST')
         self.verify_config_value(obj, ['Dhcp4', 'shared-networks', 0, 'subnet4'], 'subnet', subnet)
 
+        pool_obj = {
+            'pool': f'{range_0_start} - {range_0_stop}',
+            'option-data': [{'name': 'routers', 'data': router}]
+        }
+
         # Verify options
         self.verify_config_object(
                 obj,
@@ -579,7 +585,7 @@ class TestServiceDHCPServer(VyOSUnitTestSHIM.TestCase):
         self.verify_config_object(
                 obj,
                 ['Dhcp4', 'shared-networks', 0, 'subnet4', 0, 'pools'],
-                {'pool': f'{range_0_start} - {range_0_stop}'})
+                pool_obj)
 
         # Check for running process
         self.assertTrue(process_named_running(PROCESS_NAME))
@@ -600,6 +606,7 @@ class TestServiceDHCPServer(VyOSUnitTestSHIM.TestCase):
         self.cli_set(pool + ['subnet-id', '1'])
         self.cli_set(pool + ['option', 'default-router', router])
         self.cli_set(pool + ['exclude', exclude_addr])
+        self.cli_set(pool + ['range', '0', 'option', 'default-router', router])
         self.cli_set(pool + ['range', '0', 'start', range_0_start])
         self.cli_set(pool + ['range', '0', 'stop', range_0_stop])
 
@@ -612,6 +619,16 @@ class TestServiceDHCPServer(VyOSUnitTestSHIM.TestCase):
         self.verify_config_value(obj, ['Dhcp4', 'shared-networks'], 'name', 'EXCLUDE-TEST-2')
         self.verify_config_value(obj, ['Dhcp4', 'shared-networks', 0, 'subnet4'], 'subnet', subnet)
 
+        pool_obj = {
+            'pool': f'{range_0_start} - {range_0_stop_excl}',
+            'option-data': [{'name': 'routers', 'data': router}]
+        }
+
+        pool_exclude_obj = {
+            'pool': f'{range_0_start_excl} - {range_0_stop}',
+            'option-data': [{'name': 'routers', 'data': router}]
+        }
+
         # Verify options
         self.verify_config_object(
                 obj,
@@ -621,12 +638,12 @@ class TestServiceDHCPServer(VyOSUnitTestSHIM.TestCase):
         self.verify_config_object(
                 obj,
                 ['Dhcp4', 'shared-networks', 0, 'subnet4', 0, 'pools'],
-                {'pool': f'{range_0_start} - {range_0_stop_excl}'})
+                pool_obj)
 
         self.verify_config_object(
                 obj,
                 ['Dhcp4', 'shared-networks', 0, 'subnet4', 0, 'pools'],
-                {'pool': f'{range_0_start_excl} - {range_0_stop}'})
+                pool_exclude_obj)
 
         # Check for running process
         self.assertTrue(process_named_running(PROCESS_NAME))

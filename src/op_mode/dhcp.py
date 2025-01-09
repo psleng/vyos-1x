@@ -19,6 +19,7 @@ import sys
 import typing
 
 from datetime import datetime
+from datetime import timezone
 from glob import glob
 from ipaddress import ip_address
 from tabulate import tabulate
@@ -62,7 +63,7 @@ def _format_hex_string(in_str):
     return out_str
 
 
-def _find_list_of_dict_index(lst, key='ip', value='') -> int:
+def _find_list_of_dict_index(lst, key='ip', value=''):
     """
     Find the index entry of list of dict matching the dict value
     Exampe:
@@ -82,7 +83,7 @@ def _get_raw_server_leases(family='inet', pool=None, sorted=None, state=[], orig
     inet_suffix = '6' if family == 'inet6' else '4'
     try:
         leases = kea_get_leases(inet_suffix)
-    except:
+    except Exception:
         raise vyos.opmode.DataUnavailable('Cannot fetch DHCP server lease information')
 
     if pool is None:
@@ -92,7 +93,7 @@ def _get_raw_server_leases(family='inet', pool=None, sorted=None, state=[], orig
 
     try:
         active_config = kea_get_active_config(inet_suffix)
-    except:
+    except Exception:
         raise vyos.opmode.DataUnavailable('Cannot fetch DHCP server configuration')
 
     data = []
@@ -100,8 +101,8 @@ def _get_raw_server_leases(family='inet', pool=None, sorted=None, state=[], orig
         lifetime = lease['valid-lft']
         expiry = (lease['cltt'] + lifetime)
 
-        lease['start_timestamp'] = datetime.utcfromtimestamp(expiry - lifetime)
-        lease['expire_timestamp'] = datetime.utcfromtimestamp(expiry) if expiry else None
+        lease['start_timestamp'] = datetime.fromtimestamp(expiry - lifetime, timezone.utc)
+        lease['expire_timestamp'] = datetime.fromtimestamp(expiry, timezone.utc) if expiry else None
 
         data_lease = {}
         data_lease['ip'] = lease['ip-address']
@@ -110,11 +111,14 @@ def _get_raw_server_leases(family='inet', pool=None, sorted=None, state=[], orig
         data_lease['pool'] = kea_get_pool_from_subnet_id(active_config, inet_suffix, lease['subnet-id']) if active_config else '-'
         data_lease['end'] = lease['expire_timestamp'].timestamp() if lease['expire_timestamp'] else None
         data_lease['origin'] = 'local' # TODO: Determine remote in HA
+        data_lease['hostname'] = lease.get('hostname', '-')
+        # remove trailing dot to ensure consistency for `vyos-hostsd-client`
+        if data_lease['hostname'][-1] == '.':
+            data_lease['hostname'] = data_lease['hostname'][:-1]
 
         if family == 'inet':
             data_lease['mac'] = lease['hw-address']
             data_lease['start'] = lease['start_timestamp'].timestamp()
-            data_lease['hostname'] = lease['hostname']
 
         if family == 'inet6':
             data_lease['last_communication'] = lease['start_timestamp'].timestamp()
@@ -128,12 +132,12 @@ def _get_raw_server_leases(family='inet', pool=None, sorted=None, state=[], orig
         data_lease['remaining'] = '-'
 
         if lease['valid-lft'] > 0:
-            data_lease['remaining'] = lease['expire_timestamp'] - datetime.utcnow()
+            data_lease['remaining'] = lease['expire_timestamp'] - datetime.now(timezone.utc)
 
             if data_lease['remaining'].days >= 0:
                 # substraction gives us a timedelta object which can't be formatted with strftime
                 # so we use str(), split gets rid of the microseconds
-                data_lease['remaining'] = str(data_lease["remaining"]).split('.')[0]
+                data_lease['remaining'] = str(data_lease['remaining']).split('.')[0]
 
         # Do not add old leases
         if data_lease['remaining'] != '' and data_lease['pool'] in pool and data_lease['state'] != 'free':
@@ -148,7 +152,8 @@ def _get_raw_server_leases(family='inet', pool=None, sorted=None, state=[], orig
                 checked.append(addr)
             else:
                 idx = _find_list_of_dict_index(data, key='ip', value=addr)
-                data.pop(idx)
+                if idx is not None:
+                    data.pop(idx)
 
     if sorted:
         if sorted == 'ip':
@@ -279,22 +284,36 @@ def _get_raw_server_static_mappings(family='inet', pool=None, sorted=None):
 
     if sorted:
         if sorted == 'ip':
-            data.sort(key = lambda x:ip_address(x['ip-address']))
+            if family == 'inet6':
+                mappings.sort(key = lambda x:ip_address(x['ipv6-address']))
+            else:
+                mappings.sort(key = lambda x:ip_address(x['ip-address']))
         else:
-            data.sort(key = lambda x:x[sorted])
+            mappings.sort(key = lambda x:x[sorted])
     return mappings
 
 def _get_formatted_server_static_mappings(raw_data, family='inet'):
     data_entries = []
-    for entry in raw_data:
-        pool = entry.get('pool')
-        subnet = entry.get('subnet')
-        name = entry.get('name')
-        ip_addr = entry.get('ip-address', 'N/A')
-        mac_addr = entry.get('mac', 'N/A')
-        duid = entry.get('duid', 'N/A')
-        description = entry.get('description', 'N/A')
-        data_entries.append([pool, subnet, name, ip_addr, mac_addr, duid, description])
+    if family == 'inet':
+        for entry in raw_data:
+            pool = entry.get('pool')
+            subnet = entry.get('subnet')
+            name = entry.get('name')
+            ip_addr = entry.get('ip-address', 'N/A')
+            mac_addr = entry.get('mac', 'N/A')
+            duid = entry.get('duid', 'N/A')
+            description = entry.get('description', 'N/A')
+            data_entries.append([pool, subnet, name, ip_addr, mac_addr, duid, description])
+    elif family == 'inet6':
+        for entry in raw_data:
+            pool = entry.get('pool')
+            subnet = entry.get('subnet')
+            name = entry.get('name')
+            ip_addr = entry.get('ipv6-address', 'N/A')
+            mac_addr = entry.get('mac', 'N/A')
+            duid = entry.get('duid', 'N/A')
+            description = entry.get('description', 'N/A')
+            data_entries.append([pool, subnet, name, ip_addr, mac_addr, duid, description])
 
     headers = ['Pool', 'Subnet', 'Name', 'IP Address', 'MAC Address', 'DUID', 'Description']
     output = tabulate(data_entries, headers, numalign='left')
@@ -445,7 +464,8 @@ def _get_raw_client_leases(family='inet', interface=None):
 
         if 'interface' in tmp:
             vrf = get_interface_vrf(tmp['interface'])
-            if vrf: tmp.update({'vrf' : vrf})
+            if vrf:
+                tmp.update({'vrf' : vrf})
 
         lease_data.append(tmp)
 

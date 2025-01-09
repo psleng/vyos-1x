@@ -203,7 +203,7 @@ class TestSystemNTP(VyOSUnitTestSHIM.TestCase):
             self.cli_set(base_path + ['server', server, 'ptp'])
 
         self.cli_set(base_path + ['ptp', 'port', ptp_port])
-        self.cli_set(base_path + ['ptp', 'timestamp', 'interface', 'all'])
+        self.cli_set(base_path + ['timestamp', 'interface', 'all'])
 
         # commit changes
         self.cli_commit()

@@ -7,31 +7,25 @@
     <leafNode name="in">
       <properties>
         <help>Access list to apply to input packets</help>
-        <valueHelp>
-          <format>u32</format>
-          <description>Access list to apply to input packets</description>
-        </valueHelp>
         <completionHelp>
           <path>policy access-list6</path>
         </completionHelp>
-        <constraint>
-          <validator name="numeric" argument="--range 0-4294967295"/>
-        </constraint>
+        <valueHelp>
+          <format>txt</format>
+          <description>Name of IPv6 access-list</description>
+        </valueHelp>
       </properties>
     </leafNode>
     <leafNode name="out">
       <properties>
         <help>Access list to apply to output packets</help>
-        <valueHelp>
-          <format>u32</format>
-          <description>Access list to apply to output packets</description>
-        </valueHelp>
         <completionHelp>
           <path>policy access-list6</path>
         </completionHelp>
-        <constraint>
-          <validator name="numeric" argument="--range 0-4294967295"/>
-        </constraint>
+        <valueHelp>
+          <format>txt</format>
+          <description>Name of IPv6 access-list</description>
+        </valueHelp>
       </properties>
     </leafNode>
   </children>

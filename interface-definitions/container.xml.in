@@ -131,7 +131,7 @@
             <properties>
               <help>Add custom environment variables</help>
               <constraint>
-                <regex>[-_a-zA-Z0-9]+</regex>
+                #include <include/constraint/alpha-numeric-hyphen-underscore.xml.i>
               </constraint>
               <constraintErrorMessage>Environment variable name must be alphanumeric and can contain hyphen and underscores</constraintErrorMessage>
             </properties>
@@ -275,6 +275,7 @@
             </properties>
             <defaultValue>64</defaultValue>
           </leafNode>
+          #include <include/name-server-ipv4-ipv6.xml.i>
           <tagNode name="network">
             <properties>
               <help>Attach user defined network to container</help>
@@ -501,6 +502,7 @@
         </properties>
         <children>
           #include <include/generic-description.xml.i>
+          #include <include/interface/mtu-68-16000.xml.i>
           <leafNode name="prefix">
             <properties>
               <help>Prefix which allocated to that network</help>

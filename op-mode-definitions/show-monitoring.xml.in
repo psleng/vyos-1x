@@ -2,12 +2,68 @@
 <interfaceDefinition>
   <node name="show">
     <children>
-      <leafNode name="monitoring">
+      <node name="monitoring">
         <properties>
           <help>Show currently monitored services</help>
         </properties>
-        <command>vtysh -c "show debugging"</command>
-      </leafNode>
+        <children>
+          <node name="frr">
+            <properties>
+              <help>Show currently monitored FRR services</help>
+            </properties>
+            <command>vtysh -c "show debugging"</command>
+            <children>
+              <node name="zebra">
+                <properties>
+                  <help>Show Zebra routing information</help>
+                </properties>
+                <command>${vyos_op_scripts_dir}/vtysh_wrapper.sh "show ${@:4}"</command>
+                <children>
+                  <node name="client">
+                    <properties>
+                      <help>Client information</help>
+                    </properties>
+                    <children>
+                      <node name="summary">
+                        <properties>
+                          <help>Brief summary</help>
+                        </properties>
+                        <command>${vyos_op_scripts_dir}/vtysh_wrapper.sh "show ${@:4}"</command>
+                      </node>
+                    </children>
+                  </node>
+                  <node name="dplane">
+                    <properties>
+                      <help>Zebra dataplane information</help>
+                    </properties>
+                    <command>${vyos_op_scripts_dir}/vtysh_wrapper.sh "show ${@:4}"</command>
+                  </node>
+                  <node name="router">
+                    <properties>
+                      <help>Zebra router information</help>
+                    </properties>
+                    <children>
+                      <node name="table">
+                        <properties>
+                          <help>Zebra routing table information</help>
+                        </properties>
+                        <children>
+                          <node name="summary">
+                            <properties>
+                              <help>Summary information</help>
+                            </properties>
+                            <command>${vyos_op_scripts_dir}/vtysh_wrapper.sh "show ${@:4}"</command>
+                          </node>
+                        </children>
+                      </node>
+                    </children>
+                  </node>
+                </children>
+              </node>
+            </children>
+          </node>
+        </children>
+      </node>
     </children>
   </node>
 </interfaceDefinition>

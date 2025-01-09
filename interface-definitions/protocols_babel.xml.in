@@ -71,42 +71,7 @@
                   <help>Redistribute IPv4 routes</help>
                 </properties>
                 <children>
-                  <leafNode name="bgp">
-                    <properties>
-                      <help>Redistribute BGP routes</help>
-                      <valueless/>
-                    </properties>
-                  </leafNode>
-                  <leafNode name="connected">
-                    <properties>
-                      <help>Redistribute connected routes</help>
-                      <valueless/>
-                    </properties>
-                  </leafNode>
-                  <leafNode name="eigrp">
-                    <properties>
-                      <help>Redistribute EIGRP routes</help>
-                      <valueless/>
-                    </properties>
-                  </leafNode>
-                  <leafNode name="isis">
-                    <properties>
-                      <help>Redistribute IS-IS routes</help>
-                      <valueless/>
-                    </properties>
-                  </leafNode>
-                  <leafNode name="kernel">
-                    <properties>
-                      <help>Redistribute kernel routes</help>
-                      <valueless/>
-                    </properties>
-                  </leafNode>
-                  <leafNode name="nhrp">
-                    <properties>
-                      <help>Redistribute NHRP routes</help>
-                      <valueless/>
-                    </properties>
-                  </leafNode>
+                  #include <include/babel/redistribute-common.xml.i>
                   <leafNode name="ospf">
                     <properties>
                       <help>Redistribute OSPF routes</help>
@@ -119,12 +84,6 @@
                       <valueless/>
                     </properties>
                   </leafNode>
-                  <leafNode name="static">
-                    <properties>
-                      <help>Redistribute static routes</help>
-                      <valueless/>
-                    </properties>
-                  </leafNode>
                 </children>
               </node>
               <node name="ipv6">
@@ -132,51 +91,16 @@
                   <help>Redistribute IPv6 routes</help>
                 </properties>
                 <children>
-                  <leafNode name="bgp">
-                    <properties>
-                      <help>Redistribute BGP routes</help>
-                      <valueless/>
-                    </properties>
-                  </leafNode>
-                  <leafNode name="connected">
-                    <properties>
-                      <help>Redistribute connected routes</help>
-                      <valueless/>
-                    </properties>
-                  </leafNode>
-                  <leafNode name="isis">
-                    <properties>
-                      <help>Redistribute IS-IS routes</help>
-                      <valueless/>
-                    </properties>
-                  </leafNode>
-                  <leafNode name="kernel">
-                    <properties>
-                      <help>Redistribute kernel routes</help>
-                      <valueless/>
-                    </properties>
-                  </leafNode>
-                  <leafNode name="nhrp">
-                    <properties>
-                      <help>Redistribute NHRP routes</help>
-                      <valueless/>
-                    </properties>
-                  </leafNode>
+                  #include <include/babel/redistribute-common.xml.i>
                   <leafNode name="ospfv3">
                     <properties>
-                      <help>Redistribute OSPFv3 routes</help>
+                      <help>Open Shortest Path First (IPv6) (OSPFv3)</help>
                       <valueless/>
                     </properties>
                   </leafNode>
                   <leafNode name="ripng">
                     <properties>
-                      <help>Redistribute RIPng routes</help>
-                      <valueless/>
-                    </properties>
-                  </leafNode>
-                  <leafNode name="static">
-                    <properties>
-                      <help>Redistribute static routes</help>
+                      <help>Routing Information Protocol next-generation (IPv6) (RIPng)</help>
                       <valueless/>
                     </properties>
                   </leafNode>

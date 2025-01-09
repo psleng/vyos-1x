@@ -46,6 +46,13 @@ systemd_action_file = '/lib/systemd/system/ctrl-alt-del.target'
 usb_autosuspend = r'/etc/udev/rules.d/40-usb-autosuspend.rules'
 kernel_dynamic_debug = r'/sys/kernel/debug/dynamic_debug/control'
 time_format_to_locale = {'12-hour': 'en_US.UTF-8', '24-hour': 'en_GB.UTF-8'}
+tuned_profiles = {
+    'power-save': 'powersave',
+    'network-latency': 'network-latency',
+    'network-throughput': 'network-throughput',
+    'virtual-guest': 'virtual-guest',
+    'virtual-host': 'virtual-host',
+}
 
 
 def get_config(config=None):
@@ -171,7 +178,10 @@ def apply(options):
         # wait until daemon has started before sending configuration
         while not is_systemd_service_running('tuned.service'):
             sleep(0.250)
-        cmd('tuned-adm profile network-{performance}'.format(**options))
+        performance = ' '.join(
+            list(tuned_profiles[profile] for profile in options['performance'])
+        )
+        cmd(f'tuned-adm profile {performance}')
     else:
         cmd('systemctl stop tuned.service')
 

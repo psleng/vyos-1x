@@ -1,7 +1,8 @@
 #
 # VyOS modifications to sudo configuration
 #
-Defaults syslog_goodpri=info
+Defaults !syslog
+Defaults !pam_session
 Defaults env_keep+=VYATTA_*
 
 #

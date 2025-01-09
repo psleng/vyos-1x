@@ -23,8 +23,8 @@ from vyos.utils.process import is_systemd_service_running
 from vyos.utils.dict import dict_to_paths
 
 CLI_SHELL_API = '/bin/cli-shell-api'
-SET = '/opt/vyatta/sbin/my_set'
-DELETE = '/opt/vyatta/sbin/my_delete'
+SET = '/usr/libexec/vyos/vyconf/vy_set'
+DELETE = '/usr/libexec/vyos/vyconf/vy_delete'
 COMMENT = '/opt/vyatta/sbin/my_comment'
 COMMIT = '/opt/vyatta/sbin/my_commit'
 DISCARD = '/opt/vyatta/sbin/my_discard'
@@ -66,6 +66,16 @@ REBOOT = ['/opt/vyatta/bin/vyatta-op-cmd-wrapper', 'reboot']
 POWEROFF = ['/opt/vyatta/bin/vyatta-op-cmd-wrapper', 'poweroff']
 OP_CMD_ADD = ['/opt/vyatta/bin/vyatta-op-cmd-wrapper', 'add']
 OP_CMD_DELETE = ['/opt/vyatta/bin/vyatta-op-cmd-wrapper', 'delete']
+TRACEROUTE = [
+    '/usr/libexec/vyos/op_mode/mtr_execute.py',
+    'mtr',
+    '--for-api',
+    '--report-mode',
+    '--report-cycles',
+    '1',
+    '--json',
+    '--host',
+]
 
 # Default "commit via" string
 APP = 'vyos-http-api'
@@ -334,4 +344,8 @@ class ConfigSession(object):
 
     def show_container_image(self):
         out = self.__run_command(SHOW + ['container', 'image'])
+        return out
+
+    def traceroute(self, host):
+        out = self.__run_command(TRACEROUTE + [host])
         return out

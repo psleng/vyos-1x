@@ -67,9 +67,9 @@ binddevice {{ interface }}
 {%     endif %}
 {% endif %}
 
-{% if ptp.timestamp.interface is vyos_defined %}
+{% if timestamp.interface is vyos_defined %}
 # Enable hardware timestamping on the specified interfaces
-{%     for iface, iface_config in ptp.timestamp.interface.items() %}
+{%     for iface, iface_config in timestamp.interface.items() %}
 {%         if iface == "all" %}
 {%             set iface = "*" %}
 {%         endif %}

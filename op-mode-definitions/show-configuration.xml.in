@@ -23,13 +23,6 @@
             <!-- no admin check -->
             <command>cli-shell-api showCfg --show-active-only | vyos-config-to-commands</command>
           </node>
-          <node name="files">
-            <properties>
-              <help> Show available saved configurations </help>
-            </properties>
-            <!-- no admin check -->
-            <command>${vyos_op_scripts_dir}/show_configuration_files.sh</command>
-          </node>
           <node name="json">
             <properties>
               <help>Show running configuration in JSON format</help>
