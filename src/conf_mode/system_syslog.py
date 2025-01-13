@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 #
-# Copyright (C) 2018-2024 VyOS maintainers and contributors
+# Copyright (C) 2018-2025 VyOS maintainers and contributors
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2 or later as
@@ -22,15 +22,15 @@ from vyos.base import Warning
 from vyos.config import Config
 from vyos.configdict import is_node_changed
 from vyos.configverify import verify_vrf
+from vyos.utils.network import is_addr_assigned
 from vyos.utils.process import call
 from vyos.template import render
 from vyos import ConfigError
 from vyos import airbag
 airbag.enable()
 
-rsyslog_conf = '/etc/rsyslog.d/00-vyos.conf'
+rsyslog_conf = '/run/rsyslog/rsyslog.conf'
 logrotate_conf = '/etc/logrotate.d/vyos-rsyslog'
-systemd_override = r'/run/systemd/system/rsyslog.service.d/override.conf'
 
 def get_config(config=None):
     if config:
@@ -70,8 +70,8 @@ def verify(syslog):
     if not syslog:
         return None
 
-    if 'host' in syslog:
-         for host, host_options in syslog['host'].items():
+    if 'remote' in syslog:
+         for host, host_options in syslog['remote'].items():
              if 'protocol' in host_options and host_options['protocol'] == 'udp':
                  if 'format' in host_options and 'octet_counted' in host_options['format']:
                      Warning(f'Syslog UDP transport for "{host}" should not use octet-counted format!')
@@ -88,11 +88,7 @@ def generate(syslog):
         return None
 
     render(rsyslog_conf, 'rsyslog/rsyslog.conf.j2', syslog)
-    render(systemd_override, 'rsyslog/override.conf.j2', syslog)
     render(logrotate_conf, 'rsyslog/logrotate.j2', syslog)
-
-    # Reload systemd manager configuration
-    call('systemctl daemon-reload')
     return None
 
 def apply(syslog):

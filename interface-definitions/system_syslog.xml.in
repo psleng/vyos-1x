@@ -10,7 +10,7 @@
         <children>
           <tagNode name="remote">
             <properties>
-              <help>Logging to remote host</help>
+              <help>Log to remote host</help>
               <constraint>
                 <validator name="ip-address"/>
                 <validator name="fqdn"/>
@@ -59,21 +59,26 @@
           </tagNode>
           <node name="global">
             <properties>
-              <help>Logging to system standard location</help>
+              <help>Log to standard system location /var/log/messages</help>
             </properties>
             <children>
               #include <include/syslog-facility.xml.i>
               <node name="marker">
                 <properties>
-                  <help>mark messages sent to syslog</help>
+                  <help>Mark messages sent to syslog</help>
                 </properties>
                 <children>
                   <leafNode name="interval">
                     <properties>
-                      <help>time interval how often a mark message is being sent in seconds</help>
+                      <help>Mark message interval</help>
+                      <valueHelp>
+                        <format>u32:1-65535</format>
+                        <description>Time in seconds</description>
+                      </valueHelp>
                       <constraint>
-                        <validator name="numeric" argument="--positive"/>
+                        <validator name="numeric" argument="--range 1-86400"/>
                       </constraint>
+                      <constraintErrorMessage>Port number must be in range 1 to 86400</constraintErrorMessage>
                     </properties>
                     <defaultValue>1200</defaultValue>
                   </leafNode>
@@ -89,7 +94,7 @@
           </node>
           <node name="console">
             <properties>
-              <help>logging to serial console</help>
+              <help>Log to system console (/dev/console)</help>
             </properties>
             <children>
               #include <include/syslog-facility.xml.i>

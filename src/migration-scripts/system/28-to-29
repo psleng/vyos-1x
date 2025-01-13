@@ -16,6 +16,7 @@
 # T6989:
 #   - remove syslog arbitrary file logging
 #   - remove syslog user console logging
+#   - rename "host" to "remote"
 
 from vyos.configtree import ConfigTree
 
@@ -24,14 +25,16 @@ base = ['system', 'syslog']
 def migrate(config: ConfigTree) -> None:
     if not config.exists(base):
         return
-
+    # Drop support for custom file logging
     if config.exists(base + ['file']):
         config.delete(base + ['file'])
 
+    # Drop support for logging to a user tty
+    # This should be dynamically added via an op-mode command like "terminal monitor"
     if config.exists(base + ['user']):
         config.delete(base + ['user'])
 
-    # rename host -> remote
+    # Rename host x.x.x.x -> remote x.x.x.x
     if config.exists(base + ['host']):
         config.set(base + ['remote'])
         config.set_tag(base + ['remote'])
