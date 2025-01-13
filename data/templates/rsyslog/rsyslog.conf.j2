@@ -113,6 +113,10 @@ if prifilt("{{ tmp | join(',') }}") then {
         template="SyslogProtocol23Format"
 {%             endif %}
         TCP_Framing="{{ 'octed-counted' if remote_options.format.octet_counted is vyos_defined else 'traditional' }}"
+{%             if source_address is vyos_defined %}
+        # Sender IP address
+        Address="{{ source_address }}"
+{%             endif %}
 {%             if vrf is vyos_defined %}
         Device="{{ vrf }}"
 {%             endif %}

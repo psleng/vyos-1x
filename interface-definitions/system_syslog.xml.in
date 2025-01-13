@@ -100,6 +100,7 @@
               #include <include/syslog-facility.xml.i>
             </children>
           </node>
+          #include <include/source-address-ipv4-ipv6.xml.i>
           #include <include/interface/vrf.xml.i>
         </children>
       </node>

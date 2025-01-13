@@ -78,6 +78,13 @@ def verify(syslog):
 
     verify_vrf(syslog)
 
+    if 'source_address' in syslog:
+        syslog_vrf = None
+        if 'vrf' in syslog:
+            syslog_vrf = syslog['vrf']
+        if not is_addr_assigned(syslog['source_address'], syslog_vrf):
+            raise ConfigError('No interface with given address specified!')
+
 def generate(syslog):
     if not syslog:
         if os.path.exists(rsyslog_conf):
