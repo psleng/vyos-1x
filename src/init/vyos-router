@@ -386,6 +386,8 @@ gen_duid ()
 {
     DUID_FILE="/var/lib/dhcpv6/dhcp6c_duid"
     UUID_FILE="/sys/class/dmi/id/product_uuid"
+    # PSL: non-x86 (e.g. arm) has no DMI. machine-id is the Debian way.
+    test -f $UUID_FILE || UUID_FILE="/var/lib/dbus/machine-id"
     UUID_FILE_ALT="/sys/class/dmi/id/product_serial"
     if [ ! -f ${UUID_FILE} ] && [ ! -f ${UUID_FILE_ALT} ]; then
         return 1
