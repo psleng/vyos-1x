@@ -16,6 +16,7 @@
 # T6989:
 #   - remove syslog arbitrary file logging
 #   - remove syslog user console logging
+#   - move "global preserve-fqdn" one CLI level up
 #   - rename "host" to "remote"
 
 from vyos.configtree import ConfigTree
@@ -33,6 +34,12 @@ def migrate(config: ConfigTree) -> None:
     # This should be dynamically added via an op-mode command like "terminal monitor"
     if config.exists(base + ['user']):
         config.delete(base + ['user'])
+
+    # Move "global preserve-fqdn" one CLI level up, as it relates to all
+    # logging targets (console, global and remote)
+    if config.exists(base + ['global', 'preserve-fqdn']):
+        config.delete(base + ['global', 'preserve-fqdn'])
+        config.set(base + ['preserve-fqdn'])
 
     # Rename host x.x.x.x -> remote x.x.x.x
     if config.exists(base + ['host']):

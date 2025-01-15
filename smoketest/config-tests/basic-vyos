@@ -95,7 +95,7 @@ set system syslog console facility mail level 'info'
 set system syslog global facility all level 'info'
 set system syslog global facility auth level 'info'
 set system syslog global facility local7 level 'debug'
-set system syslog global preserve-fqdn
+set system syslog preserve-fqdn
 set system syslog remote syslog.vyos.net facility auth level 'warning'
 set system syslog remote syslog.vyos.net facility local7 level 'notice'
 set system syslog remote syslog.vyos.net format octet-counted

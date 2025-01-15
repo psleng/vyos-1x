@@ -53,22 +53,25 @@ def get_config(config=None):
     if syslog.from_defaults(['global']):
         del syslog['global']
 
-    if (
-        'global' in syslog
-        and 'preserve_fqdn' in syslog['global']
-        and conf.exists(['system', 'host-name'])
-        and conf.exists(['system', 'domain-name'])
-    ):
-        hostname = conf.return_value(['system', 'host-name'])
-        domain = conf.return_value(['system', 'domain-name'])
-        fqdn = f'{hostname}.{domain}'
-        syslog['global']['local_host_name'] = fqdn
+    if 'preserve_fqdn' in syslog:
+        if conf.exists(['system', 'host-name']):
+            tmp = conf.return_value(['system', 'host-name'])
+            syslog['preserve_fqdn']['host_name'] = tmp
+        if conf.exists(['system', 'domain-name']):
+            tmp  = conf.return_value(['system', 'domain-name'])
+            syslog['preserve_fqdn']['domain_name'] = tmp
 
     return syslog
 
 def verify(syslog):
     if not syslog:
         return None
+
+    if 'preserve_fqdn' in syslog:
+        if 'host_name' not in syslog['preserve_fqdn']:
+            Warning('No "system host-name" defined - cannot set syslog FQDN!')
+        if 'domain_name' not in syslog['preserve_fqdn']:
+            Warning('No "system domain-name" defined - cannot set syslog FQDN!')
 
     if 'remote' in syslog:
          for host, host_options in syslog['remote'].items():

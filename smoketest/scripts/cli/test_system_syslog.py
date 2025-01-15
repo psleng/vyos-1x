@@ -86,7 +86,7 @@ class TestRSYSLOGService(VyOSUnitTestSHIM.TestCase):
 
         self.cli_set(['system', 'host-name', hostname])
         self.cli_set(['system', 'domain-name', domain_name])
-        self.cli_set(base_path + ['global', 'preserve-fqdn'])
+        self.cli_set(base_path + ['preserve-fqdn'])
 
         for tmp, tmp_options in facility.items():
             level = tmp_options['level']

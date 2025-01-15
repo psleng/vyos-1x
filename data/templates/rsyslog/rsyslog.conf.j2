@@ -51,13 +51,13 @@ global(workDirectory="/var/spool/rsyslog")
 # Load the immark module for periodic --MARK-- message capability
 module(load="immark" interval="{{ global.marker.interval }}")
 {% endif %}
-{% if global.preserve_fqdn is vyos_defined %}
+{% if preserve_fqdn is vyos_defined %}
 # Preserve the fully qualified domain name (FQDN) in log messages
 global(preserveFQDN="on")
-{% endif %}
-{% if global.local_host_name is vyos_defined %}
+{%     if preserve_fqdn.host_name is vyos_defined and preserve_fqdn.domain_name is vyos_defined %}
 # Set the local hostname for log messages
-global(localHostname="{{ global.local_host_name }}")
+global(localHostname="{{ preserve_fqdn.host_name }}.{{ preserve_fqdn.domain_name }}")
+{%     endif %}
 {% endif %}
 
 #### GLOBAL LOGGING ####

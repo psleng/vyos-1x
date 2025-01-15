@@ -8,6 +8,14 @@
           <priority>400</priority>
         </properties>
         <children>
+          <node name="console">
+            <properties>
+              <help>Log to system console (/dev/console)</help>
+            </properties>
+            <children>
+              #include <include/syslog-facility.xml.i>
+            </children>
+          </node>
           <tagNode name="remote">
             <properties>
               <help>Log to remote host</help>
@@ -84,22 +92,14 @@
                   </leafNode>
                 </children>
               </node>
-              <leafNode name="preserve-fqdn">
-                <properties>
-                  <help>uses FQDN for logging</help>
-                  <valueless/>
-                </properties>
-              </leafNode>
             </children>
           </node>
-          <node name="console">
+          <leafNode name="preserve-fqdn">
             <properties>
-              <help>Log to system console (/dev/console)</help>
+              <help>Always include domain portion in hostname</help>
+              <valueless/>
             </properties>
-            <children>
-              #include <include/syslog-facility.xml.i>
-            </children>
-          </node>
+          </leafNode>
           #include <include/source-address-ipv4-ipv6.xml.i>
           #include <include/interface/vrf.xml.i>
         </children>
