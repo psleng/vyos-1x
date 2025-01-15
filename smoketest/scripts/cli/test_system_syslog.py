@@ -75,8 +75,7 @@ class TestRSYSLOGService(VyOSUnitTestSHIM.TestCase):
     def test_global(self):
         hostname = 'vyos123'
         domain_name = 'example.local'
-        default_marker_interval = default_value(base_path + ['global',
-            'marker', 'interval'])
+        default_marker_interval = default_value(base_path + ['marker', 'interval'])
 
         facility = {
             'auth': {'level': 'info'},

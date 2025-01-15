@@ -71,27 +71,27 @@
             </properties>
             <children>
               #include <include/syslog-facility.xml.i>
-              <node name="marker">
+            </children>
+          </node>
+          <node name="marker">
+            <properties>
+              <help>Mark messages sent to syslog</help>
+            </properties>
+            <children>
+              <leafNode name="interval">
                 <properties>
-                  <help>Mark messages sent to syslog</help>
+                  <help>Mark message interval</help>
+                  <valueHelp>
+                    <format>u32:1-65535</format>
+                    <description>Time in seconds</description>
+                  </valueHelp>
+                  <constraint>
+                    <validator name="numeric" argument="--range 1-86400"/>
+                  </constraint>
+                  <constraintErrorMessage>Port number must be in range 1 to 86400</constraintErrorMessage>
                 </properties>
-                <children>
-                  <leafNode name="interval">
-                    <properties>
-                      <help>Mark message interval</help>
-                      <valueHelp>
-                        <format>u32:1-65535</format>
-                        <description>Time in seconds</description>
-                      </valueHelp>
-                      <constraint>
-                        <validator name="numeric" argument="--range 1-86400"/>
-                      </constraint>
-                      <constraintErrorMessage>Port number must be in range 1 to 86400</constraintErrorMessage>
-                    </properties>
-                    <defaultValue>1200</defaultValue>
-                  </leafNode>
-                </children>
-              </node>
+                <defaultValue>1200</defaultValue>
+              </leafNode>
             </children>
           </node>
           <leafNode name="preserve-fqdn">

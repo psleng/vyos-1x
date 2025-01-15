@@ -236,6 +236,9 @@ system {
             facility security {
                 level info
             }
+            marker {
+                interval 1000
+            }
             preserve-fqdn
         }
         host syslog.vyos.net {
