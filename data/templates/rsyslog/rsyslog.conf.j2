@@ -18,16 +18,9 @@ module(
     RateLimit.Burst="0"
 )
 
+###########################
 #### GLOBAL DIRECTIVES ####
-### TODO - remove
-# Filter duplicated messages
-# https://www.rsyslog.com/doc/configuration/action/rsconf1_repeatedmsgreduction.html
-$RepeatedMsgReduction on
-
-##########################################
-#### AUTH.LOG CHANNEL AND LOGGING RULES ####
-##########################################
-
+###########################
 # Log specific programs to auth.log, then stop further processing
 if (
     $programname == "CRON" or
