@@ -45,6 +45,8 @@ sort_valid_inet = ['end', 'mac', 'hostname', 'ip', 'pool', 'remaining', 'start',
 sort_valid_inet6 = ['end', 'duid', 'ip', 'last_communication', 'pool', 'remaining', 'state', 'type']
 mapping_sort_valid = ['mac', 'ip', 'pool', 'duid']
 
+stale_warn_msg = 'DHCP server is configured but not started. Data may be stale.'
+
 ArgFamily = typing.Literal['inet', 'inet6']
 ArgState = typing.Literal['all', 'active', 'free', 'expired', 'released', 'abandoned', 'reset', 'backup']
 ArgOrigin = typing.Literal['local', 'remote']
@@ -127,7 +129,7 @@ def _get_pool_size(pool, family='inet'):
     return size
 
 
-def _get_raw_pool_statistics(config, family='inet', pool=None):
+def _get_raw_server_pool_statistics(config, family='inet', pool=None):
     inet_suffix = '6' if family == 'inet6' else '4'
     pools = [pool] if pool else kea_get_dhcp_pools(config, inet_suffix)
 
@@ -142,7 +144,7 @@ def _get_raw_pool_statistics(config, family='inet', pool=None):
     return stats
 
 
-def _get_formatted_pool_statistics(pool_data, family='inet'):
+def _get_formatted_server_pool_statistics(pool_data, family='inet'):
     data_entries = []
     for entry in pool_data:
         pool = entry.get('pool')
@@ -175,32 +177,22 @@ def _get_raw_server_static_mappings(config, family='inet', pool=None, sorted=Non
 
 def _get_formatted_server_static_mappings(raw_data, family='inet'):
     data_entries = []
-    if family == 'inet':
-        for entry in raw_data:
-            pool = entry.get('pool')
-            subnet = entry.get('subnet')
-            hostname = entry.get('hostname')
-            ip_addr = entry.get('ip', 'N/A')
-            mac_addr = entry.get('mac', 'N/A')
-            duid = entry.get('duid', 'N/A')
-            description = entry.get('description', 'N/A')
-            data_entries.append([pool, subnet, hostname, ip_addr, mac_addr, duid, description])
-    elif family == 'inet6':
-        for entry in raw_data:
-            pool = entry.get('pool')
-            subnet = entry.get('subnet')
-            hostname = entry.get('hostname')
-            ip_addr = entry.get('ip', 'N/A')
-            mac_addr = entry.get('mac', 'N/A')
-            duid = entry.get('duid', 'N/A')
-            description = entry.get('description', 'N/A')
-            data_entries.append([pool, subnet, hostname, ip_addr, mac_addr, duid, description])
+
+    for entry in raw_data:
+        pool = entry.get('pool')
+        subnet = entry.get('subnet')
+        hostname = entry.get('hostname')
+        ip_addr = entry.get('ip', 'N/A')
+        mac_addr = entry.get('mac', 'N/A')
+        duid = entry.get('duid', 'N/A')
+        description = entry.get('description', 'N/A')
+        data_entries.append([pool, subnet, hostname, ip_addr, mac_addr, duid, description])
 
     headers = ['Pool', 'Subnet', 'Hostname', 'IP Address', 'MAC Address', 'DUID', 'Description']
     output = tabulate(data_entries, headers, numalign='left')
     return output
 
-def _verify(func):
+def _verify_server(func):
     """Decorator checks if DHCP(v6) config exists"""
     from functools import wraps
 
@@ -236,14 +228,14 @@ def _verify_client(func):
         return func(*args, **kwargs)
     return _wrapper
 
-@_verify
-def show_pool_statistics(raw: bool, family: ArgFamily, pool: typing.Optional[str]):
+@_verify_server
+def show_server_pool_statistics(raw: bool, family: ArgFamily, pool: typing.Optional[str]):
 
     v = 'v6' if family == 'inet6' else ''
     inet_suffix = '6' if family == 'inet6' else '4'
 
     if not is_systemd_service_running(f'kea-dhcp{inet_suffix}-server.service'):
-        Warning('DHCP server is configured but not started. Data may be stale.')
+        Warning(stale_warn_msg)
 
     try:
         active_config = kea_get_active_config(inet_suffix)
@@ -255,14 +247,14 @@ def show_pool_statistics(raw: bool, family: ArgFamily, pool: typing.Optional[str
     if pool and active_pools and pool not in active_pools:
         raise vyos.opmode.IncorrectValue(f'DHCP{v} pool "{pool}" does not exist!')
 
-    pool_data = _get_raw_pool_statistics(active_config, family=family, pool=pool)
+    pool_data = _get_raw_server_pool_statistics(active_config, family=family, pool=pool)
     if raw:
         return pool_data
     else:
-        return _get_formatted_pool_statistics(pool_data, family=family)
+        return _get_formatted_server_pool_statistics(pool_data, family=family)
 
 
-@_verify
+@_verify_server
 def show_server_leases(raw: bool, family: ArgFamily, pool: typing.Optional[str],
                        sorted: typing.Optional[str], state: typing.Optional[ArgState],
                        origin: typing.Optional[ArgOrigin] ):
@@ -271,7 +263,7 @@ def show_server_leases(raw: bool, family: ArgFamily, pool: typing.Optional[str],
     inet_suffix = '6' if family == 'inet6' else '4'
 
     if not is_systemd_service_running(f'kea-dhcp{inet_suffix}-server.service'):
-        Warning('DHCP server is configured but not started. Data may be stale.')
+        Warning(stale_warn_msg)
 
     try:
         active_config = kea_get_active_config(inet_suffix)
@@ -296,14 +288,14 @@ def show_server_leases(raw: bool, family: ArgFamily, pool: typing.Optional[str],
     else:
         return _get_formatted_server_leases(lease_data, family=family)
 
-@_verify
+@_verify_server
 def show_server_static_mappings(raw: bool, family: ArgFamily, pool: typing.Optional[str],
                                 sorted: typing.Optional[str]):
     v = 'v6' if family == 'inet6' else ''
     inet_suffix = '6' if family == 'inet6' else '4'
 
     if not is_systemd_service_running(f'kea-dhcp{inet_suffix}-server.service'):
-        Warning('DHCP server is configured but not started. Data may be stale.')
+        Warning(stale_warn_msg)
 
     try:
         active_config = kea_get_active_config(inet_suffix)
@@ -328,7 +320,7 @@ def _lease_valid(inet, address):
     leases = kea_get_leases(inet)
     return any(lease['ip-address'] == address for lease in leases)
 
-@_verify
+@_verify_server
 def clear_dhcp_server_lease(family: ArgFamily, address: str):
     v = 'v6' if family == 'inet6' else ''
     inet = '6' if family == 'inet6' else '4'
