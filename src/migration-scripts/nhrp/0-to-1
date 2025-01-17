@@ -24,7 +24,7 @@ interface_base = ['interfaces', 'tunnel']
 def migrate(config: ConfigTree) -> None:
     if not config.exists(base):
         return
-
+    networkid = 1
     for tunnel_name in config.list_nodes(base):
         ## Cisco Authentication migration
         if config.exists(base + [tunnel_name,'cisco-authentication']):
@@ -40,7 +40,8 @@ def migrate(config: ConfigTree) -> None:
             config.delete(base + [tunnel_name,'holding-time'])
             config.set(base + [tunnel_name,'holdtime'], value=holdtime)
         ## Add network-id
-        config.set(base + [tunnel_name, 'network-id'], value='1')
+        config.set(base + [tunnel_name, 'network-id'], value=networkid)
+        networkid+=1
         ## Map and nhs migration
         nhs_tunnelip_list = []
         nhs_nbmaip_list = []
