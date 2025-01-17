@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 #
-# Copyright (C) 2018-2024 VyOS maintainers and contributors
+# Copyright (C) 2018-2025 VyOS maintainers and contributors
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2 or later as
@@ -45,7 +45,6 @@ ctrl_socket = '/run/kea/dhcp4-ctrl-socket'
 config_file = '/run/kea/kea-dhcp4.conf'
 lease_file = '/config/dhcp/dhcp4-leases.csv'
 lease_file_glob = '/config/dhcp/dhcp4-leases*'
-systemd_override = r'/run/systemd/system/kea-ctrl-agent.service.d/10-override.conf'
 user_group = '_kea'
 
 ca_cert_file = '/run/kea/kea-failover-ca.pem'
@@ -394,8 +393,6 @@ def generate(dhcp):
             write_file(ca_cert_file, wrap_certificate(ca_cert_data), user=user_group, mode=0o600)
 
             dhcp['high_availability']['ca_cert_file'] = ca_cert_file
-
-        render(systemd_override, 'dhcp-server/10-override.conf.j2', dhcp)
 
     render(ctrl_config_file, 'dhcp-server/kea-ctrl-agent.conf.j2', dhcp, user=user_group, group=user_group)
     render(config_file, 'dhcp-server/kea-dhcp4.conf.j2', dhcp, user=user_group, group=user_group)
