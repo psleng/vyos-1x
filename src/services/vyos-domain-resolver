@@ -22,12 +22,13 @@ from vyos.configdict import dict_merge
 from vyos.configquery import ConfigTreeQuery
 from vyos.firewall import fqdn_config_parse
 from vyos.firewall import fqdn_resolve
+from vyos.ifconfig import WireGuardIf
 from vyos.utils.commit import commit_in_progress
 from vyos.utils.dict import dict_search_args
+from vyos.utils.kernel import WIREGUARD_REKEY_AFTER_TIME
 from vyos.utils.process import cmd
 from vyos.utils.process import run
 from vyos.xml_ref import get_defaults
-from vyos.template import is_ip
 
 base = ['firewall']
 timeout = 300
@@ -175,50 +176,45 @@ def update_fqdn(config, node):
 
 def update_interfaces(config, node):
     if node == 'interfaces':
-        wireguard_interfaces = dict_search_args(config, 'wireguard')
+        wg_interfaces = dict_search_args(config, 'wireguard')
 
-        # WireGuard redo handshake usually every 180 seconds, but not documented officially.
-        # If peer with domain name in its endpoint didn't get handshake for over 300 seconds,
-        # we do re-resolv and reset its endpoint from config tree.
-        handshake_threshold = 300
-
-        from vyos.ifconfig import WireGuardIf
-
-        check_wireguard_peer_public_keys = {}
+        peer_public_keys = {}
         # for each wireguard interfaces
-        for interface, wireguard in wireguard_interfaces.items():
-            check_wireguard_peer_public_keys[interface] = []
+        for interface, wireguard in wg_interfaces.items():
+            peer_public_keys[interface] = []
             for peer, peer_config in wireguard['peer'].items():
                 # check peer if peer host-name or address is set
                 if 'host-name' in peer_config or 'address' in peer_config:
                     # check latest handshake
-                    check_wireguard_peer_public_keys[interface].append(
+                    peer_public_keys[interface].append(
                         peer_config['public_key']
                     )
 
         now_time = time.time()
-        for (
-            interface,
-            check_peer_public_keys
-        ) in check_wireguard_peer_public_keys.items():
+        for (interface, check_peer_public_keys) in peer_public_keys.items():
             if len(check_peer_public_keys) == 0:
                 continue
 
             intf = WireGuardIf(interface, create=False, debug=False)
             handshakes = intf.operational.get_latest_handshakes()
 
+            # WireGuard performs a handshake every WIREGUARD_REKEY_AFTER_TIME
+            # if data is being transmitted between the peers. If no data is
+            # transmitted, the handshake will not be initiated unless new
+            # data begins to flow. Each handshake generates a new session
+            # key, and the key is rotated at least every 120 seconds or
+            # upon data transmission after a prolonged silence.
             for public_key, handshake_time in handshakes.items():
                 if public_key in check_peer_public_keys and (
                     handshake_time == 0
-                    or now_time - handshake_time > handshake_threshold
+                    or (now_time - handshake_time > 3*WIREGUARD_REKEY_AFTER_TIME)
                 ):
                     intf.operational.reset_peer(public_key=public_key)
-
-                    print(f'Wireguard: reset {interface} peer {public_key}')
+                    print(f'WireGuard: reset {interface} peer {public_key}')
 
 
 if __name__ == '__main__':
-    logger.info(f'VyOS domain resolver')
+    logger.info('VyOS domain resolver')
 
     count = 1
     while commit_in_progress():
