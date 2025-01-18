@@ -1,4 +1,4 @@
-# Copyright 2019-2024 VyOS maintainers and contributors <maintainers@vyos.io>
+# Copyright 2019-2025 VyOS maintainers and contributors <maintainers@vyos.io>
 #
 # This library is free software; you can redistribute it and/or
 # modify it under the terms of the GNU Lesser General Public
@@ -22,6 +22,7 @@ from tempfile import NamedTemporaryFile
 from hurry.filesize import size
 from hurry.filesize import alternative
 
+from vyos.configquery import ConfigTreeQuery
 from vyos.ifconfig import Interface
 from vyos.ifconfig import Operational
 from vyos.template import is_ipv6
@@ -181,53 +182,40 @@ class WireGuardOperational(Operational):
         return output
 
     def reset_peer(self, peer_name=None, public_key=None):
-        from vyos.configquery import ConfigTreeQuery
-
         c = ConfigTreeQuery()
-
-        max_dns_retry = c.value(
-            ['interfaces', 'wireguard', self.ifname, 'max-dns-retry']
-        )
-        if max_dns_retry is None:
-            max_dns_retry = 3
+        tmp = c.get_config_dict(['interfaces', 'wireguard', self.ifname],
+                                effective=True, get_first_key=True,
+                                key_mangling=('-', '_'), with_defaults=True)
 
         current_peers = self._dump().get(self.ifname, {}).get('peers', {})
 
-        for peer in c.list_nodes(['interfaces', 'wireguard', self.ifname, 'peer']):
-            peer_public_key = c.value(
-                ['interfaces', 'wireguard', self.ifname, 'peer', peer, 'public-key']
-            )
+        for peer, peer_config in tmp['peer'].items():
+            peer_public_key = peer_config['public_key']
             if peer_name is None or peer == peer_name or public_key == peer_public_key:
-                address = c.value(
-                    ['interfaces', 'wireguard', self.ifname, 'peer', peer, 'address']
-                )
-                host_name = c.value(
-                    ['interfaces', 'wireguard', self.ifname, 'peer', peer, 'host-name']
-                )
-                port = c.value(
-                    ['interfaces', 'wireguard', self.ifname, 'peer', peer, 'port']
-                )
-
-                if (not address and not host_name) or not port:
+                if ('address' not in peer_config and 'host_name' not in peer_config) or 'port' not in peer_config:
                     if peer_name is not None:
-                        print(f'Peer {peer_name} endpoint not set')
+                        print(f'WireGuard interface "{self.ifname}" peer "{peer_name}" address/host-name unset!')
                     continue
 
+                # As we work with an effective config, a port CLI node is always
+                # available when an address/host-name is defined on the CLI
+                port = peer_config['port']
+
                 # address has higher priority than host-name
-                if address:
+                if 'address' in peer_config:
+                    address = peer_config['address']
                     new_endpoint = f'{address}:{port}'
                 else:
+                    host_name = peer_config['host_name']
                     new_endpoint = f'{host_name}:{port}'
 
-                if c.exists(
-                    ['interfaces', 'wireguard', self.ifname, 'peer', peer, 'disable']
-                ):
+                if 'disable' in peer_config:
+                    print(f'WireGuard interface "{self.ifname}" peer "{peer_name}" disabled!')
                     continue
 
                 cmd = f'wg set {self.ifname} peer {peer_public_key} endpoint {new_endpoint}'
                 try:
-                    if (
-                        peer_public_key in current_peers
+                    if (peer_public_key in current_peers
                         and 'endpoint' in current_peers[peer_public_key]
                         and current_peers[peer_public_key]['endpoint'] is not None
                     ):
@@ -235,14 +223,10 @@ class WireGuardOperational(Operational):
                         message = f'Resetting {self.ifname} peer {peer_public_key} from {current_endpoint} endpoint to {new_endpoint} ... '
                     else:
                         message = f'Resetting {self.ifname} peer {peer_public_key} endpoint to {new_endpoint} ... '
-                    print(
-                        message,
-                        end='',
-                    )
+                    print(message, end='')
 
-                    self._cmd(
-                        cmd, env={'WG_ENDPOINT_RESOLUTION_RETRIES': str(max_dns_retry)}
-                    )
+                    self._cmd(cmd, env={'WG_ENDPOINT_RESOLUTION_RETRIES':
+                                        tmp['max_dns_retry']})
                     print('done')
                 except:
                     print(f'Error\nPlease try to run command manually:\n{cmd}\n')
@@ -272,15 +256,12 @@ class WireGuardIf(Interface):
         get_config_dict(). It's main intention is to consolidate the scattered
         interface setup code and provide a single point of entry when workin
         on any interface."""
-
         tmp_file = NamedTemporaryFile('w')
         tmp_file.write(config['private_key'])
         tmp_file.flush()
 
         # Wireguard base command is identical for every peer
-        base_cmd = 'wg set ' + config['ifname']
-        max_dns_retry = config['max_dns_retry'] if 'max_dns_retry' in config else 3
-
+        base_cmd = f'wg set {self.ifname}'
         interface_cmd = base_cmd
         if 'port' in config:
             interface_cmd += ' listen-port {port}'
@@ -347,10 +328,8 @@ class WireGuardIf(Interface):
                     elif {'host_name', 'port'} <= set(peer_config):
                         cmd += ' endpoint {host_name}:{port}'
 
-                    self._cmd(
-                        cmd.format(**peer_config),
-                        env={'WG_ENDPOINT_RESOLUTION_RETRIES': str(max_dns_retry)},
-                    )
+                    self._cmd(cmd.format(**peer_config), env={
+                        'WG_ENDPOINT_RESOLUTION_RETRIES': config['max_dns_retry']})
                 except:
                     # todo: logging
                     pass
