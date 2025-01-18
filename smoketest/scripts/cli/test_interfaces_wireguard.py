@@ -200,5 +200,41 @@ class WireGuardInterfaceTest(BasicInterfaceTest.TestCase):
         self.assertNotIn(pubkey_1, peers)
         self.assertIn(pubkey_2, peers)
 
+    def test_wireguard_hostname(self):
+        # T4930: Test dynamic endpoint support
+        interface = 'wg1234'
+        port = '54321'
+        privkey = 'UOWIeZKNzijhgu0bPRy2PB3gnuOBLfQax5GiYfkmU3A='
+        pubkey = '4nG5NfhHBQUq/DnwT0RjRoBCqAh3VrRHqdQgzC/xujk='
+
+        base_interface_path = base_path + [interface]
+        self.cli_set(base_interface_path + ['address', '172.16.0.1/24'])
+        self.cli_set(base_interface_path + ['private-key', privkey])
+
+        peer_base_path = base_interface_path + ['peer', 'dynamic01']
+        self.cli_set(peer_base_path + ['port', port])
+        self.cli_set(peer_base_path + ['public-key', pubkey])
+        self.cli_set(peer_base_path + ['allowed-ips', '169.254.0.0/16'])
+        self.cli_set(peer_base_path + ['address', '192.0.2.1'])
+        self.cli_set(peer_base_path + ['host-name', 'wg.vyos.net'])
+
+        # Peer address and host-name are mutually exclusive
+        with self.assertRaises(ConfigSessionError):
+            self.cli_commit()
+
+        self.cli_delete(peer_base_path + ['address'])
+
+        # Commit peers
+        self.cli_commit()
+
+        # Ensure the service is running which checks for DNS changes
+        self.assertTrue(is_systemd_service_running(domain_resolver))
+
+        self.cli_delete(base_interface_path)
+        self.cli_commit()
+
+        # Ensure the service is no longer running after WireGuard interface is deleted
+        self.assertFalse(is_systemd_service_running(domain_resolver))
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
