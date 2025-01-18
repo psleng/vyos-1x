@@ -14,7 +14,6 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import re
 import unittest
 
 from base_vyostest_shim import VyOSUnitTestSHIM
@@ -47,6 +46,7 @@ class TestRSYSLOGService(VyOSUnitTestSHIM.TestCase):
         # ensure we can also run this test on a live system - so lets clean
         # out the current configuration :)
         cls.cli_delete(cls, base_path)
+        cls.cli_delete(cls, ['vrf'])
 
     def tearDown(self):
         # Check for running process
@@ -203,6 +203,69 @@ class TestRSYSLOGService(VyOSUnitTestSHIM.TestCase):
                     self.assertIn( '        TCP_Framing="octed-counted"', config)
                 else:
                     self.assertIn( '        TCP_Framing="traditional"', config)
+
+    def test_vrf_source_address(self):
+        rhosts = {
+            '169.254.0.10': { },
+            '169.254.0.11': {
+                'vrf': {'name' : 'red', 'table' : '12321'},
+                'source_address' : '169.254.0.11',
+            },
+            '169.254.0.12': {
+                'vrf': {'name' : 'green', 'table' : '12322'},
+                'source_address' : '169.254.0.12',
+            },
+            '169.254.0.13': {
+                'vrf': {'name' : 'blue', 'table' : '12323'},
+                'source_address' : '169.254.0.13',
+            },
+        }
+
+        for remote, remote_options in rhosts.items():
+            remote_base = base_path + ['remote', remote]
+            self.cli_set(remote_base + ['facility', 'all'])
+
+            vrf = None
+            if 'vrf' in remote_options:
+                vrf = remote_options['vrf']['name']
+                self.cli_set(['vrf', 'name', vrf, 'table', remote_options['vrf']['table']])
+                self.cli_set(remote_base + ['vrf', vrf])
+
+            if 'source_address' in remote_options:
+                source_address = remote_options['source_address']
+                self.cli_set(remote_base + ['source-address', source_address])
+
+                idx = source_address.split('.')[-1]
+                self.cli_set(['interfaces', 'dummy', f'dum{idx}', 'address', f'{source_address}/32'])
+                if vrf:
+                    self.cli_set(['interfaces', 'dummy', f'dum{idx}', 'vrf', vrf])
+
+
+        self.cli_commit()
+        config = read_file(RSYSLOG_CONF)
+
+        for remote, remote_options in rhosts.items():
+            config = get_config(f'# Remote syslog to {remote}')
+
+            self.assertIn(f'target="{remote}"', config)
+            if 'vrf' in remote_options:
+                vrf = remote_options['vrf']['name']
+                self.assertIn(f'Device="{vrf}"', config)
+
+            if 'source_address' in remote_options:
+                source_address = remote_options['source_address']
+                self.assertIn(f'Address="{source_address}"', config)
+
+        # Cleanup VRF/Dummy interfaces
+        for remote, remote_options in rhosts.items():
+            if 'vrf' in remote_options:
+                vrf = remote_options['vrf']['name']
+                self.cli_delete(['vrf', 'name', vrf])
+
+            if 'source_address' in remote_options:
+                source_address = remote_options['source_address']
+                idx = source_address.split('.')[-1]
+                self.cli_delete(['interfaces', 'dummy', f'dum{idx}'])
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

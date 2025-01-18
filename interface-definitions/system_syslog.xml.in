@@ -38,11 +38,6 @@
               </valueHelp>
             </properties>
             <children>
-              #include <include/port-number.xml.i>
-              <leafNode name="port">
-                <defaultValue>514</defaultValue>
-              </leafNode>
-              #include <include/protocol-tcp-udp.xml.i>
               #include <include/syslog-facility.xml.i>
               <node name="format">
                 <properties>
@@ -63,6 +58,13 @@
                   </leafNode>
                 </children>
               </node>
+              #include <include/port-number.xml.i>
+              <leafNode name="port">
+                <defaultValue>514</defaultValue>
+              </leafNode>
+              #include <include/protocol-tcp-udp.xml.i>
+              #include <include/source-address-ipv4-ipv6.xml.i>
+              #include <include/interface/vrf.xml.i>
             </children>
           </tagNode>
           <node name="local">
@@ -100,8 +102,6 @@
               <valueless/>
             </properties>
           </leafNode>
-          #include <include/source-address-ipv4-ipv6.xml.i>
-          #include <include/interface/vrf.xml.i>
         </children>
       </node>
     </children>

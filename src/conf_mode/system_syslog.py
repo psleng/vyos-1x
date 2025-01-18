@@ -20,11 +20,12 @@ from sys import exit
 
 from vyos.base import Warning
 from vyos.config import Config
-from vyos.configdict import is_node_changed
 from vyos.configverify import verify_vrf
 from vyos.utils.network import is_addr_assigned
 from vyos.utils.process import call
 from vyos.template import render
+from vyos.template import is_ipv4
+from vyos.template import is_ipv6
 from vyos import ConfigError
 from vyos import airbag
 airbag.enable()
@@ -45,9 +46,6 @@ def get_config(config=None):
                                   get_first_key=True, no_tag_node_value_mangle=True)
 
     syslog.update({ 'logrotate' : logrotate_conf })
-
-    tmp = is_node_changed(conf, base + ['vrf'])
-    if tmp: syslog.update({'restart_required': {}})
 
     syslog = conf.merge_defaults(syslog, recursive=True)
     if syslog.from_defaults(['local']):
@@ -74,19 +72,26 @@ def verify(syslog):
             Warning('No "system domain-name" defined - cannot set syslog FQDN!')
 
     if 'remote' in syslog:
-         for host, host_options in syslog['remote'].items():
-             if 'protocol' in host_options and host_options['protocol'] == 'udp':
-                 if 'format' in host_options and 'octet_counted' in host_options['format']:
-                     Warning(f'Syslog UDP transport for "{host}" should not use octet-counted format!')
+        for remote, remote_options in syslog['remote'].items():
+            if 'protocol' in remote_options and remote_options['protocol'] == 'udp':
+                if 'format' in remote_options and 'octet_counted' in remote_options['format']:
+                    Warning(f'Syslog UDP transport for "{remote}" should not use octet-counted format!')
 
-    verify_vrf(syslog)
+            if 'vrf' in remote_options:
+                verify_vrf(remote_options)
 
-    if 'source_address' in syslog:
-        syslog_vrf = None
-        if 'vrf' in syslog:
-            syslog_vrf = syslog['vrf']
-        if not is_addr_assigned(syslog['source_address'], syslog_vrf):
-            raise ConfigError('No interface with given address specified!')
+            if 'source_address' in remote_options:
+                vrf = None
+                if 'vrf' in remote_options:
+                    vrf = remote_options['vrf']
+                if not is_addr_assigned(remote_options['source_address'], vrf):
+                    raise ConfigError('No interface with given address specified!')
+
+                source_address = remote_options['source_address']
+                if ((is_ipv4(remote) and is_ipv6(source_address)) or
+                    (is_ipv6(remote) and is_ipv4(source_address))):
+                    raise ConfigError(f'Source-address "{source_address}" does not match '\
+                                      f'address-family of remote "{remote}"!')
 
 def generate(syslog):
     if not syslog:
@@ -108,12 +113,7 @@ def apply(syslog):
         call(f'systemctl stop {systemd_service} {systemd_socket}')
         return None
 
-    # we need to restart the service if e.g. the VRF name changed
-    systemd_action = 'reload-or-restart'
-    if 'restart_required' in syslog:
-        systemd_action = 'restart'
-
-    call(f'systemctl {systemd_action} {systemd_service}')
+    call(f'systemctl reload-or-restart {systemd_service}')
     return None
 
 if __name__ == '__main__':

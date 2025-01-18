@@ -54,6 +54,11 @@ def migrate(config: ConfigTree) -> None:
     if config.exists(base + ['global']):
         config.rename(base + ['global'], 'local')
 
+    vrf = ''
+    if config.exists(base + ['vrf']):
+        vrf = config.return_value(base + ['vrf'])
+        config.delete(base + ['vrf'])
+
     # Rename host x.x.x.x -> remote x.x.x.x
     if config.exists(base + ['host']):
         config.set(base + ['remote'])
@@ -61,4 +66,6 @@ def migrate(config: ConfigTree) -> None:
         for remote in config.list_nodes(base + ['host']):
             config.copy(base + ['host', remote], base + ['remote', remote])
             config.set_tag(base + ['remote'])
+            if vrf:
+                config.set(base + ['remote', remote, 'vrf'], value=vrf)
         config.delete(base + ['host'])
