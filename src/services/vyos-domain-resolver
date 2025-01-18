@@ -184,7 +184,7 @@ def update_interfaces(config, node):
             peer_public_keys[interface] = []
             for peer, peer_config in wireguard['peer'].items():
                 # check peer if peer host-name or address is set
-                if 'host-name' in peer_config or 'address' in peer_config:
+                if 'host_name' in peer_config or 'address' in peer_config:
                     # check latest handshake
                     peer_public_keys[interface].append(
                         peer_config['public_key']
@@ -210,8 +210,6 @@ def update_interfaces(config, node):
                     or (now_time - handshake_time > 3*WIREGUARD_REKEY_AFTER_TIME)
                 ):
                     intf.operational.reset_peer(public_key=public_key)
-                    print(f'WireGuard: reset {interface} peer {public_key}')
-
 
 if __name__ == '__main__':
     logger.info('VyOS domain resolver')
