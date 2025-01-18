@@ -89,28 +89,33 @@ def verify(wireguard):
         for tmp in wireguard['peer']:
             peer = wireguard['peer'][tmp]
 
+            base_error = f'WireGuard peer "{tmp}":'
+
             if 'host_name' in peer and 'address' in peer:
-                raise ConfigError('"host-name" and "address" are mutually exclusive')
+                raise ConfigError(f'{base_error} address/host-name are mutually exclusive!')
 
             if 'allowed_ips' not in peer:
-                raise ConfigError(f'Wireguard allowed-ips required for peer "{tmp}"!')
+                raise ConfigError(f'{base_error} missing mandatory allowed-ips!')
 
             if 'public_key' not in peer:
-                raise ConfigError(f'Wireguard public-key required for peer "{tmp}"!')
+                raise ConfigError(f'{base_error} missing mandatory public-key!')
 
             if peer['public_key'] in public_keys:
-                raise ConfigError(f'Duplicate public-key defined on peer "{tmp}"')
+                raise ConfigError(f'{base_error} duplicate public-key!')
 
             if 'disable' not in peer:
                 if is_wireguard_key_pair(wireguard['private_key'], peer['public_key']):
-                    raise ConfigError(f'Peer "{tmp}" has the same public key as the interface "{wireguard["ifname"]}"')
+                    tmp = wireguard["ifname"]
+                    raise ConfigError(f'{base_error} identical public key as interface "{tmp}"!')
 
+            port_addr_error = f'{base_error} both port and address/host-name must '\
+                              'be defined if either one of them is set!'
             if 'port' not in peer:
                 if 'host_name' in peer or 'address' in peer:
-                    raise ConfigError(f'Missing "host-name" or "address" on peer "{tmp}"')
+                    raise ConfigError(port_addr_error)
             else:
                 if 'host_name' not in peer and 'address' not in peer:
-                    raise ConfigError(f'Missing "host-name" and "address" on peer "{tmp}"')
+                    raise ConfigError(port_addr_error)
 
             public_keys.append(peer['public_key'])
 
