@@ -64,7 +64,7 @@ if prifilt("{{ tmp | join(',') }}") then {
     action(
         type="omfile"
         file="/var/log/messages"
-        queue.size="262144"
+        rotation.sizeLimit="524288" # 512Kib - maximum filesize before rotation
         rotation.sizeLimitCommand="/usr/sbin/logrotate {{ logrotate }}"
     )
 }
@@ -120,4 +120,3 @@ if prifilt("{{ tmp | join(',') }}") then {
 
 # Include all configuration files in /etc/rsyslog.d/
 include(file="/etc/rsyslog.d/*.conf")
-

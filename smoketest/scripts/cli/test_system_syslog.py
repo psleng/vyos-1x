@@ -117,7 +117,7 @@ class TestRSYSLOGService(VyOSUnitTestSHIM.TestCase):
         self.assertIn( '    action(', config)
         self.assertIn( '        type="omfile"', config)
         self.assertIn( '        file="/var/log/messages"', config)
-        self.assertIn( '        queue.size="262144"', config)
+        self.assertIn( '        rotation.sizeLimit="524288"', config)
         self.assertIn( '        rotation.sizeLimitCommand="/usr/sbin/logrotate /etc/logrotate.d/vyos-rsyslog"', config)
 
     def test_remote(self):
