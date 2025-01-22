@@ -50,8 +50,8 @@ def get_config(config=None):
     if tmp: syslog.update({'restart_required': {}})
 
     syslog = conf.merge_defaults(syslog, recursive=True)
-    if syslog.from_defaults(['global']):
-        del syslog['global']
+    if syslog.from_defaults(['local']):
+        del syslog['local']
 
     if 'preserve_fqdn' in syslog:
         if conf.exists(['system', 'host-name']):

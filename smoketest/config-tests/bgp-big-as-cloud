@@ -847,6 +847,6 @@ set system name-server '192.0.2.2'
 set system sflow interface 'eth0.4088'
 set system sflow interface 'eth0.4089'
 set system sflow server 1.2.3.4 port '1234'
-set system syslog global facility all level 'all'
+set system syslog local facility all level 'all'
 set system syslog preserve-fqdn
 set system time-zone 'Europe/Zurich'

@@ -89,7 +89,7 @@ class TestRSYSLOGService(VyOSUnitTestSHIM.TestCase):
 
         for tmp, tmp_options in facility.items():
             level = tmp_options['level']
-            self.cli_set(base_path + ['global', 'facility', tmp, 'level', level])
+            self.cli_set(base_path + ['local', 'facility', tmp, 'level', level])
 
         self.cli_commit()
 

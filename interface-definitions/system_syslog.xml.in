@@ -65,7 +65,7 @@
               </node>
             </children>
           </tagNode>
-          <node name="global">
+          <node name="local">
             <properties>
               <help>Log to standard system location /var/log/messages</help>
             </properties>

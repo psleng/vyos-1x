@@ -37,8 +37,9 @@ def migrate(config: ConfigTree) -> None:
 
     # Move "global preserve-fqdn" one CLI level up, as it relates to all
     # logging targets (console, global and remote)
-    if config.exists(base + ['global', 'preserve-fqdn']):
-        config.delete(base + ['global', 'preserve-fqdn'])
+    preserve_fqdn_base = base + ['global', 'preserve-fqdn']
+    if config.exists(preserve_fqdn_base):
+        config.delete(preserve_fqdn_base)
         config.set(base + ['preserve-fqdn'])
 
     # Move "global marker" one CLI level up, as it relates to all
@@ -47,6 +48,11 @@ def migrate(config: ConfigTree) -> None:
     if config.exists(marker_base):
         config.copy(marker_base, base + ['marker'])
         config.delete(marker_base)
+
+    # Rename "global" -> "local" as this describes what is logged locally
+    # on the router to a file on the filesystem
+    if config.exists(base + ['global']):
+        config.rename(base + ['global'], 'local')
 
     # Rename host x.x.x.x -> remote x.x.x.x
     if config.exists(base + ['host']):

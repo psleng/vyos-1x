@@ -61,10 +61,10 @@ global(localHostname="{{ preserve_fqdn.host_name }}.{{ preserve_fqdn.domain_name
 {% endif %}
 
 #### GLOBAL LOGGING ####
-{% if global.facility is vyos_defined %}
+{% if local.facility is vyos_defined %}
 {%     set tmp = [] %}
-{%     if global.facility is vyos_defined %}
-{%         for facility, facility_options in global.facility.items() %}
+{%     if local.facility is vyos_defined %}
+{%         for facility, facility_options in local.facility.items() %}
 {%             set _ = tmp.append(facility.replace('all', '*') ~ "." ~ facility_options.level.replace('all', 'debug')) %}
 {%         endfor %}
 if prifilt("{{ tmp | join(',') }}") then {

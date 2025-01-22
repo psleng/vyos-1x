@@ -254,6 +254,7 @@ system {
             format {
                 octet-counted
             }
+            protocol tcp
             port 8000
         }
     }
