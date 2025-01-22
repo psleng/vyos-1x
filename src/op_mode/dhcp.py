@@ -82,12 +82,6 @@ ArgState = typing.Literal[
 ArgOrigin = typing.Literal['local', 'remote']
 
 
-def _utc_to_local(utc_dt):
-    return datetime.fromtimestamp(
-        (datetime.fromtimestamp(utc_dt) - datetime(1970, 1, 1)).total_seconds()
-    )
-
-
 def _get_raw_server_leases(
     config, family='inet', pool=None, sorted=None, state=[], origin=None
 ) -> list:
@@ -112,7 +106,11 @@ def _get_formatted_server_leases(raw_data, family='inet'):
             hw_addr = lease.get('mac')
             state = lease.get('state')
             start = datetime.fromtimestamp(lease.get('start'), timezone.utc)
-            end = datetime.fromtimestamp(lease.get('end'), timezone.utc) if lease.get('end') else '-'
+            end = (
+                datetime.fromtimestamp(lease.get('end'), timezone.utc)
+                if lease.get('end')
+                else '-'
+            )
             remain = lease.get('remaining')
             pool = lease.get('pool')
             hostname = lease.get('hostname')
@@ -137,8 +135,14 @@ def _get_formatted_server_leases(raw_data, family='inet'):
         for lease in raw_data:
             ipaddr = lease.get('ip')
             state = lease.get('state')
-            start = datetime.fromtimestamp(lease.get('last_communication'), timezone.utc)
-            end = datetime.fromtimestamp(lease.get('end'), timezone.utc) if lease.get('end') else '-'
+            start = datetime.fromtimestamp(
+                lease.get('last_communication'), timezone.utc
+            )
+            end = (
+                datetime.fromtimestamp(lease.get('end'), timezone.utc)
+                if lease.get('end')
+                else '-'
+            )
             remain = lease.get('remaining')
             lease_type = lease.get('type')
             pool = lease.get('pool')
