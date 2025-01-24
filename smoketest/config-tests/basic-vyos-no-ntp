@@ -31,7 +31,7 @@ set protocols ospf interface eth0.203 retransmit-interval '5'
 set protocols ospf interface eth0.203 transmit-delay '1'
 set protocols ospf log-adjacency-changes detail
 set protocols ospf parameters abr-type 'cisco'
-set protocols ospf parameters router-id '172.18.254.201'
+set protocols ospf parameters router-id '172.18.254.203'
 set protocols ospf passive-interface 'default'
 set protocols ospf redistribute connected metric-type '2'
 set service lldp interface all
