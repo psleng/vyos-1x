@@ -80,19 +80,9 @@ protocols {
         }
     }
 }
-service {
-    lldp {
-        interface all {
-        }
-    }
-    ssh {
-        disable-host-validation
-        port 22
-    }
-}
 system {
     config-management {
-        commit-revisions 200
+        commit-revisions 50
     }
     conntrack {
         modules {
