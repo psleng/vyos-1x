@@ -325,6 +325,14 @@ Depends:
 # iptables is only used for containers now, not the the firewall CLI
   iptables,
 # End container
+# For "vpp"
+  libvppinfra,
+  python3-vpp-api,
+  vpp,
+  vpp-dev,
+  vpp-plugin-core,
+  vpp-plugin-dpdk,
+# End "vpp"
 ## End Configuration mode
 ## Operational mode
 # Used for hypervisor model in "run show version"
