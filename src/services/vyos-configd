@@ -73,11 +73,14 @@ configd_env_unset_file = os.path.join(directories['data'], 'vyos-configd-env-uns
 # sourced on entering config session
 configd_env_file = '/etc/default/vyos-configd-env'
 
+
 def key_name_from_file_name(f):
     return os.path.splitext(f)[0]
 
+
 def module_name_from_key(k):
     return k.replace('-', '_')
+
 
 def path_from_file_name(f):
     return os.path.join(vyos_conf_scripts_dir, f)
@@ -195,8 +198,9 @@ def initialization(socket):
         os.environ['VYATTA_CHANGES_ONLY_DIR'] = changes_only_dir_string
 
     try:
-        configsource = ConfigSourceString(running_config_text=active_string,
-                                          session_config_text=session_string)
+        configsource = ConfigSourceString(
+            running_config_text=active_string, session_config_text=session_string
+        )
     except ConfigSourceError as e:
         logger.debug(e)
         return None
