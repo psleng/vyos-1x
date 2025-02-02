@@ -75,10 +75,11 @@ class VyOSUnitTestSHIM:
                 cls._session.discard()
                 cls.fail(cls)
 
-        def cli_set(self, config):
+        def cli_set(self, path, value=None):
             if self.debug:
-                print('set ' + ' '.join(config))
-            self._session.set(config)
+                str = f'set {" ".join(path)} {value}' if value else f'set {" ".join(path)}'
+                print(str)
+            self._session.set(path, value)
 
         def cli_delete(self, config):
             if self.debug:

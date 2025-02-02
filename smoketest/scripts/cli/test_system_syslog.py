@@ -61,7 +61,7 @@ class TestRSYSLOGService(VyOSUnitTestSHIM.TestCase):
 
     def test_console(self):
         level = 'warning'
-        self.cli_set(base_path + ['console', 'facility', 'all', 'level', level])
+        self.cli_set(base_path + ['console', 'facility', 'all', 'level'], value=level)
         self.cli_commit()
 
         rsyslog_conf = get_config()
@@ -72,7 +72,7 @@ class TestRSYSLOGService(VyOSUnitTestSHIM.TestCase):
         for tmp in config:
             self.assertIn(tmp, rsyslog_conf)
 
-    def test_global(self):
+    def test_basic(self):
         hostname = 'vyos123'
         domain_name = 'example.local'
         default_marker_interval = default_value(base_path + ['marker', 'interval'])
@@ -83,13 +83,13 @@ class TestRSYSLOGService(VyOSUnitTestSHIM.TestCase):
             'all':  {'level': 'notice'},
         }
 
-        self.cli_set(['system', 'host-name', hostname])
-        self.cli_set(['system', 'domain-name', domain_name])
+        self.cli_set(['system', 'host-name'], value=hostname)
+        self.cli_set(['system', 'domain-name'], value=domain_name)
         self.cli_set(base_path + ['preserve-fqdn'])
 
         for tmp, tmp_options in facility.items():
             level = tmp_options['level']
-            self.cli_set(base_path + ['local', 'facility', tmp, 'level', level])
+            self.cli_set(base_path + ['local', 'facility', tmp, 'level'], value=level)
 
         self.cli_commit()
 
@@ -147,20 +147,21 @@ class TestRSYSLOGService(VyOSUnitTestSHIM.TestCase):
             remote_base = base_path + ['remote', remote]
 
             if 'port' in remote_options:
-                self.cli_set(remote_base + ['port', remote_options['port']])
+                self.cli_set(remote_base + ['port'], value=remote_options['port'])
 
             if 'facility' in remote_options:
                 for facility, facility_options in remote_options['facility'].items():
                     level = facility_options['level']
-                    self.cli_set(remote_base + ['facility', facility, 'level', level])
+                    self.cli_set(remote_base + ['facility', facility, 'level'],
+                                 value=level)
 
             if 'format' in remote_options:
                 for format in remote_options['format']:
-                    self.cli_set(remote_base + ['format', format])
+                    self.cli_set(remote_base + ['format'], value=format)
 
             if 'protocol' in remote_options:
                 protocol = remote_options['protocol']
-                self.cli_set(remote_base + ['protocol', protocol])
+                self.cli_set(remote_base + ['protocol'], value=protocol)
 
         self.cli_commit()
 
@@ -228,18 +229,21 @@ class TestRSYSLOGService(VyOSUnitTestSHIM.TestCase):
             vrf = None
             if 'vrf' in remote_options:
                 vrf = remote_options['vrf']['name']
-                self.cli_set(['vrf', 'name', vrf, 'table', remote_options['vrf']['table']])
-                self.cli_set(remote_base + ['vrf', vrf])
+                self.cli_set(['vrf', 'name', vrf, 'table'],
+                             value=remote_options['vrf']['table'])
+                self.cli_set(remote_base + ['vrf'], value=vrf)
 
             if 'source_address' in remote_options:
                 source_address = remote_options['source_address']
-                self.cli_set(remote_base + ['source-address', source_address])
+                self.cli_set(remote_base + ['source-address'],
+                             value=source_address)
 
                 idx = source_address.split('.')[-1]
-                self.cli_set(['interfaces', 'dummy', f'dum{idx}', 'address', f'{source_address}/32'])
+                self.cli_set(['interfaces', 'dummy', f'dum{idx}', 'address'],
+                             value=f'{source_address}/32')
                 if vrf:
-                    self.cli_set(['interfaces', 'dummy', f'dum{idx}', 'vrf', vrf])
-
+                    self.cli_set(['interfaces', 'dummy', f'dum{idx}', 'vrf'],
+                                 value=vrf)
 
         self.cli_commit()
         config = read_file(RSYSLOG_CONF)
