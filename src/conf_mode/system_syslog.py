@@ -21,6 +21,7 @@ from sys import exit
 from vyos.base import Warning
 from vyos.config import Config
 from vyos.configverify import verify_vrf
+from vyos.defaults import systemd_services
 from vyos.utils.network import is_addr_assigned
 from vyos.utils.process import call
 from vyos.template import render
@@ -32,6 +33,9 @@ airbag.enable()
 
 rsyslog_conf = '/run/rsyslog/rsyslog.conf'
 logrotate_conf = '/etc/logrotate.d/vyos-rsyslog'
+
+systemd_socket = 'syslog.socket'
+systemd_service = systemd_services['rsyslog']
 
 def get_config(config=None):
     if config:
@@ -107,8 +111,6 @@ def generate(syslog):
     return None
 
 def apply(syslog):
-    systemd_socket = 'syslog.socket'
-    systemd_service = 'syslog.service'
     if not syslog:
         call(f'systemctl stop {systemd_service} {systemd_socket}')
         return None

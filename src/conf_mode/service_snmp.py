@@ -22,6 +22,7 @@ from vyos.base import Warning
 from vyos.config import Config
 from vyos.configdict import dict_merge
 from vyos.configverify import verify_vrf
+from vyos.defaults import systemd_services
 from vyos.snmpv3_hashgen import plaintext_to_md5
 from vyos.snmpv3_hashgen import plaintext_to_sha1
 from vyos.snmpv3_hashgen import random
@@ -43,7 +44,7 @@ config_file_access  = r'/usr/share/snmp/snmpd.conf'
 config_file_user    = r'/var/lib/snmp/snmpd.conf'
 default_script_dir  = r'/config/user-data/'
 systemd_override    = r'/run/systemd/system/snmpd.service.d/override.conf'
-systemd_service     = 'snmpd.service'
+systemd_service     = systemd_services['snmpd']
 
 def get_config(config=None):
     if config:
