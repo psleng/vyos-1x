@@ -366,6 +366,26 @@ class BasicInterfaceTest:
                 vrf_pids = cmd(f'ip vrf pids {vrf_name}')
                 self.assertIn(str(tmp), vrf_pids)
 
+            # T7135: remove interface from VRF instance and move DHCP client
+            # back to default VRF. This must restart the DHCP client process
+            for interface in self._interfaces:
+                self.cli_delete(self._base_path + [interface, 'vrf'])
+
+            self.cli_commit()
+
+            # Validate interface state
+            for interface in self._interfaces:
+                tmp = get_interface_vrf(interface)
+                self.assertEqual(tmp, 'default')
+
+                # Check if dhclient process runs
+                tmp = process_named_running(dhcp6c_process_name, cmdline=interface, timeout=10)
+                self.assertTrue(tmp)
+                # .. inside the appropriate VRF instance
+                vrf_pids = cmd(f'ip vrf pids {vrf_name}')
+                self.assertNotIn(str(tmp), vrf_pids)
+
+
             self.cli_delete(['vrf', 'name', vrf_name])
 
         def test_move_interface_between_vrf_instances(self):

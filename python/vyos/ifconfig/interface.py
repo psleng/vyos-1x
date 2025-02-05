@@ -1222,7 +1222,7 @@ class Interface(Control):
         if addr == 'dhcp':
             self.set_dhcp(True, vrf_changed=vrf_changed)
         elif addr == 'dhcpv6':
-            self.set_dhcpv6(True)
+            self.set_dhcpv6(True, vrf_changed=vrf_changed)
         elif not is_intf_addr_assigned(self.ifname, addr, netns=netns):
             netns_cmd  = f'ip netns exec {netns}' if netns else ''
             tmp = f'{netns_cmd} ip addr add {addr} dev {self.ifname}'
@@ -1430,7 +1430,7 @@ class Interface(Control):
 
         return None
 
-    def set_dhcpv6(self, enable):
+    def set_dhcpv6(self, enable: bool, vrf_changed: bool=False):
         """
         Enable/Disable DHCPv6 client on a given interface.
         """
@@ -1459,7 +1459,10 @@ class Interface(Control):
 
             # We must ignore any return codes. This is required to enable
             # DHCPv6-PD for interfaces which are yet not up and running.
-            return self._popen(f'systemctl restart {systemd_service}')
+            if (vrf_changed or
+                ('dhcpv6_options_changed' in self.config) or
+                (not is_systemd_service_active(systemd_service))):
+                return self._popen(f'systemctl restart {systemd_service}')
         else:
             if is_systemd_service_active(systemd_service):
                 self._cmd(f'systemctl stop {systemd_service}')
@@ -1676,10 +1679,6 @@ class Interface(Control):
                 else:
                     self.del_addr(addr)
 
-        # start DHCPv6 client when only PD was configured
-        if dhcpv6pd:
-            self.set_dhcpv6(True)
-
         # XXX: Bind interface to given VRF or unbind it if vrf is not set. Unbinding
         # will call 'ip link set dev eth0 nomaster' which will also drop the
         # interface out of any bridge or bond - thus this is checked before.
@@ -1697,6 +1696,10 @@ class Interface(Control):
                 vrf_changed = self.set_vrf('')
         else:
             vrf_changed = self.set_vrf(config.get('vrf', ''))
+
+        # start DHCPv6 client when only PD was configured
+        if dhcpv6pd:
+            self.set_dhcpv6(True, vrf_changed=vrf_changed)
 
         # Add this section after vrf T4331
         for addr in new_addr:
