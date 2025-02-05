@@ -17,10 +17,7 @@
 import unittest
 
 from base_vyostest_shim import VyOSUnitTestSHIM
-
-from vyos.firewall import find_nftables_rule
 from vyos.utils.process import process_named_running
-from vyos.utils.file import read_file
 
 tunnel_path = ['interfaces', 'tunnel']
 nhrp_path = ['protocols', 'nhrp']
