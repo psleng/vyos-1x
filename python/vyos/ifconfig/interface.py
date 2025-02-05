@@ -1237,7 +1237,7 @@ class Interface(Control):
 
         return True
 
-    def del_addr(self, addr: str, vrf_changed: bool=False) -> bool:
+    def del_addr(self, addr: str) -> bool:
         """
         Delete IP(v6) address from interface. Address is only deleted if it is
         assigned to that interface. Address format must be exactly the same as
