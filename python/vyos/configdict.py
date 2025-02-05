@@ -492,10 +492,6 @@ def get_interface_dict(config, base, ifname='', recursive_defaults=True, with_pk
     dhcp = is_node_changed(config, base + [ifname, 'dhcp-options'])
     if dhcp: dict.update({'dhcp_options_changed' : {}})
 
-    # Changine interface VRF assignemnts require a DHCP restart, too
-    dhcp = is_node_changed(config, base + [ifname, 'vrf'])
-    if dhcp: dict.update({'dhcp_options_changed' : {}})
-
     # Some interfaces come with a source_interface which must also not be part
     # of any other bond or bridge interface as it is exclusivly assigned as the
     # Kernels "lower" interface to this new "virtual/upper" interface.

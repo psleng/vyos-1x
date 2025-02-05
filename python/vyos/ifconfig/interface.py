@@ -595,12 +595,16 @@ class Interface(Control):
         """
         Add/Remove interface from given VRF instance.
 
+        Keyword arguments:
+        vrf: VRF instance name or empty string (default VRF)
+
+        Return True if VRF was changed, False otherwise
+
         Example:
         >>> from vyos.ifconfig import Interface
         >>> Interface('eth0').set_vrf('foo')
         >>> Interface('eth0').set_vrf()
         """
-
         # Don't allow for netns yet
         if 'netns' in self.config:
             return False
@@ -617,15 +621,17 @@ class Interface(Control):
             # Get routing table ID number for VRF
             vrf_table_id = get_vrf_tableid(vrf)
             # Add map element with interface and zone ID
-            if vrf_table_id:
+            if vrf_table_id and old_vrf_tableid != vrf_table_id:
                 # delete old table ID from nftables if it has changed, e.g. interface moved to a different VRF
-                if old_vrf_tableid and old_vrf_tableid != int(vrf_table_id):
-                    self._del_interface_from_ct_iface_map()
+                self._del_interface_from_ct_iface_map()
                 self._add_interface_to_ct_iface_map(vrf_table_id)
+                return True
         else:
-            self._del_interface_from_ct_iface_map()
+            if old_vrf_tableid != get_vrf_tableid(self.ifname):
+                self._del_interface_from_ct_iface_map()
+                return True
 
-        return True
+        return False
 
     def set_arp_cache_tmo(self, tmo):
         """
@@ -1181,7 +1187,7 @@ class Interface(Control):
         """
         return self.get_addr_v4() + self.get_addr_v6()
 
-    def add_addr(self, addr):
+    def add_addr(self, addr: str, vrf_changed: bool=False) -> bool:
         """
         Add IP(v6) address to interface. Address is only added if it is not
         already assigned to that interface. Address format must be validated
@@ -1214,7 +1220,7 @@ class Interface(Control):
 
         # add to interface
         if addr == 'dhcp':
-            self.set_dhcp(True)
+            self.set_dhcp(True, vrf_changed=vrf_changed)
         elif addr == 'dhcpv6':
             self.set_dhcpv6(True)
         elif not is_intf_addr_assigned(self.ifname, addr, netns=netns):
@@ -1222,7 +1228,6 @@ class Interface(Control):
             tmp = f'{netns_cmd} ip addr add {addr} dev {self.ifname}'
             # Add broadcast address for IPv4
             if is_ipv4(addr): tmp += ' brd +'
-
             self._cmd(tmp)
         else:
             return False
@@ -1232,7 +1237,7 @@ class Interface(Control):
 
         return True
 
-    def del_addr(self, addr):
+    def del_addr(self, addr: str, vrf_changed: bool=False) -> bool:
         """
         Delete IP(v6) address from interface. Address is only deleted if it is
         assigned to that interface. Address format must be exactly the same as
@@ -1356,7 +1361,7 @@ class Interface(Control):
                     cmd = f'bridge vlan add dev {ifname} vid {native_vlan_id} pvid untagged master'
                     self._cmd(cmd)
 
-    def set_dhcp(self, enable):
+    def set_dhcp(self, enable: bool, vrf_changed: bool=False):
         """
         Enable/Disable DHCP client on a given interface.
         """
@@ -1396,7 +1401,9 @@ class Interface(Control):
             # the old lease is released a new one is acquired (T4203). We will
             # only restart DHCP client if it's option changed, or if it's not
             # running, but it should be running (e.g. on system startup)
-            if 'dhcp_options_changed' in self.config or not is_systemd_service_active(systemd_service):
+            if (vrf_changed or
+                ('dhcp_options_changed' in self.config) or
+                (not is_systemd_service_active(systemd_service))):
                 return self._cmd(f'systemctl restart {systemd_service}')
         else:
             if is_systemd_service_active(systemd_service):
@@ -1676,23 +1683,24 @@ class Interface(Control):
         # XXX: Bind interface to given VRF or unbind it if vrf is not set. Unbinding
         # will call 'ip link set dev eth0 nomaster' which will also drop the
         # interface out of any bridge or bond - thus this is checked before.
+        vrf_changed = False
         if 'is_bond_member' in config:
             bond_if = next(iter(config['is_bond_member']))
             tmp = get_interface_config(config['ifname'])
             if 'master' in tmp and tmp['master'] != bond_if:
-                self.set_vrf('')
+                vrf_changed = self.set_vrf('')
 
         elif 'is_bridge_member' in config:
             bridge_if = next(iter(config['is_bridge_member']))
             tmp = get_interface_config(config['ifname'])
             if 'master' in tmp and tmp['master'] != bridge_if:
-                self.set_vrf('')
+                vrf_changed = self.set_vrf('')
         else:
-            self.set_vrf(config.get('vrf', ''))
+            vrf_changed = self.set_vrf(config.get('vrf', ''))
 
         # Add this section after vrf T4331
         for addr in new_addr:
-            self.add_addr(addr)
+            self.add_addr(addr, vrf_changed=vrf_changed)
 
         # Configure MSS value for IPv4 TCP connections
         tmp = dict_search('ip.adjust_mss', config)
