@@ -126,14 +126,6 @@
             <help>Redistribute routes from other protocols into BGP</help>
           </properties>
           <children>
-            <node name="isis">
-              <properties>
-                <help>Redistribute IS-IS routes into BGP</help>
-              </properties>
-              <children>
-                #include <include/bgp/afi-redistribute-metric-route-map.xml.i>
-              </children>
-            </node>
             #include <include/bgp/afi-redistribute-common-protocols.xml.i>
             <node name="ospf">
               <properties>
