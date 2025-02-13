@@ -42,6 +42,11 @@
 <leafNode name="table">
   <properties>
     <help>Redistribute non-main Kernel Routing Table</help>
+    <completionHelp>
+      <path>protocols static table</path>
+    </completionHelp>
+    #include <include/constraint/protocols-static-table.xml.i>
+    <multi/>
   </properties>
 </leafNode>
 <!-- include end -->

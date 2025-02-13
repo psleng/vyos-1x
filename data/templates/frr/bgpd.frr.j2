@@ -310,7 +310,9 @@ router bgp {{ system_as }} {{ 'vrf ' ~ vrf if vrf is vyos_defined }}
 {%         if afi_config.redistribute is vyos_defined %}
 {%             for protocol, protocol_config in afi_config.redistribute.items() %}
 {%                 if protocol == 'table' %}
-  redistribute table {{ protocol_config.table }}
+{%                     for table in protocol_config %}
+  redistribute table-direct {{ table }}
+{%                     endfor %}
 {%                 else %}
 {%                     set redistribution_protocol = protocol %}
 {%                     if protocol == 'ospfv3' %}
