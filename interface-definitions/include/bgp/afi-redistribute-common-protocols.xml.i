@@ -39,14 +39,16 @@
     #include <include/bgp/afi-redistribute-metric-route-map.xml.i>
   </children>
 </node>
-<leafNode name="table">
+<tagNode name="table">
   <properties>
     <help>Redistribute non-main Kernel Routing Table</help>
     <completionHelp>
       <path>protocols static table</path>
     </completionHelp>
     #include <include/constraint/protocols-static-table.xml.i>
-    <multi/>
   </properties>
-</leafNode>
+  <children>
+    #include <include/bgp/afi-redistribute-metric-route-map.xml.i>
+  </children>
+</tagNode>
 <!-- include end -->
