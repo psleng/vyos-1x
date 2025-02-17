@@ -295,6 +295,28 @@ delegate={delegate_2_prefix},{delegate_mask},name={pool_name}"""
         tmp = re.findall(regex, tmp)
         self.assertTrue(tmp)
 
+    def test_ipoe_server_start_session(self):
+        start_session = 'auto'
+
+        # Configuration of local authentication for PPPoE server
+        self.basic_config()
+        self.cli_commit()
+
+        # Validate configuration values
+        conf = ConfigParser(allow_no_value=True, delimiters='=', strict=False)
+        conf.read(self._config_file)
+        # if 'start-session' option is not set the default value is 'dhcp'
+        self.assertIn(f'start=dhcpv4', conf['ipoe']['interface'])
+
+        # change 'start-session' option to 'auto'
+        self.set(['interface', interface, 'start-session', start_session])
+        self.cli_commit()
+
+        # Validate changed configuration values
+        conf = ConfigParser(allow_no_value=True, delimiters='=', strict=False)
+        conf.read(self._config_file)
+        self.assertIn(f'start={start_session}', conf['ipoe']['interface'])
+
     @unittest.skip("PPP is not a part of IPoE")
     def test_accel_ppp_options(self):
         pass
