@@ -260,7 +260,7 @@ delegate={delegate_2_prefix},{delegate_mask},name={pool_name}"""
         tmp = ','.join(vlans)
         self.assertIn(f'{interface},{tmp}', conf['ipoe']['vlan-mon'])
 
-    def test_ipoe_server_static_client_ip(self):
+    def test_ipoe_server_static_client_ip_address(self):
         mac_address = '08:00:27:2f:d8:06'
         ip_address = '192.0.2.100'
 
@@ -274,7 +274,7 @@ delegate={delegate_2_prefix},{delegate_mask},name={pool_name}"""
                 interface,
                 'mac',
                 mac_address,
-                'static-ip',
+                'ip-address',
                 ip_address,
             ]
         )
