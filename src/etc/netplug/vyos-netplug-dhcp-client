@@ -19,7 +19,7 @@ import sys
 
 from time import sleep
 
-from vyos.configquery import ConfigTreeQuery
+from vyos.config import Config
 from vyos.configdict import get_interface_dict
 from vyos.ifconfig import Interface
 from vyos.ifconfig import Section
@@ -48,7 +48,7 @@ while commit_in_progress():
     sleep(1)
 
 in_out = sys.argv[2]
-config = ConfigTreeQuery()
+config = Config()
 
 interface_path = ['interfaces'] + Section.get_config_path(interface).split()
 _, interface_config = get_interface_dict(
