@@ -25,7 +25,7 @@ table ip vyos_wanloadbalance {
 {% if rule is vyos_defined %}
 {%     for rule_id, rule_conf in rule.items() %}
 {%         if rule_conf.exclude is vyos_defined %}
-        {{ rule_conf | wlb_nft_rule(rule_id, exclude=True, action='accept') }}
+        {{ rule_conf | wlb_nft_rule(rule_id, exclude=True, action='return') }}
 {%         else %}
 {%             set limit = rule_conf.limit is vyos_defined %}
         {{ rule_conf | wlb_nft_rule(rule_id, limit=limit, weight=True, health_state=health_state) }}
@@ -38,13 +38,13 @@ table ip vyos_wanloadbalance {
     chain wlb_mangle_output {
         type filter hook output priority -150; policy accept;
 {% if enable_local_traffic is vyos_defined %}
-        meta mark != 0x0 counter accept
-        meta l4proto icmp counter accept
-        ip saddr 127.0.0.0/8 ip daddr 127.0.0.0/8 counter accept
+        meta mark != 0x0 counter return
+        meta l4proto icmp counter return
+        ip saddr 127.0.0.0/8 ip daddr 127.0.0.0/8 counter return
 {%     if rule is vyos_defined %}
 {%         for rule_id, rule_conf in rule.items() %}
 {%             if rule_conf.exclude is vyos_defined  %}
-        {{ rule_conf | wlb_nft_rule(rule_id, local=True, exclude=True, action='accept') }}
+        {{ rule_conf | wlb_nft_rule(rule_id, local=True, exclude=True, action='return') }}
 {%             else %}
 {%                 set limit = rule_conf.limit is vyos_defined %}
         {{ rule_conf | wlb_nft_rule(rule_id, local=True, limit=limit, weight=True, health_state=health_state) }}
