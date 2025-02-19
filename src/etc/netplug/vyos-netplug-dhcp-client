@@ -26,14 +26,15 @@ from vyos.ifconfig import Section
 from vyos.utils.boot import boot_configuration_complete
 from vyos.utils.commit import commit_in_progress
 from vyos import airbag
+
 airbag.enable()
 
 if len(sys.argv) < 3:
-    airbag.noteworthy("Must specify both interface and link status!")
+    airbag.noteworthy('Must specify both interface and link status!')
     sys.exit(1)
 
 if not boot_configuration_complete():
-    airbag.noteworthy("System bootup not yet finished...")
+    airbag.noteworthy('System bootup not yet finished...')
     sys.exit(1)
 
 interface = sys.argv[1]
@@ -50,5 +51,7 @@ in_out = sys.argv[2]
 config = ConfigTreeQuery()
 
 interface_path = ['interfaces'] + Section.get_config_path(interface).split()
-_, interface_config = get_interface_dict(config, interface_path[:-1], ifname=interface, with_pki=True)
+_, interface_config = get_interface_dict(
+    config, interface_path[:-1], ifname=interface, with_pki=True
+)
 Interface(interface).update(interface_config)
