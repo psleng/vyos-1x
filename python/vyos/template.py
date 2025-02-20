@@ -612,12 +612,17 @@ def nft_default_rule(fw_conf, fw_name, family):
     return " ".join(output)
 
 @register_filter('nft_state_policy')
-def nft_state_policy(conf, state):
+def nft_state_policy(conf, state, bridge=False):
     out = [f'ct state {state}']
+
+    action = conf['action'] if 'action' in conf else None
+
+    if bridge and action == 'reject':
+        action = 'drop' # T7148 - Bridge cannot use reject
 
     if 'log' in conf:
         log_state = state[:3].upper()
-        log_action = (conf['action'] if 'action' in conf else 'accept')[:1].upper()
+        log_action = (action if action else 'accept')[:1].upper()
         out.append(f'log prefix "[STATE-POLICY-{log_state}-{log_action}]"')
 
         if 'log_level' in conf:
@@ -626,8 +631,8 @@ def nft_state_policy(conf, state):
 
     out.append('counter')
 
-    if 'action' in conf:
-        out.append(conf['action'])
+    if action:
+        out.append(action)
 
     return " ".join(out)
 

@@ -658,6 +658,13 @@ class TestFirewall(VyOSUnitTestSHIM.TestCase):
 
         self.verify_nftables(nftables_search, 'ip vyos_filter')
 
+        # T7148 - Ensure bridge rule reject -> drop
+        self.cli_set(['firewall', 'global-options', 'state-policy', 'invalid', 'action', 'reject'])
+        self.cli_commit()
+
+        self.verify_nftables([['ct state invalid', 'reject']], 'ip vyos_filter')
+        self.verify_nftables([['ct state invalid', 'drop']], 'bridge vyos_filter')
+
         # Check conntrack is enabled from state-policy
         self.verify_nftables_chain([['accept']], 'ip vyos_conntrack', 'FW_CONNTRACK')
         self.verify_nftables_chain([['accept']], 'ip6 vyos_conntrack', 'FW_CONNTRACK')
