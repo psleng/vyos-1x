@@ -412,6 +412,35 @@
               </constraint>
             </properties>
           </leafNode>
+          <tagNode name="tmpfs">
+            <properties>
+              <help>Mount a tmpfs filesystem into the container</help>
+            </properties>
+            <children>
+              <leafNode name="destination">
+                <properties>
+                  <help>Destination container directory</help>
+                  <valueHelp>
+                    <format>txt</format>
+                    <description>Destination container directory</description>
+                  </valueHelp>
+                </properties>
+              </leafNode>
+              <leafNode name="size">
+                <properties>
+                  <help>tmpfs filesystem size in MB</help>
+                  <valueHelp>
+                    <format>u32:1-65536</format>
+                    <description>tmpfs filesystem size in MB</description>
+                  </valueHelp>
+                  <constraint>
+                    <validator name="numeric" argument="--range 1-65535"/>
+                  </constraint>
+                  <constraintErrorMessage>Container tmpfs size must be between 1 and 65535 MB</constraintErrorMessage>
+                </properties>
+              </leafNode>
+            </children>
+          </tagNode>
           <tagNode name="volume">
             <properties>
               <help>Mount a volume into the container</help>
