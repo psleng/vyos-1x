@@ -1096,6 +1096,20 @@
                       </constraint>
                     </properties>
                   </leafNode>
+                  <leafNode name="source-vrf">
+                    <properties>
+                      <help>Source vrf</help>
+                      #include <include/constraint/vrf.xml.i>
+                      <valueHelp>
+                        <format>txt</format>
+                        <description>VRF instance name</description>
+                      </valueHelp>
+                      <completionHelp>
+                        <path>vrf name</path>
+                        <list>default</list>
+                      </completionHelp>
+                    </properties>
+                  </leafNode>
                   #include <include/policy/tag.xml.i>
                 </children>
               </node>
