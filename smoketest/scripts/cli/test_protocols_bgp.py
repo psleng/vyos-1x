@@ -672,6 +672,10 @@ class TestProtocolsBGP(VyOSUnitTestSHIM.TestCase):
                 'metric' : '400',
                 'route_map' : 'redistr-ipv4-kernel',
             },
+            'nhrp': {
+                'metric': '400',
+                'route_map': 'redistr-ipv4-nhrp',
+            },
             'ospf' : {
                 'metric' : '500',
                 'route_map' : 'redistr-ipv4-ospf',

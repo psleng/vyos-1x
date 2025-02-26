@@ -31,6 +31,14 @@
     #include <include/bgp/afi-redistribute-metric-route-map.xml.i>
   </children>
 </node>
+<node name="nhrp">
+  <properties>
+    <help>Redistribute NHRP routes into BGP</help>
+  </properties>
+  <children>
+    #include <include/bgp/afi-redistribute-metric-route-map.xml.i>
+  </children>
+</node>
 <node name="static">
   <properties>
     <help>Redistribute static routes into BGP</help>
