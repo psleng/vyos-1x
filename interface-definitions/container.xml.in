@@ -31,7 +31,7 @@
             <properties>
               <help>Grant individual Linux capability to container instance</help>
               <completionHelp>
-                <list>net-admin net-bind-service net-raw setpcap sys-admin sys-module sys-nice sys-time</list>
+                <list>net-admin net-bind-service net-raw mknod setpcap sys-admin sys-module sys-nice sys-time</list>
               </completionHelp>
               <valueHelp>
                 <format>net-admin</format>
@@ -44,6 +44,10 @@
               <valueHelp>
                 <format>net-raw</format>
                 <description>Permission to create raw network sockets</description>
+              </valueHelp>
+              <valueHelp>
+                <format>mknod</format>
+                <description>Permission to create special files</description>
               </valueHelp>
               <valueHelp>
                 <format>setpcap</format>
@@ -66,7 +70,7 @@
                 <description>Permission to set system clock</description>
               </valueHelp>
               <constraint>
-                <regex>(net-admin|net-bind-service|net-raw|setpcap|sys-admin|sys-module|sys-nice|sys-time)</regex>
+                <regex>(net-admin|net-bind-service|net-raw|mknod|setpcap|sys-admin|sys-module|sys-nice|sys-time)</regex>
               </constraint>
               <multi/>
             </properties>
