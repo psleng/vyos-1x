@@ -29,7 +29,6 @@ from vyos.configverify import verify_vrf
 from vyos.configverify import verify_mtu_ipv6
 from vyos.ifconfig import WWANIf
 from vyos.utils.dict import dict_search
-from vyos.utils.network import is_wwan_connected
 from vyos.utils.process import cmd
 from vyos.utils.process import call
 from vyos.utils.process import DEVNULL
@@ -122,21 +121,6 @@ def generate(wwan):
 
     return None
 
-from dbus_next.aio import MessageBus
-from dbus_next import BusType
-import asyncio
-async def simple_connect(modem_path: str, apn: str): # TODO : Temporary function to test usage of the new DBus interface
-    bus = await MessageBus(bus_type=BusType.SYSTEM).connect() # TODO : ensure system bus is connected before attempting
-    proxy_object = bus.get_proxy_object(
-        'com.perle.ModemConnectionService',
-        '/com/perle/ModemConnectionService',
-        await bus.introspect('com.perle.ModemConnectionService', '/com/perle/ModemConnectionService')
-    )
-    interface = proxy_object.get_interface('com.perle.ModemConnectionService.Interface')
-
-    await interface.call_Connect(modem_path, apn) # TODO : properly handle connection failure
-
-
 def apply(wwan):
     # ModemManager is required to dial WWAN connections - one instance is
     # required to serve all modems. Activate ModemManager on first invocation
@@ -152,8 +136,8 @@ def apply(wwan):
             if tmp != 'No modems were found':
                 break
             sleep(0.250)
-    modem = None
-    if 'shutdown_required' in wwan or (not is_wwan_connected(wwan['ifname'])):
+
+    if 'shutdown_required' in wwan:
         # deprecated: we only need the modem number. wwan0 -> 0, wwan1 -> 1
         # modem = wwan['ifname'].lstrip('wwan')
         # get the modem index of the first modem, assuming only one modem detected
@@ -178,7 +162,7 @@ def apply(wwan):
 
         return None
 
-    if 'shutdown_required' in wwan or (not is_wwan_connected(wwan['ifname'])):
+    if 'shutdown_required' in wwan:
         ip_type = 'ipv4'
         slaac = dict_search('ipv6.address.autoconf', wwan) != None
         if 'address' in wwan:
@@ -193,11 +177,8 @@ def apply(wwan):
         if 'authentication' in wwan:
             options += ',user={username},password={password}'.format(**wwan['authentication'])
 
-        if False: # Change to True to use the new DBus interface. Ensure the com.perle.ModemConnectionService is running first "wwan_dbus_interface.py"
-            asyncio.run(simple_connect(f'/org/freedesktop/ModemManager1/Modem/{modem}', wwan['apn']))
-        else:
-            command = f'{base_cmd} --simple-connect="{options}"'
-            call(command, stdout=DEVNULL)
+        command = f'{base_cmd} --simple-connect="{options}"'
+        call(command, stdout=DEVNULL)
 
     w.update(wwan)
     return None
