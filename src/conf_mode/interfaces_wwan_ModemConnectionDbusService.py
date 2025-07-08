@@ -16,6 +16,25 @@ formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
+def _log_properties(properties, indent=0):
+    """Recursively log properties with proper indentation, unwrapping Variant types."""
+    for key, value in properties.items():
+        value = value.value if isinstance(value, Variant) else value
+        if isinstance(value, dict):
+            logger.debug(" " * indent + f"{key}:")
+            _log_properties(value, indent + 4)
+        elif isinstance(value, list):
+            logger.debug(" " * indent + f"{key}: [")
+            for item in value:
+                item = item.value if isinstance(item, Variant) else item
+                if isinstance(item, dict):
+                    _log_properties(item, indent + 4)
+                else:
+                    logger.debug(" " * (indent + 4) + f"{item}")
+            logger.debug(" " * indent + "]")
+        else:
+            logger.debug(" " * indent + f"{key}: {value}")
+
 class ModemConnectionService(ServiceInterface):
     def __init__(self):
         super().__init__('com.perle.ModemConnectionService.Interface')
@@ -108,6 +127,26 @@ class ModemConnectionService(ServiceInterface):
         #disconnect has no return. Assume that it will always disconnect from the bearer path given
         await simple_interface.call_disconnect(self._bearer_path)
 
+    @method()
+    async def GetModemInfo(self, modem_path: 's') -> 'a{sv}': # type: ignore
+        """Get information about the modem."""
+        logger.debug(f"Getting modem info for {modem_path}")
+        bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+        proxy_object = bus.get_proxy_object(
+            'org.freedesktop.ModemManager1',
+            modem_path,
+            await bus.introspect('org.freedesktop.ModemManager1', modem_path)
+        )
+        simple_interface = proxy_object.get_interface('org.freedesktop.ModemManager1.Modem.Simple')
+
+        # Retrieve all properties of the modem
+        properties = await simple_interface.call_get_status()
+        _log_properties(properties)
+
+        bus.disconnect()
+        await bus.wait_for_disconnect()
+
+        return properties
 
 def message_handler(message: message.Message): # TODO: Can do more with this handler, like logging or processing signals
     """Handle incoming D-Bus messages."""
