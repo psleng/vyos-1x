@@ -20,11 +20,6 @@
         </properties>
         <children>
           #include <include/interface/address-ipv4-ipv6-dhcp.xml.i>
-          <leafNode name="apn">
-            <properties>
-              <help>Access Point Name (APN)</help>
-            </properties>
-          </leafNode>
           #include <include/interface/dhcp-options.xml.i>
           #include <include/interface/dhcpv6-options.xml.i>
           #include <include/interface/authentication.xml.i>
@@ -42,6 +37,7 @@
           #include <include/interface/dial-on-demand.xml.i>
           #include <include/interface/redirect.xml.i>
           #include <include/interface/vrf.xml.i>
+          #include <include/interface/wwan-profile.xml.i>
         </children>
       </tagNode>
     </children>
