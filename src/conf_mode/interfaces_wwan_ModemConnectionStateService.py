@@ -6,7 +6,6 @@ from automaton import machines
 from automaton import runners
 
 import asyncio, logging, sys, signal
-from enum import Enum
 from typing import Literal
 
 
@@ -153,8 +152,9 @@ class ModemConnectionStateService(ServiceInterface):
     """
 
     # This service manages the state of modem connections using a finite state machine.
-    # it takes the modem path as an argument to initialize the service.
-    # it will read the vyos configuration corresponding to the modem given to manage the connection
+    # it takes the device name and interface name as an argument to initialize the service. TODO : providing one of device name or interface name will be enough
+    # it will resolve the modem path using the device name or interface name.
+    # TODO : it will read the vyos configuration corresponding to the modem given to manage the connection
     def __init__(self, device_name: str, wwan_interface: str):
         super().__init__('com.perle.ModemConnectionStateService.Interface')
         self.device_name = device_name
@@ -175,7 +175,7 @@ class ModemConnectionStateService(ServiceInterface):
     async def get_available_modems(self):
         """
         Retrieve a list of available modems.
-        This method will query the ModemManager for available modems.
+        This method will query the ModemManager for available modems and make a list of dictionaries containing the interface name, device name, and modem path.
         """
         bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
         introspection = await bus.introspect('org.freedesktop.ModemManager1', '/org/freedesktop/ModemManager1')
@@ -229,11 +229,12 @@ class ModemConnectionStateService(ServiceInterface):
         pass
 
 async def main():
+    # TODO : hard coded device names and interfaces for testing, this will be replaced with a proper configuration
     m1 = ModemConnectionStateService(device_name='/sys/devices/pci0000:00/0000:00:05.0/usb3/3-3', wwan_interface='wwan0')
     m2 = ModemConnectionStateService(device_name='/sys/devices/pci0000:00/0000:00:05.0/usb3/3-2', wwan_interface='wwan1')
     await m1.initialize()
     await m2.initialize()
-    # TODO : makethis into a dbus service. get the main loop running on its own while interacting on the dbus
+    # TODO : make this into a dbus service. get the main loop running on its own while interacting on the dbus
 
 if __name__ == "__main__":
     asyncio.run(main())
