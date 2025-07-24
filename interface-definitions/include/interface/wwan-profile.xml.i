@@ -1,11 +1,14 @@
 <!-- include start from interface/dhcp-wwan-profile.xml.i -->
-<node name="wwan-profile">
+<tagNode name="wwan-profile">
   <properties>
     <help>WWAN profile settings</help>
     <valueHelp>
-      <format>string</format>
+      <format>Connection Profile</format>
       <description>Profile name for the WWAN connection</description>
     </valueHelp>
+    <completionHelp>
+      <list>primary alternate</list>
+    </completionHelp>
     <constraint>
       <regex>(primary|alternate)</regex>
     </constraint>
@@ -21,19 +24,22 @@
         </properties>
     </leafNode>
 
-    <node name="wwan-authentication">
+    <tagNode name="wwan-authentication">
         <properties>
           <help>Authentication method for the APN</help>
           <valueHelp>
               <format>string</format>
               <description>Authentication method for the WWAN connection</description>
           </valueHelp>
+          <completionHelp>
+              <list>chap pap</list>
+          </completionHelp>
           <constraint>
               <regex>(chap|pap)</regex>
           </constraint>
         </properties>
         <children>
-          <leafNode name="wwan-username">
+          <leafNode name="username">
               <properties>
                 <help>Username for APN authentication</help>
                 <valueHelp>
@@ -42,7 +48,7 @@
                 </valueHelp>
               </properties>
           </leafNode>
-          <leafNode name="wwan-password">
+          <leafNode name="password">
               <properties>
                 <help>Password for APN authentication</help>
                 <valueHelp>
@@ -52,15 +58,18 @@
               </properties>
           </leafNode>
         </children>
-    </node>
+    </tagNode>
 
-    <node name="technology">
+    <tagNode name="technology">
         <properties>
           <help>WWAN technology type</help>
           <valueHelp>
               <format>string</format>
               <description>Technology type for the WWAN connection</description>
           </valueHelp>
+          <completionHelp>
+              <list>5g lte wcdma gsm</list>
+          </completionHelp>
           <constraint>
               <regex>(5g|lte|wcdma|gsm)</regex>
           </constraint>
@@ -76,7 +85,7 @@
               </properties>
           </leafNode>
         </children>
-    </node>
+    </tagNode>
 
     <leafNode name="cid">
         <properties>
@@ -104,26 +113,22 @@
         </properties>
     </leafNode>
 
-    <leafNode name="roaming">
+    <leafNode name="roaming-enable">
         <properties>
           <help>Roaming settings for the WWAN profile</help>
-          <valueHelp>
-              <format>boolean</format>
-              <description>Enable or disable roaming for the WWAN connection</description>
-          </valueHelp>
+          <valueless/>
         </properties>
-        <defaultValue>false</defaultValue>
     </leafNode>
 
     <leafNode name="sim-slot">
         <properties>
           <help>SIM slot for the WWAN profile</help>
           <valueHelp>
-              <format>u32:0-2</format>
+              <format>u32:1-2</format>
               <description>SIM slot for the WWAN connection</description>
           </valueHelp>
           <constraint>
-              <validator name="numeric" argument="--range 0-2"/>
+              <validator name="numeric" argument="--range 1-2"/>
           </constraint>
         </properties>
     </leafNode>
@@ -140,6 +145,9 @@
               <format>string</format>
               <description>Action to take when data limit is reached</description>
             </valueHelp>
+            <completionHelp>
+              <list>block notify</list>
+            </completionHelp>
             <constraint>
               <regex>(block|notify)</regex>
             </constraint>
@@ -164,6 +172,9 @@
               <format>string</format>
               <description>Method to alert when data limit is reached</description>
             </valueHelp>
+            <completionHelp>
+              <list>syslog snmp relay</list>
+            </completionHelp>
             <constraint>
               <regex>(syslog|snmp|relay)</regex>
             </constraint>
@@ -196,5 +207,5 @@
       </children>
     </node>
 </children>
-</node>
+</tagNode>
 <!-- include end -->
