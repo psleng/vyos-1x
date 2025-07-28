@@ -39,7 +39,7 @@
           </constraint>
         </properties>
         <children>
-          <leafNode name="username">
+          <tagNode name="username">
               <properties>
                 <help>Username for APN authentication</help>
                 <valueHelp>
@@ -47,16 +47,18 @@
                     <description>Username for the WWAN connection</description>
                 </valueHelp>
               </properties>
-          </leafNode>
-          <leafNode name="password">
-              <properties>
-                <help>Password for APN authentication</help>
-                <valueHelp>
-                    <format>string</format>
-                    <description>Password for the WWAN connection</description>
-                </valueHelp>
-              </properties>
-          </leafNode>
+              <children>
+                <leafNode name="password">
+                  <properties>
+                    <help>Password for APN authentication</help>
+                    <valueHelp>
+                      <format>string</format>
+                      <description>Password for the WWAN connection</description>
+                    </valueHelp>
+                  </properties>
+                </leafNode>
+            </children>
+          </tagNode>
         </children>
     </tagNode>
 
