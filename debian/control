@@ -95,6 +95,8 @@ Depends:
   python3-voluptuous,
   python3-xmltodict,
   python3-zmq,
+  python3-automaton,
+  python3-dbus-next,
 ## End of Python libraries
 ## Basic System services and utilities
   coreutils,
