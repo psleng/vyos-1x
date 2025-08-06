@@ -53,14 +53,28 @@ def get_config(config=None):
         conf = Config()
     base = ['interfaces', 'wwan']
     ifname, wwan = get_interface_dict(conf, base)
-
+    # TODO :clean up this debug print statements
+    print("***config***")
+    print("***ifname***")
+    print(ifname)
+    print("***wwan***")
+    print(wwan)
+    print("***base***")
+    print(base)
+    wwan_config = wwan.get('wwan_profile', {})
+    primary_conf_dict = parse_wwan_profile_config(wwan_config.get('primary', {}))
+    alternate_conf_dict = parse_wwan_profile_config(wwan_config.get('alternate', {}))
+    print("***primary_conf_dict***")
+    print(primary_conf_dict)
+    print("***alternate_conf_dict***")
+    print(alternate_conf_dict)
     # We should only terminate the WWAN session if critical parameters change.
     # All parameters that can be changed on-the-fly (like interface description)
     # should not lead to a reconnect!
     tmp = is_node_changed(conf, base + [ifname, 'address'])
     if tmp: wwan.update({'shutdown_required': {}})
 
-    tmp = is_node_changed(conf, base + [ifname, 'apn'])
+    tmp = is_node_changed(conf, base + [ifname, 'wwan_profile'])
     if tmp: wwan.update({'shutdown_required': {}})
 
     tmp = is_node_changed(conf, base + [ifname, 'disable'])
@@ -94,8 +108,6 @@ def verify(wwan):
         return None
 
     ifname = wwan['ifname']
-    if not 'apn' in wwan:
-        raise ConfigError(f'No APN configured for "{ifname}"!')
 
     verify_interface_exists(wwan, ifname)
     verify_authentication(wwan)
@@ -136,6 +148,54 @@ async def simple_connect(modem_path: str, apn: str): # TODO : Temporary function
 
     await interface.call_Connect(modem_path, apn) # TODO : properly handle connection failure
 
+# takes in the primary or alternate modem profile and parses it
+# parses the modem profile and returns a dictionary with the parsed values to be passed to modem connection
+def parse_wwan_profile_config(wwan_profile:dict):
+    if wwan_profile:
+        apn = wwan_profile.get('apn', '')
+        cid = wwan_profile.get('cid', '')
+        pdp_type = wwan_profile.get('pdp_type', 'ipv4v6defaulttest')
+        roaming = wwan_profile.get('roaming', False)
+        sim_slot = wwan_profile.get('sim_slot', -1) # Default to -1 if not set and fail
+        if int(sim_slot) < 0:
+            raise ConfigError("Sim slot must be set.")
+        technology = wwan_profile.get('technology', '')
+        if technology:
+            technology_type = next(iter(technology), None)
+            if technology_type:
+                bands = technology.get(technology_type, {}).get('band', [])
+                if not bands:
+                    bands = []
+        else:
+            technology_type = ''
+            bands = []
+        wwan_data_limit = wwan_profile.get('wwan_data_limit', {})
+        if wwan_data_limit:
+            pass # TODO handle data limit
+        authentication_info = wwan_profile.get('wwan_authentication', {})
+        if authentication_info:
+            auth_type = next(iter(authentication_info), None)
+            if auth_type:
+                username_data = authentication_info.get(auth_type, {}).get("username", {})
+                username = next(iter(username_data), None)
+                password = username_data.get(username, {}).get("password")
+
+        else:
+            auth_type = None
+            username = ''
+            password = ''
+
+    wwan_dict = {
+        "APN": apn,
+        "CID": cid,
+        "PDP Type": pdp_type,
+        "Roaming": roaming,
+        "SIM Slot": sim_slot,
+        "Technology": {technology_type: bands},
+        "Authentication": {auth_type: {username: password}}
+    }
+    print(wwan_dict)
+    return wwan_dict
 
 def apply(wwan):
     # ModemManager is required to dial WWAN connections - one instance is
@@ -189,12 +249,12 @@ def apply(wwan):
             elif 'dhcp' in wwan['address']:
                 ip_type = 'ipv4'
 
-        options = f'ip-type={ip_type},apn=' + wwan['apn']
+        options = f'ip-type={ip_type},apn=' #+ wwan['apn']
         if 'authentication' in wwan:
             options += ',user={username},password={password}'.format(**wwan['authentication'])
 
         if False: # Change to True to use the new DBus interface. Ensure the com.perle.ModemConnectionService is running first "wwan_dbus_interface.py"
-            asyncio.run(simple_connect(f'/org/freedesktop/ModemManager1/Modem/{modem}', wwan['apn']))
+            asyncio.run(simple_connect(f'/org/freedesktop/ModemManager1/Modem/{modem}', ['apn'])) # TODO : instead of connect just write the dict to the DBus interface and send a signal to update connection
         else:
             command = f'{base_cmd} --simple-connect="{options}"'
             call(command, stdout=DEVNULL)
