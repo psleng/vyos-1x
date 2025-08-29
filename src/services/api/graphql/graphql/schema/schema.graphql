@@ -1,6 +1,7 @@
 schema {
     query: Query
     mutation: Mutation
+    subscription: Subscription
 }
 
 directive @compositequery on FIELD_DEFINITION
@@ -9,8 +10,10 @@ directive @configsessionquery on FIELD_DEFINITION
 directive @configsessionmutation on FIELD_DEFINITION
 directive @genopquery on FIELD_DEFINITION
 directive @genopmutation on FIELD_DEFINITION
+directive @genopsubscription on FIELD_DEFINITION
 
 scalar Generic
 
 type Query
 type Mutation
+type Subscription

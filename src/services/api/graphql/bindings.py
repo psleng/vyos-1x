@@ -19,9 +19,11 @@ import vyos.defaults
 from ariadne import make_executable_schema
 from ariadne import load_schema_from_path
 from ariadne import snake_case_fallback_resolvers
+from ariadne import SubscriptionType
 
 from .graphql.queries import query
 from .graphql.mutations import mutation
+from .graphql.subscriptions import bind_subscription_extensions
 from .graphql.directives import directives_dict
 from .graphql.errors import op_mode_error
 from .graphql.auth_token_mutation import auth_token_mutation
@@ -39,11 +41,15 @@ def generate_schema():
 
     type_defs = load_schema_from_path(api_schema_dir)
 
+    subscription = SubscriptionType()
+    bind_subscription_extensions(subscription, type_defs)
+
     schema = make_executable_schema(
         type_defs,
         query,
         op_mode_error,
         mutation,
+        subscription,
         auth_token_mutation,
         snake_case_fallback_resolvers,
         directives=directives_dict,

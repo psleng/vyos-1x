@@ -79,9 +79,18 @@ class CompositeMutationDirective(VyosDirective):
         super().visit_field_definition(field, object_type,
                                        make_resolver=make_composite_mutation_resolver)
 
+class GenOpSubscriptionDirective(VyosDirective):
+    """
+    Class providing implementation of 'genopsubscription' directive in schema.
+    """
+    def visit_field_definition(self, field, object_type):
+        return field
+
+
 directives_dict = {"configsessionquery": ConfigSessionQueryDirective,
                    "configsessionmutation": ConfigSessionMutationDirective,
                    "genopquery": GenOpQueryDirective,
                    "genopmutation": GenOpMutationDirective,
                    "compositequery": CompositeQueryDirective,
-                   "compositemutation": CompositeMutationDirective}
+                   "compositemutation": CompositeMutationDirective,
+                   "genopsubscription": GenOpSubscriptionDirective}

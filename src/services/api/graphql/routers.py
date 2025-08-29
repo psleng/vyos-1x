@@ -20,7 +20,8 @@ import typing
 
 from ariadne.asgi import GraphQL
 from starlette.middleware.cors import CORSMiddleware
-
+from fastapi.websockets import WebSocket
+from ariadne.asgi.handlers import GraphQLTransportWSHandler
 
 if typing.TYPE_CHECKING:
     from fastapi import FastAPI
@@ -69,6 +70,18 @@ def graphql_init(app: 'FastAPI'):
                 introspection=in_spec,
             ),
         )
+
+    graphql_app = GraphQL(
+        schema,
+        context_value=get_user_context,
+        debug=True,
+        introspection=in_spec,
+        websocket_handler=GraphQLTransportWSHandler(),
+    )
+
+    @app.websocket('/graphql')
+    async def graphql_ws(websocket: WebSocket):
+        await graphql_app.handle_websocket(websocket)
 
 
 def graphql_clear(app: 'FastAPI'):
