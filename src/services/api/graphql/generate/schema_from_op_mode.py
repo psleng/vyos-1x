@@ -29,20 +29,10 @@ from vyos.opmode import _is_op_mode_function_name as is_op_mode_function_name
 from vyos.opmode import _get_literal_values as get_literal_values
 from vyos.utils.system import load_as_module
 
-def is_subscription_function_name(name: str) -> bool:
+def is_subscribe_function_name(name: str) -> bool:
     if re.match(r"^subscribe", name):
         return True
     return False
-
-
-def _is_op_mode_function_name_subscribe(name):
-    if re.match(
-        r'^subscribe',
-        name,
-    ):
-        return True
-    else:
-        return False
 
 
 if __package__ is None or __package__ == '':
@@ -238,7 +228,7 @@ def create_schema(func_name: str, base_name: str, func: callable,
 
     if is_show_function_name(func_name):
         j2_template = Template(query_template)
-    elif is_subscription_function_name(func_name):
+    elif is_subscribe_function_name(func_name):
         j2_template = Template(subscription_template)
     else:
         j2_template = Template(mutation_template)
@@ -278,7 +268,7 @@ def create_client_op(func_name: str, base_name: str, func: callable,
 
     if is_show_function_name(func_name):
         j2_template = Template(op_query_template)
-    elif is_subscription_function_name(func_name):
+    elif is_subscribe_function_name(func_name):
         j2_template = Template(op_subscription_template)
     else:
         j2_template = Template(op_mutation_template)
@@ -335,7 +325,7 @@ def generate_op_mode_definitions():
         module = load_as_module(basename, os.path.join(OP_MODE_PATH, file))
 
         funcs = getmembers(module, isfunction)
-        funcs = list(filter(lambda ft: is_op_mode_function_name(ft[0]) or _is_op_mode_function_name_subscribe(ft[0]), funcs))
+        funcs = list(filter(lambda ft: is_op_mode_function_name(ft[0]) or is_subscribe_function_name(ft[0]), funcs))
 
         funcs_dict = {}
         for (name, thunk) in funcs:
