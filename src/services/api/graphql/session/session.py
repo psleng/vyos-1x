@@ -218,9 +218,6 @@ class Session:
         return res
 
     def gen_op_subscription(self):
-        import logging
-        logging.basicConfig(filename='graphql_debug.log', level=logging.INFO, filemode='a', format='%(asctime)s - %(levelname)s - %(message)s')
-
         data = self._data
         name = self._name
         op_mode_list = self._op_mode_list
@@ -231,7 +228,6 @@ class Session:
         (func_name, scriptname) = split_compound_op_mode_name(name, op_mode_list)
         if scriptname == '':
             raise FileNotFoundError(f"No op-mode file named in string '{name}'")
-        logging.info(f"gen_op_subscription: name={name}, data={data}, func_name={func_name}, scriptname={scriptname}")
         mod = load_op_mode_as_module(f'{scriptname}')
         func = getattr(mod, func_name)
         try:
