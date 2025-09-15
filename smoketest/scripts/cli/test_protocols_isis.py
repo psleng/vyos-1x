@@ -418,5 +418,64 @@ class TestProtocolsISIS(VyOSUnitTestSHIM.TestCase):
             self.assertIn(f' net {net}', tmp)
             self.assertIn(f' topology {topology}', tmp)
 
+    def test_isis_11_srv6(self):
+        locator = "TEST"
+        interface = 'lo'
+
+        self.cli_set(base_path + ['net', net])
+        self.cli_set(base_path + ['interface', interface])
+        self.cli_set(base_path + ['segment-routing', 'srv6', 'locator', locator])
+
+        # Commit main ISIS changes
+        self.cli_commit()
+
+        # Verify main ISIS changes
+        tmp = self.getFRRconfig(f'router isis {domain}', endsection='^exit')
+        self.assertIn(f' net {net}', tmp)
+        self.assertIn(f' segment-routing srv6', tmp)
+        self.assertIn(f'  locator {locator}', tmp)
+
+        # Commit for isis
+        self.cli_commit()
+
+    def test_isis_12_frr_interface_lfa_remotelfa(self):
+        interface = 'eth0'
+        rla_metric = '10'
+        frr_interface_base_path = base_path + ['interface', interface, 'fast-reroute']
+        self.cli_set(base_path + ['net', net])
+        self.cli_set(base_path + ['interface', interface])
+        self.cli_set(frr_interface_base_path + ['lfa', 'level-1', 'enable'])
+        self.cli_set(frr_interface_base_path + ['lfa', 'level-1', 'exclude',
+                                                'interface', interface])
+        self.cli_set(frr_interface_base_path + ['remote-lfa', 'level-1',
+                                                'maximum-metric', rla_metric])
+        self.cli_set(frr_interface_base_path + ['remote-lfa', 'level-1',
+                                                'tunnel', 'mpls-ldp'])
+
+        # Commit main ISIS changes
+        self.cli_commit()
+
+        # Verify interface ISIS changes
+        tmp = self.getFRRconfig(f'interface {interface}', endsection='^exit')
+        self.assertIn(f' isis fast-reroute lfa level-1', tmp)
+        self.assertIn(f' isis fast-reroute lfa level-1 exclude interface {interface}', tmp)
+        self.assertIn(f' isis fast-reroute remote-lfa maximum-metric {rla_metric} level-1', tmp)
+        self.assertIn(f' isis fast-reroute remote-lfa tunnel mpls-ldp level-1', tmp)
+
+    def test_isis_13_frr_interface_tilfa(self):
+        interface = 'eth0'
+        frr_interface_base_path = base_path + ['interface', interface, 'fast-reroute']
+        self.cli_set(base_path + ['net', net])
+        self.cli_set(base_path + ['interface', interface])
+        self.cli_set(frr_interface_base_path + ['ti-lfa', 'level-1', 'node-protection',
+                                                'link-fallback'])
+
+        # Commit main ISIS changes
+        self.cli_commit()
+
+        # Verify interface ISIS changes
+        tmp = self.getFRRconfig(f'interface {interface}', endsection='^exit')
+        self.assertIn(f' isis fast-reroute ti-lfa level-1 node-protection link-fallback', tmp)
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

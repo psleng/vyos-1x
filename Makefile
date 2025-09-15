@@ -63,7 +63,7 @@ op_mode_definitions: $(op_xml_obj)
 
 	find $(BUILD_DIR)/op-mode-definitions/ -type f -name "*.xml" | xargs -I {} $(CURDIR)/scripts/build-command-op-templates {} $(CURDIR)/schema/op-mode-definition.rng $(OP_TMPL_DIR) || exit 1
 
-	$(CURDIR)/python/vyos/xml_ref/generate_op_cache.py --check-path-ambiguity --xml-dir $(BUILD_DIR)/op-mode-definitions || exit 1
+	$(CURDIR)/python/vyos/xml_ref/generate_op_cache.py --xml-dir $(BUILD_DIR)/op-mode-definitions --export-json $(DATA_DIR)/op_cache.json || exit 1
 
 	# XXX: tcpdump, ping, traceroute and mtr must be able to recursivly call themselves as the
 	# options are provided from the scripts themselves
@@ -114,6 +114,8 @@ check_migration_scripts_executable:
 pylint: interface_definitions
 	@echo Running "pylint --errors-only ..."
 	@PYTHONPATH=python/ pylint --errors-only $(shell git ls-files python/vyos/ifconfig/*.py python/vyos/utils/*.py src/conf_mode/*.py src/op_mode/*.py src/migration-scripts src/services/vyos*)
+	@echo Running "pylint to check for unused imports ..."
+	@PYTHONPATH=python/ pylint --disable=all --enable=W0611 $(shell git ls-files *.py src/migration-scripts src/services)
 
 .PHONY: j2lint
 j2lint:
@@ -125,10 +127,6 @@ endif
 .PHONY: sonar
 sonar:
 	sonar-scanner -X -Dsonar.login=${SONAR_TOKEN}
-
-.PHONY: unused-imports
-unused-imports:
-	@pylint --disable=all --enable=W0611 $(shell git ls-files *.py src/migration-scripts src/services)
 
 deb:
 	dpkg-buildpackage -uc -us -tc -b
