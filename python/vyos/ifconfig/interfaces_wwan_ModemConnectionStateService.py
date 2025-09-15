@@ -1,11 +1,10 @@
-from dbus_next.service import ServiceInterface, method, signal, dbus_property
+from dbus_next.service import ServiceInterface
 from dbus_next.aio import MessageBus
-from dbus_next import BusType, DBusError, PropertyAccess, message
+from dbus_next import BusType
 from dbus_next.signature import Variant
 from automaton import machines
-from automaton import runners
 
-import asyncio, logging, sys, signal
+import asyncio, logging, sys
 from typing import Literal
 
 
