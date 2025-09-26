@@ -43,6 +43,9 @@ Build-Depends:
   python3-setuptools,
   python3-tabulate,
   python3-zmq,
+  python3-automaton,
+  python3-dbus-next,
+  apnscripts,
   quilt,
   whois
 Standards-Version: 3.9.6
@@ -394,6 +397,7 @@ Depends:
   telnet,
   stunnel4,
   uidmap,
+  apnscripts,
   saml-sso
 ## End optional utilities
 Description: VyOS configuration scripts and data
