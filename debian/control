@@ -399,7 +399,8 @@ Depends:
   stunnel4,
   uidmap,
   apnscripts,
-  saml-sso
+  saml-sso,
+  uxfp
 ## End optional utilities
 Description: VyOS configuration scripts and data
  VyOS configuration scripts, interface definitions, and everything
