@@ -55,7 +55,7 @@ CERT_REQ_END = '-----END CERTIFICATE REQUEST-----'
 auth_dir = '/config/auth'
 
 # PERLE add ssh hostkey option
-ArgsPkiType = typing.Literal['ca', 'certificate', 'dh', 'key-pair', 'openvpn', 'crl', 'ssh-hostkey']
+ArgsPkiType = typing.Literal['ca', 'certificate', 'dh', 'key-pair', 'openvpn', 'crl', 'ssh-hostkey', 'ssh-hostkey-txt']
 ArgsPkiTypeGen = typing.Literal[ArgsPkiType, typing.Literal['ssh', 'wireguard']]
 ArgsFingerprint = typing.Literal['sha256', 'sha384', 'sha512']
 
@@ -1243,8 +1243,14 @@ def import_pki(
             )
         elif pki_type == 'openvpn':
             import_openvpn_secret(name, filename)
-        elif pki_type == 'ssh-hostkey':
+        elif pki_type == 'ssh-hostkey': # add handling for importing ssh host keys via copypaste import
             import_ssh_hostkey(name, filename)
+        elif pki_type == 'ssh-hostkey-txt':
+            print("got text input for ssh hostkey import")
+            print(name, filename)
+            #import_ssh_hostkey(name, txt)
+
+
     except KeyboardInterrupt:
         print('Aborted')
         sys.exit(0)
