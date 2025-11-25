@@ -1211,6 +1211,7 @@ def import_pki(
     key_filename: typing.Optional[str],
     no_prompt: typing.Optional[bool],
     passphrase: typing.Optional[str],
+    key_txt: typing.Optional[str],
 ):
     try:
         if pki_type == 'ca':
@@ -1247,7 +1248,7 @@ def import_pki(
             import_ssh_hostkey(name, filename)
         elif pki_type == 'ssh-hostkey-txt':
             print("got text input for ssh hostkey import")
-            print(name, filename)
+            print(name, key_txt)
             #import_ssh_hostkey(name, txt)
 
 

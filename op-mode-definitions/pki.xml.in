@@ -497,24 +497,17 @@
                     <children>
                       <tagNode name="public-key">
                         <properties>
-                          <help>SSH server public hostkey</help>
+                          <help>Public key without headers and footers</help>
+                          <constraint>
+                            <validator name="base64"/>
+                          </constraint>
+                          <constraintErrorMessage>Public key is not base64-encoded</constraintErrorMessage>
                         </properties>
-                        <children>
-                          <leafNode name="key">
-                            <properties>
-                              <help>Private key in PEM format</help>
-                              <constraint>
-                                <validator name="base64"/>
-                              </constraint>
-                              <constraintErrorMessage>Public key is not base64-encoded</constraintErrorMessage>
-                            </properties>
-                            <command>${vyos_op_scripts_dir}/pki.py import_pki --pki-type ssh-hostkey-txt --name "ssh_host_rsa_key" --key-filename "$8"</command>
-                          </leafNode>
-                        </children>
+                        <command>${vyos_op_scripts_dir}/pki.py import_pki --pki-type ssh-hostkey-txt --name "ssh_host_rsa_key" --key-txt "$7"</command>
                       </tagNode>
                       <tagNode name="key-file">
                         <properties>
-                           <help>Path to SSH server hostkey files: key-filename and key-filename.pub ***TEST** REMOVE</help>
+                           <help>Path to SSH server hostkey files: key-filename and key-filename.pub</help>
                         </properties>
                         <command>${vyos_op_scripts_dir}/pki.py import_pki --pki-type ssh-hostkey --name "ssh_host_rsa_key" --filename "$7"</command>
                       </tagNode>
