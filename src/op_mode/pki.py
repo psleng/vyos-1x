@@ -1206,10 +1206,10 @@ def generate_pki(
 def save_ssh_hostkey_txt(name: str, key_txt: str, type: str):
     """Save pasted SSH key text into appropriate temporary filename and format.
 
-    For public keys we expect the OpenSSH single-line public key (e.g. "ssh-rsa AAAAB3Nza...").
-    For private keys we accept either a PEM-like block or the OpenSSH private key format and write
-    it verbatim to the temp file. The import flow expects /tmp/{name} for the private key and
-    /tmp/{name}.pub for the public key.
+    For public keys we expect the OpenSSH single-line public key (e.g. "ssh-rsa AAAAB3Nza..."). or just the base64 part.
+    We write it to /tmp/{name}.pub either verbatim or prefixed with the appropriate algorithm identifier.
+    For private keys we accept either a PEM-like block or base64 only. We wrap base64-only keys into a PEM-like block and attach header/footer
+    according to the key type, or write it verbatim to the temp file.
     """
     temp_filename = f'/tmp/{name}'
 
