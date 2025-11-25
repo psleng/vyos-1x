@@ -1281,8 +1281,8 @@ def save_ssh_hostkey_txt(name: str, key_txt: str, type: str):
                         header = '-----BEGIN PRIVATE KEY-----'
                         footer = '-----END PRIVATE KEY-----'
 
-                    # wrap lines at 64 chars
-                    wrapped = '\n'.join([b64_body[i:i+64] for i in range(0, len(b64_body), 64)])
+                    # wrap lines at 70 chars
+                    wrapped = '\n'.join([b64_body[i:i+70] for i in range(0, len(b64_body), 70)])
                     out_txt = header + '\n' + wrapped + '\n' + footer + '\n'
                 else:
                     # Fallback: write verbatim
