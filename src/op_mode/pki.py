@@ -1337,12 +1337,8 @@ def import_pki(
         elif pki_type == 'ssh-hostkey': # add handling for importing ssh host keys via copypaste import
             import_ssh_hostkey(name, filename)
         elif pki_type == 'ssh-hostkey-txt-pub':
-            print("got text input for ssh hostkey import")
-            print(name, key_txt)
             save_ssh_hostkey_txt(name, key_txt, "public")
         elif pki_type == 'ssh-hostkey-txt-priv':
-            print("got text input for ssh hostkey import")
-            print(name, key_txt)
             #check if public key exists in /tmp/{name}.pub
             pub_temp_filename = f'/tmp/{name}.pub'
             if not os.path.exists(pub_temp_filename):
