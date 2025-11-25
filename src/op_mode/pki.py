@@ -1203,6 +1203,96 @@ def generate_pki(
         print('Aborted')
         sys.exit(0)
 
+def save_ssh_hostkey_txt(name: str, key_txt: str, type: str):
+    """Save pasted SSH key text into appropriate temporary filename and format.
+
+    For public keys we expect the OpenSSH single-line public key (e.g. "ssh-rsa AAAAB3Nza...").
+    For private keys we accept either a PEM-like block or the OpenSSH private key format and write
+    it verbatim to the temp file. The import flow expects /tmp/{name} for the private key and
+    /tmp/{name}.pub for the public key.
+    """
+    temp_filename = f'/tmp/{name}'
+
+    # Validate supported names
+    supported = (
+        'ssh_host_rsa_key',
+        'ssh_host_ecdsa_key',
+        'ssh_host_dsa_key',
+        'ssh_host_ed25519_key',
+    )
+    if name not in supported:
+        print('Error: invalid ssh server key type for text import')
+        return
+
+    # Public key handling:
+    # - If the pasted text already looks like an OpenSSH public key (starts with "ssh-" or "ecdsa-" etc.),
+    #   write it directly to /tmp/{name}.pub
+    # - If the pasted text is just the base64 part, attempt to prefix with the conventional algorithm".
+    if type == 'public':
+        pub_path = temp_filename + '.pub'
+        txt = key_txt.strip()
+        # If already contains a space and starts with known prefixes, assume full OpenSSH public key
+        if txt.startswith('ssh-') or txt.startswith('ecdsa-') or txt.startswith('ecdsa-sha') or txt.startswith('ecdsa-sha2') or txt.startswith('ssh-dss') or txt.startswith('ssh-ed25519'):
+            pub_line = txt
+        else:
+            # Only the base64 body was provided. Prefix based on name.
+            if name == 'ssh_host_rsa_key':
+                pub_line = 'ssh-rsa ' + txt
+            elif name == 'ssh_host_ecdsa_key':
+                # Default to nistp256 curve identifier for ecdsa public key storage
+                pub_line = 'ecdsa-sha2-nistp256 ' + txt
+            elif name == 'ssh_host_dsa_key':
+                pub_line = 'ssh-dss ' + txt
+            elif name == 'ssh_host_ed25519_key':
+                pub_line = 'ssh-ed25519 ' + txt
+            else:
+                pub_line = txt
+
+        with open(pub_path, 'w') as temp_file:
+            temp_file.write(pub_line + '\n')
+
+        print(f'Wrote temp public key file: {pub_path}')
+        print('Now paste the corresponding private key text to complete the ssh hostkey import.')
+        return
+
+    # Private key handling:
+    if type == 'private':
+        priv_path = temp_filename
+        txt = key_txt.strip()
+        # If the text contains PEM markers assume it's a PEM/private-key block and write as-is
+        if txt.startswith('-----BEGIN'):
+            out_txt = txt + '\n' if not txt.endswith('\n') else txt
+        else:
+            # If the user pasted a single-line OpenSSH public key by mistake, warn
+            if txt.startswith('ssh-'):
+                print('Warning: pasted text looks like a public key, expected private key')
+                out_txt = txt + '\n'
+            else:
+                # If the pasted text looks like base64 only (no headers), try to wrap it into
+                # a PEM-like block based on the key type so import tools can parse it.
+                b64_body = ''.join(txt.split())
+                if re.fullmatch(r'[A-Za-z0-9+/=]+', b64_body):
+                    # Choose header/footer according to key name
+                    if name == 'ssh_host_rsa_key' or name == 'ssh_host_ecdsa_key' or name == 'ssh_host_dsa_key' or name == 'ssh_host_ed25519_key':
+                        # New OpenSSH private keys use the OPENSSH PRIVATE KEY wrapper
+                        header = '-----BEGIN OPENSSH PRIVATE KEY-----'
+                        footer = '-----END OPENSSH PRIVATE KEY-----'
+                    else:
+                        header = '-----BEGIN PRIVATE KEY-----'
+                        footer = '-----END PRIVATE KEY-----'
+
+                    # wrap lines at 64 chars
+                    wrapped = '\n'.join([b64_body[i:i+64] for i in range(0, len(b64_body), 64)])
+                    out_txt = header + '\n' + wrapped + '\n' + footer + '\n'
+                else:
+                    # Fallback: write verbatim
+                    out_txt = txt + '\n'
+
+        with open(priv_path, 'w') as temp_file:
+            temp_file.write(out_txt)
+
+        print(f'Wrote temp private key file: {priv_path}'))
+        return
 
 def import_pki(
     name: str,
@@ -1249,12 +1339,7 @@ def import_pki(
         elif pki_type == 'ssh-hostkey-txt-pub':
             print("got text input for ssh hostkey import")
             print(name, key_txt)
-            #write key_txt to a temp file and call import_ssh_hostkey with that temp file
-            temp_filename = f'/tmp/{name}.pub'
-            with open(temp_filename, 'w') as temp_file:
-                temp_file.write(key_txt)
-            print(f'Wrote temp public key file: {temp_filename}')
-            print(f'Now import the corresponding private key text to complete the ssh hostkey import.')
+            save_ssh_hostkey_txt(name, key_txt, "public")
         elif pki_type == 'ssh-hostkey-txt-priv':
             print("got text input for ssh hostkey import")
             print(name, key_txt)
@@ -1264,14 +1349,10 @@ def import_pki(
                 print(f'Corresponding SSH server host public key temp file not found: {pub_temp_filename}. Import Public Key then try again.')
                 return
             #write key_txt to a temp file and call import_ssh_hostkey with that temp file
-            temp_filename = f'/tmp/{name}'
-            with open(temp_filename, 'w') as temp_file:
-                temp_file.write(key_txt)
-            os.remove(temp_filename)
-            os.remove(pub_temp_filename)
-            import_ssh_hostkey(name, temp_filename)
-            print(f'Imported ssh hostkey: {name} from text input.')
-            print('Completed ssh hostkey import.')
+            save_ssh_hostkey_txt(name, key_txt, "private")
+            import_ssh_hostkey(name, f'/tmp/{name}')
+            os.remove(f'/tmp/{name}')
+            os.remove(f'/tmp/{name}' + '.pub')
 
 
     except KeyboardInterrupt:
