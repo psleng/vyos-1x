@@ -55,7 +55,7 @@ CERT_REQ_END = '-----END CERTIFICATE REQUEST-----'
 auth_dir = '/config/auth'
 
 # PERLE add ssh hostkey option
-ArgsPkiType = typing.Literal['ca', 'certificate', 'dh', 'key-pair', 'openvpn', 'crl', 'ssh-hostkey', 'ssh-hostkey-txt']
+ArgsPkiType = typing.Literal['ca', 'certificate', 'dh', 'key-pair', 'openvpn', 'crl', 'ssh-hostkey', 'ssh-hostkey-txt-pub', 'ssh-hostkey-txt-priv']
 ArgsPkiTypeGen = typing.Literal[ArgsPkiType, typing.Literal['ssh', 'wireguard']]
 ArgsFingerprint = typing.Literal['sha256', 'sha384', 'sha512']
 
@@ -1246,10 +1246,32 @@ def import_pki(
             import_openvpn_secret(name, filename)
         elif pki_type == 'ssh-hostkey': # add handling for importing ssh host keys via copypaste import
             import_ssh_hostkey(name, filename)
-        elif pki_type == 'ssh-hostkey-txt':
+        elif pki_type == 'ssh-hostkey-txt-pub':
             print("got text input for ssh hostkey import")
             print(name, key_txt)
-            #import_ssh_hostkey(name, txt)
+            #write key_txt to a temp file and call import_ssh_hostkey with that temp file
+            temp_filename = f'/tmp/{name}.pub'
+            with open(temp_filename, 'w') as temp_file:
+                temp_file.write(key_txt)
+            print(f'Wrote temp public key file: {temp_filename}')
+            print(f'Now import the corresponding private key text to complete the ssh hostkey import.')
+        elif pki_type == 'ssh-hostkey-txt-priv':
+            print("got text input for ssh hostkey import")
+            print(name, key_txt)
+            #check if public key exists in /tmp/{name}.pub
+            pub_temp_filename = f'/tmp/{name}.pub'
+            if not os.path.exists(pub_temp_filename):
+                print(f'Corresponding SSH server host public key temp file not found: {pub_temp_filename}. Import Public Key then try again.')
+                return
+            #write key_txt to a temp file and call import_ssh_hostkey with that temp file
+            temp_filename = f'/tmp/{name}'
+            with open(temp_filename, 'w') as temp_file:
+                temp_file.write(key_txt)
+            os.remove(temp_filename)
+            os.remove(pub_temp_filename)
+            import_ssh_hostkey(name, temp_filename)
+            print(f'Imported ssh hostkey: {name} from text input.')
+            print('Completed ssh hostkey import.')
 
 
     except KeyboardInterrupt:
