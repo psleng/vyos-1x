@@ -1334,7 +1334,7 @@ def import_pki(
             )
         elif pki_type == 'openvpn':
             import_openvpn_secret(name, filename)
-        elif pki_type == 'ssh-hostkey': # add handling for importing ssh host keys via copypaste import
+        elif pki_type == 'ssh-hostkey':
             import_ssh_hostkey(name, filename)
         elif pki_type == 'ssh-hostkey-txt-pub':
             save_ssh_hostkey_txt(name, key_txt, "public")
