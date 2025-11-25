@@ -1291,7 +1291,7 @@ def save_ssh_hostkey_txt(name: str, key_txt: str, type: str):
         with open(priv_path, 'w') as temp_file:
             temp_file.write(out_txt)
 
-        print(f'Wrote temp private key file: {priv_path}'))
+        print(f'Wrote temp private key file: {priv_path}')
         return
 
 def import_pki(
