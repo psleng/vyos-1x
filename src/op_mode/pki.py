@@ -1203,15 +1203,17 @@ def generate_pki(
         print('Aborted')
         sys.exit(0)
 
+TEMP_KEY_PATH = '/tmp'
+
 def save_ssh_hostkey_txt(name: str, key_txt: str, type: str):
     """Save pasted SSH key text into appropriate temporary filename and format.
 
     For public keys we expect the OpenSSH single-line public key (e.g. "ssh-rsa AAAAB3Nza..."). or just the base64 part.
-    We write it to /tmp/{name}.pub either verbatim or prefixed with the appropriate algorithm identifier.
+    We write it to {TEMP_KEY_PATH}/{name}.pub either verbatim or prefixed with the appropriate algorithm identifier.
     For private keys we accept either a PEM-like block or base64 only. We wrap base64-only keys into a PEM-like block and attach header/footer
     according to the key type, or write it verbatim to the temp file.
     """
-    temp_filename = f'/tmp/{name}'
+    temp_filename = f'{TEMP_KEY_PATH}/{name}'
 
     # Validate supported names
     supported = (
@@ -1226,7 +1228,7 @@ def save_ssh_hostkey_txt(name: str, key_txt: str, type: str):
 
     # Public key handling:
     # - If the pasted text already looks like an OpenSSH public key (starts with "ssh-" or "ecdsa-" etc.),
-    #   write it directly to /tmp/{name}.pub
+    #   write it directly to {TEMP_KEY_PATH}/{name}.pub
     # - If the pasted text is just the base64 part, attempt to prefix with the conventional algorithm".
     if type == 'public':
         pub_path = temp_filename + '.pub'
@@ -1252,7 +1254,6 @@ def save_ssh_hostkey_txt(name: str, key_txt: str, type: str):
             temp_file.write(pub_line + '\n')
 
         print(f'Wrote temp public key file: {pub_path}')
-        print('Now paste the corresponding private key text to complete the ssh hostkey import.')
         return
 
     # Private key handling:
@@ -1293,6 +1294,20 @@ def save_ssh_hostkey_txt(name: str, key_txt: str, type: str):
 
         print(f'Wrote temp private key file: {priv_path}')
         return
+
+def run_import_ssh_hostkey_from_txt(name: str, type: str):
+    #check if both keys exist in TEMP_KEY_PATH and import them
+    key_path_priv = f'{TEMP_KEY_PATH}/{name}'
+    key_path_pub = f'{TEMP_KEY_PATH}/{name}.pub'
+    if os.path.exists(key_path_priv) and os.path.exists(key_path_pub):
+        import_ssh_hostkey(name, key_path_priv)
+        os.remove(key_path_priv)
+        os.remove(key_path_pub)
+    else:
+        if type == 'private':
+            print('Now add the corresponding public key text to complete the ssh hostkey import.')
+        else:
+            print('Now add the corresponding private key text to complete the ssh hostkey import.')
 
 def import_pki(
     name: str,
@@ -1338,18 +1353,10 @@ def import_pki(
             import_ssh_hostkey(name, filename)
         elif pki_type == 'ssh-hostkey-txt-pub':
             save_ssh_hostkey_txt(name, key_txt, "public")
+            run_import_ssh_hostkey_from_txt(name, "public")
         elif pki_type == 'ssh-hostkey-txt-priv':
-            #check if public key exists in /tmp/{name}.pub
-            pub_temp_filename = f'/tmp/{name}.pub'
-            if not os.path.exists(pub_temp_filename):
-                print(f'Corresponding SSH server host public key temp file not found: {pub_temp_filename}. Import Public Key then try again.')
-                return
-            #write key_txt to a temp file and call import_ssh_hostkey with that temp file
             save_ssh_hostkey_txt(name, key_txt, "private")
-            import_ssh_hostkey(name, f'/tmp/{name}')
-            os.remove(f'/tmp/{name}')
-            os.remove(f'/tmp/{name}' + '.pub')
-
+            run_import_ssh_hostkey_from_txt(name, "private")
 
     except KeyboardInterrupt:
         print('Aborted')
