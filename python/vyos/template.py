@@ -422,21 +422,25 @@ def is_file(filename):
 
 @register_filter('get_dhcp_router')
 def get_dhcp_router(interface):
-    """ Static routes can point to a router received by a DHCP reply. This
+    """Static routes can point to a router received by a DHCP reply. This
     helper is used to get the current default router from the DHCP reply.
 
-    Returns False of no router is found, returns the IP address as string if
+    Returns None if no router is found, returns the IP address as string if
     a router is found.
     """
-    lease_file = directories['isc_dhclient_dir'] + f'/dhclient_{interface}.leases'
+    lease_file = directories['isc_dhclient_dir'] + f'/dhclient_{interface}.lease'
     if not os.path.exists(lease_file):
         return None
 
     from vyos.utils.file import read_file
     for line in read_file(lease_file).splitlines():
-        if 'option routers' in line:
-            (_, _, address) = line.split()
-            return address.rstrip(';')
+        if 'new_routers' in line:
+            (_, address, _) = line.split("'")
+            if not address:
+                return None
+            # Take first one if there are several
+            address = address.split()[0]
+            return address
 
 @register_filter('natural_sort')
 def natural_sort(iterable):
@@ -909,6 +913,25 @@ def kea_high_availability_json(config):
         data['key-file'] = config['cert_key_file']
 
     return dumps(data)
+
+@register_filter('kea_client_class_json')
+def kea_client_class_json(client_classes):
+    from vyos.kea import kea_build_client_class_test
+    from json import dumps
+    out = []
+
+    for name, config in client_classes.items():
+        if 'disable' in config:
+            continue
+
+        client_class = {
+            'name': name,
+            'test': kea_build_client_class_test(config)
+        }
+
+        out.append(client_class)
+
+    return dumps(out, indent=4)
 
 @register_filter('kea_dynamic_dns_update_main_json')
 def kea_dynamic_dns_update_main_json(config):

@@ -16,7 +16,6 @@
 # with this program; if not, write to the Free Software Foundation, Inc.,
 # 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
-
 import os
 import re
 import unittest
@@ -31,6 +30,8 @@ from vyos.utils.process import process_named_running
 from vyos.utils.file import read_file
 from vyos.utils.process import rc_cmd
 from vyos.utils.system import sysctl_read
+from vyos.system import image
+from vyos.vpp import VPPControl
 
 PROCESS_NAME = 'vpp_main'
 VPP_CONF = '/run/vpp/vpp.conf'
@@ -90,6 +91,9 @@ class TestVPP(VyOSUnitTestSHIM.TestCase):
         cls.cli_delete(cls, base_path)
 
     def setUp(self):
+        # always forward to base class
+        super().setUp()
+
         self.cli_set(base_path + ['settings', 'interface', interface, 'driver', driver])
         self.cli_set(base_path + ['settings', 'unix', 'poll-sleep-usec', '10'])
 
@@ -108,6 +112,8 @@ class TestVPP(VyOSUnitTestSHIM.TestCase):
 
         self.assertFalse(os.path.exists(VPP_CONF))
         self.assertFalse(process_named_running(PROCESS_NAME))
+        # always forward to base class
+        super().tearDown()
 
     def test_01_vpp_basic(self):
         main_core = '0'
@@ -613,7 +619,6 @@ class TestVPP(VyOSUnitTestSHIM.TestCase):
         self.cli_delete(base_path + ['interfaces', 'loopback', interface_loopback])
         self.cli_commit()
 
-    @unittest.skip('Skipping temporary bonding, sometimes get recursion T7117')
     def test_06_vpp_bonding(self):
         interface_bond = 'bond23'
         interface_kernel = 'vpptun23'
@@ -1101,7 +1106,7 @@ class TestVPP(VyOSUnitTestSHIM.TestCase):
 
         # DPDK driver expect only dpdk-options and not xdp-options to be set
         # expect raise ConfigError
-        self.cli_set(base_interface_path + ['xdp-options', 'no-syscall-lock'])
+        self.cli_set(base_interface_path + ['xdp-options', 'zero-copy'])
 
         with self.assertRaises(ConfigSessionError):
             self.cli_commit()
@@ -1256,7 +1261,7 @@ class TestVPP(VyOSUnitTestSHIM.TestCase):
         config = read_file(VPP_CONF)
         self.assertIn('interface ipip', config)
 
-    def test_15_vpp_cgnat(self):
+    def test_15_1_vpp_cgnat(self):
         base_cgnat = base_path + ['nat', 'cgnat']
         iface_out = 'eth0'
         iface_inside = 'eth1'
@@ -1295,6 +1300,50 @@ class TestVPP(VyOSUnitTestSHIM.TestCase):
         self.assertIn(f'tcp transitory timeout: {timeout_tcp_trans}sec', out)
         self.assertIn(f'icmp timeout: {timeout_icmp}sec', out)
 
+    def test_15_2_vpp_cgnat_bond_with_vifs(self):
+        base_cgnat = base_path + ['nat', 'cgnat']
+        base_kernel = base_path + ['kernel-interfaces']
+        base_bond = base_path + ['interfaces', 'bonding']
+        iface_kernel = 'vpptun0'
+        iface_bond = 'bond0'
+        vif_1 = '23'
+        vif_2 = '24'
+        iface_out = f'{iface_bond}.{vif_1}'
+        iface_inside = f'{iface_bond}.{vif_2}'
+        address_1 = '100.64.0.23/32'
+        address_2 = '192.0.2.1/32'
+
+        self.cli_set(base_bond + [iface_bond, 'kernel-interface', iface_kernel])
+        self.cli_set(base_bond + [iface_bond, 'member', 'interface', interface])
+
+        self.cli_set(base_kernel + [iface_kernel, 'vif', vif_1, 'address', address_1])
+        self.cli_set(base_kernel + [iface_kernel, 'vif', vif_2, 'address', address_2])
+
+        self.cli_set(base_cgnat + ['interface', 'inside', iface_inside])
+        self.cli_set(base_cgnat + ['interface', 'outside', iface_out])
+        self.cli_set(base_cgnat + ['rule', '100', 'inside-prefix', address_1])
+        self.cli_set(base_cgnat + ['rule', '100', 'outside-prefix', address_2])
+        self.cli_commit()
+
+        # Check interfaces
+        _, out = rc_cmd('sudo vppctl show det44 interfaces')
+        self.assertIn(f'BondEthernet0.{vif_2} in', out)
+        self.assertIn(f'BondEthernet0.{vif_1} out', out)
+
+        # Change bonding interface configuration
+        self.cli_set(base_bond + [iface_bond, 'mode', '802.3ad'])
+        self.cli_commit()
+
+        # Check interfaces
+        _, out = rc_cmd('sudo vppctl show det44 interfaces')
+        self.assertIn(f'BondEthernet0.{vif_2} in', out)
+        self.assertIn(f'BondEthernet0.{vif_1} out', out)
+
+        # Verify only expected interfaces are shown:
+        # header + inside + outside = 3 lines total
+        lines = out.split('\n')
+        self.assertTrue(len(lines) == 3)
+
     def test_16_vpp_nat(self):
         base_nat = base_path + ['nat44']
         base_nat_settings = base_path + ['settings', 'nat44']
@@ -1323,6 +1372,13 @@ class TestVPP(VyOSUnitTestSHIM.TestCase):
         self.cli_set(
             base_nat + ['exclude', 'rule', '100', 'local-port', exclude_local_port]
         )
+
+        # cannot set local-port without specifying protocol
+        # expect raise ConfigError
+        with self.assertRaises(ConfigSessionError):
+            self.cli_commit()
+
+        self.cli_set(base_nat + ['exclude', 'rule', '100', 'protocol', 'tcp'])
         self.cli_set(
             base_nat + ['static', 'rule', '100', 'external', 'address', static_ext_addr]
         )
@@ -1372,10 +1428,17 @@ class TestVPP(VyOSUnitTestSHIM.TestCase):
 
     def test_17_vpp_sflow(self):
         base_sflow = ['system', 'sflow']
+        sampling_rate = '1500'
+        polling_interval = '55'
+        header_bytes = '256'
+        iface_2 = 'eth0'
 
         self.cli_set(base_path + ['sflow', 'interface', interface])
+        self.cli_set(base_path + ['sflow', 'header-bytes', header_bytes])
         self.cli_set(base_sflow + ['interface', interface])
         self.cli_set(base_sflow + ['server', '127.0.0.1'])
+        self.cli_set(base_sflow + ['sampling-rate', sampling_rate])
+        self.cli_set(base_sflow + ['polling', polling_interval])
         self.cli_set(base_sflow + ['vpp'])
         self.cli_commit()
 
@@ -1383,7 +1446,10 @@ class TestVPP(VyOSUnitTestSHIM.TestCase):
         _, out = rc_cmd('sudo vppctl show sflow')
 
         expected_entries = (
+            f'sflow sampling-rate {sampling_rate}',
             'sflow sampling-direction ingress',
+            f'sflow polling-interval {polling_interval}',
+            f'sflow header-bytes {header_bytes}',
             f'sflow enable {interface}',
             'interfaces enabled: 1',
         )
@@ -1391,8 +1457,35 @@ class TestVPP(VyOSUnitTestSHIM.TestCase):
         for expected_entry in expected_entries:
             self.assertIn(expected_entry, out)
 
-        self.cli_delete(base_sflow)
+        self.cli_set(base_path + ['settings', 'interface', iface_2, 'driver', driver])
+        self.cli_set(base_path + ['sflow', 'interface', iface_2])
+
         self.cli_commit()
+
+        # Check sFlow
+        _, out = rc_cmd('sudo vppctl show sflow')
+
+        expected_entries = (
+            f'sflow enable {interface}',
+            f'sflow enable {iface_2}',
+            'interfaces enabled: 2',
+        )
+
+        for expected_entry in expected_entries:
+            self.assertIn(expected_entry, out)
+
+        # cannot delete system sFlow configuration if VPP sFlow is configured
+        # expect raise ConfigError
+        self.cli_delete(base_sflow)
+        with self.assertRaises(ConfigSessionError):
+            self.cli_commit()
+
+        self.cli_delete(base_path + ['sflow'])
+        self.cli_commit()
+
+        # Check interfaces are deleted from VPP sFlow
+        _, out = rc_cmd('sudo vppctl show sflow')
+        self.assertIn('interfaces enabled: 0', out)
 
     def test_18_resource_limits(self):
         max_map_count = '100000'
@@ -1471,6 +1564,150 @@ class TestVPP(VyOSUnitTestSHIM.TestCase):
         self.cli_delete(['interfaces', 'ethernet', interface, 'vif'])
         self.cli_commit()
 
+    def test_20_kernel_options_hugepages(self):
+        default_hp_size = '2M'
+        hp_size_1g = '1G'
+        hp_size_2m = '2M'
+        hp_count_1g = '2'
+        hp_count_2m = '512'
+        memory_path = ['system', 'option', 'kernel', 'memory']
+
+        self.cli_set(memory_path + ['default-hugepage-size', default_hp_size])
+        self.cli_set(
+            memory_path + ['hugepage-size', hp_size_2m, 'hugepage-count', hp_count_2m]
+        )
+        self.cli_set(
+            memory_path + ['hugepage-size', hp_size_1g, 'hugepage-count', '2000']
+        )
+        # very big number of 1G hugepages, not enough memory for configuring them
+        # expect raise ConfigError
+        with self.assertRaises(ConfigSessionError):
+            self.cli_commit()
+
+        self.cli_set(
+            memory_path + ['hugepage-size', hp_size_1g, 'hugepage-count', hp_count_1g]
+        )
+        self.cli_commit()
+
+        # Read GRUB config file for current running image
+        tmp = read_file(
+            f'{image.grub.GRUB_DIR_VYOS_VERS}/{image.get_running_image()}.cfg'
+        )
+        self.assertIn(f' default_hugepagesz={default_hp_size}', tmp)
+        self.assertIn(f' hugepagesz={hp_size_1g} hugepages={hp_count_1g}', tmp)
+        self.assertIn(f' hugepagesz={hp_size_2m} hugepages={hp_count_2m}', tmp)
+
+    def test_21_static_arp(self):
+        host = '192.0.2.10'
+        mac = '00:01:02:03:04:0a'
+        path_static_arp = ['protocols', 'static', 'arp']
+
+        self.cli_set(['interfaces', 'ethernet', interface, 'address', '192.0.2.1/24'])
+        self.cli_set(
+            path_static_arp + ['interface', interface, 'address', host, 'mac', mac]
+        )
+        self.cli_commit()
+
+        # Change VPP configuration
+        self.cli_set(base_path + ['settings', 'unix', 'poll-sleep-usec', '50'])
+
+        # Ensure arp entry is not disappeared
+        _, neighbors = rc_cmd('sudo ip neighbor')
+        self.assertIn(f'{host} dev {interface} lladdr {mac}', neighbors)
+
+        # Check VPP IP neighbors
+        _, vpp_neighbors = rc_cmd('sudo vppctl show ip neighbors')
+        self.assertRegex(vpp_neighbors, rf'{host}\s+S\s+{mac}\s+{interface}')
+
+        self.cli_delete(path_static_arp)
+
+    def test_22_vpp_ipfix(self):
+        base_ipfix = base_path + ['ipfix']
+        base_collector = base_ipfix + ['collector']
+        collector_ip = '127.0.0.2'
+        collector_src = '127.0.0.1'
+        collector_port = '9374'
+        timer_active = '8'
+        timer_passive = '32'
+        tmplt_interval = '4'
+        flow_probe_rec = 'l3'
+        not_vpp_interface = 'eth0'
+
+        self.cli_set(base_ipfix + ['active-timeout', timer_active])
+        self.cli_set(base_ipfix + ['inactive-timeout', timer_passive])
+        self.cli_set(base_ipfix + ['flowprobe-record', flow_probe_rec])
+        self.cli_set(base_ipfix + ['interface', interface])
+        self.cli_set(base_collector + [collector_ip, 'source-address', collector_src])
+        self.cli_set(base_collector + [collector_ip, 'port', collector_port])
+        self.cli_set(
+            base_collector + [collector_ip, 'template-interval', tmplt_interval]
+        )
+        self.cli_commit()
+
+        # Test 1: Verify flowprobe parameters
+        _, out = rc_cmd('sudo vppctl show flowprobe params')
+        required_str = (
+            f'{flow_probe_rec} active: {timer_active} passive: {timer_passive}'
+        )
+        self.assertIn(required_str, out)
+
+        # Test 2: Add non-VPP interface
+        self.cli_set(base_ipfix + ['interface', not_vpp_interface])
+        with self.assertRaises(ConfigSessionError):
+            self.cli_commit()
+
+        self.cli_delete(base_ipfix + ['interface', not_vpp_interface])
+        self.cli_set(base_ipfix + ['interface', interface])
+        self.cli_commit()
+
+        _, out = rc_cmd('sudo vppctl show flowprobe feature')
+        required_str = f'{interface} ip4 rx tx'
+        self.assertIn(required_str, out)
+
+        # Test 3: Verify IPFIX exporter via API
+        # Set socket permissions to allow test access (owner/group read/write only)
+        if os.path.exists('/run/vpp/api.sock'):
+            os.system('sudo chmod 666 /run/vpp/api.sock')
+
+        vpp = VPPControl()
+
+        # Get all exporters
+        result = vpp.api.ipfix_all_exporter_get()
+        # Second element contains the exporter list
+        exporters = result[1]
+
+        # Find our configured exporter
+        found_exporter = None
+        for exporter in exporters:
+            if str(exporter.collector_address) == collector_ip:
+                found_exporter = exporter
+                break
+
+        # Verify exporter parameters
+        self.assertIsNotNone(found_exporter, 'IPFIX exporter not found')
+        self.assertEqual(str(found_exporter.collector_address), collector_ip)
+        self.assertEqual(str(found_exporter.src_address), collector_src)
+        self.assertEqual(found_exporter.collector_port, int(collector_port))
+        self.assertEqual(found_exporter.template_interval, int(tmplt_interval))
+        self.assertEqual(found_exporter.path_mtu, 512)  # Default path MTU
+        self.assertEqual(found_exporter.vrf_id, 0)  # Default VRF
+        self.assertFalse(found_exporter.udp_checksum)  # Default UDP checksum
+
+        # Test 4: Cleanup - remove configuration
+        self.cli_delete(base_ipfix)
+        self.cli_commit()
+
+        # Verify cleanup
+        result = vpp.api.ipfix_all_exporter_get()
+        exporters = result[1]
+        # Should only have default exporter (0.0.0.0) left
+        non_default_exporters = [
+            e for e in exporters if str(e.collector_address) != '0.0.0.0'
+        ]
+        self.assertEqual(
+            len(non_default_exporters), 0, 'Exporters not cleaned up properly'
+        )
+
 
 if __name__ == '__main__':
-    unittest.main(verbosity=2)
+    unittest.main(verbosity=2, failfast=VyOSUnitTestSHIM.TestCase.debug_on())

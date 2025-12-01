@@ -346,6 +346,182 @@
           </tagNode>
         </children>
       </node>
+      <node name="ipfix" owner="${vyos_conf_scripts_dir}/vpp_ipfix.py">
+        <properties>
+          <help>IP Flow Information Export (IPFIX) configuration</help>
+          <priority>322</priority>
+        </properties>
+        <children>
+          <tagNode name="collector">
+            <properties>
+              <help>Collector IP address</help>
+              <valueHelp>
+                <format>ipv4</format>
+                <description>IPv4 server to export IPFIX</description>
+              </valueHelp>
+              <valueHelp>
+                <format>ipv6</format>
+                <description>IPv6 server to export IPFIX</description>
+              </valueHelp>
+              <constraint>
+                <validator name="ip-address"/>
+              </constraint>
+            </properties>
+            <children>
+              #include <include/port-number.xml.i>
+              <leafNode name="port">
+                <defaultValue>4739</defaultValue>
+              </leafNode>
+              <leafNode name="path-mtu">
+                <properties>
+                  <help>Path MTU</help>
+                  <valueHelp>
+                    <format>u32:68-1450</format>
+                    <description>Bytes</description>
+                  </valueHelp>
+                  <constraint>
+                    <validator name="numeric" argument="--range 68-1450"/>
+                  </constraint>
+                </properties>
+                <defaultValue>512</defaultValue>
+              </leafNode>
+              #include <include/source-address-ipv4-ipv6.xml.i>
+              <leafNode name="template-interval">
+                <properties>
+                  <help>Interval in seconds</help>
+                  <valueHelp>
+                    <format>u32:1-300</format>
+                    <description>Seconds</description>
+                  </valueHelp>
+                  <constraint>
+                    <validator name="numeric" argument="--range 1-300"/>
+                  </constraint>
+                </properties>
+                <defaultValue>20</defaultValue>
+              </leafNode>
+              <leafNode name="udp-checksum">
+                <properties>
+                  <help>Allow UDP checksum</help>
+                  <valueless/>
+                </properties>
+              </leafNode>
+            </children>
+          </tagNode>
+          <tagNode name="interface">
+            <properties>
+              <help>Interface</help>
+              <completionHelp>
+                <script>${vyos_completion_dir}/list_interfaces</script>
+              </completionHelp>
+              <valueHelp>
+                <format>txt</format>
+                <description>Interface name</description>
+              </valueHelp>
+            </properties>
+            <children>
+              <leafNode name="direction">
+                <properties>
+                  <help>Flow direction</help>
+                  <completionHelp>
+                    <list>rx tx both</list>
+                  </completionHelp>
+                  <valueHelp>
+                    <format>rx</format>
+                    <description>Rx direction</description>
+                  </valueHelp>
+                  <valueHelp>
+                    <format>tx</format>
+                    <description>Tx direction</description>
+                  </valueHelp>
+                  <valueHelp>
+                    <format>both</format>
+                    <description>Rx and Tx direction</description>
+                  </valueHelp>
+                  <constraint>
+                    <regex>(rx|tx|both)</regex>
+                  </constraint>
+                </properties>
+                <defaultValue>both</defaultValue>
+              </leafNode>
+              <leafNode name="flow-variant">
+                <properties>
+                  <help>Flow variant</help>
+                  <completionHelp>
+                    <list>l2 ipv4 ipv6</list>
+                  </completionHelp>
+                  <valueHelp>
+                    <format>l2</format>
+                    <description>L2</description>
+                  </valueHelp>
+                  <valueHelp>
+                    <format>_ipv4</format>
+                    <description>IPv4</description>
+                  </valueHelp>
+                  <valueHelp>
+                    <format>_ipv6</format>
+                    <description>IPv6</description>
+                  </valueHelp>
+                  <constraint>
+                    <regex>(l2|ipv4|ipv6)</regex>
+                  </constraint>
+                </properties>
+                <defaultValue>ipv4</defaultValue>
+              </leafNode>
+            </children>
+          </tagNode>
+          <leafNode name="active-timeout">
+            <properties>
+              <help>Flow activity timeout</help>
+              <valueHelp>
+                <format>u32:0-2147483647</format>
+                <description>Active flow export timeout (seconds)</description>
+              </valueHelp>
+              <constraint>
+                <validator name="numeric" argument="--range 0-2147483647"/>
+              </constraint>
+            </properties>
+            <defaultValue>15</defaultValue>
+          </leafNode>
+          <leafNode name="inactive-timeout">
+            <properties>
+              <help>Flow inactivity timeout</help>
+              <valueHelp>
+                <format>u32:0-2147483647</format>
+                <description>Inactive flow export timeout (seconds)</description>
+              </valueHelp>
+              <constraint>
+                <validator name="numeric" argument="--range 0-2147483647"/>
+              </constraint>
+            </properties>
+            <defaultValue>120</defaultValue>
+          </leafNode>
+          <leafNode name="flowprobe-record">
+            <properties>
+              <help>Flow record layers</help>
+              <completionHelp>
+                <list>l2 l3 l4</list>
+              </completionHelp>
+              <valueHelp>
+                <format>l2</format>
+                <description>Include level 2 information</description>
+              </valueHelp>
+              <valueHelp>
+                <format>l3</format>
+                <description>Include level 3 information</description>
+              </valueHelp>
+              <valueHelp>
+                <format>l4</format>
+                <description>Include level 4 information</description>
+              </valueHelp>
+              <constraint>
+                <regex>(l2|l3|l4)</regex>
+              </constraint>
+              <multi/>
+            </properties>
+            <defaultValue>l3</defaultValue>
+          </leafNode>
+        </children>
+      </node>
       <node name="settings">
         <properties>
           <help>VPP settings</help>
@@ -561,12 +737,6 @@
                   <help>XDP settings</help>
                 </properties>
                 <children>
-                  <leafNode name="no-syscall-lock">
-                    <properties>
-                      <help>Unlock multithreading in interrupt and adaptive modes</help>
-                      <valueless/>
-                    </properties>
-                  </leafNode>
                   <leafNode name="num-rx-queues">
                     <properties>
                       <help>Number of receive queues</help>
@@ -594,26 +764,14 @@
                   <leafNode name="rx-queue-size">
                     <properties>
                       <help>Receive queue size</help>
-                      <valueHelp>
-                        <format>u32:0-65535</format>
-                        <description>Size of receive queue</description>
-                      </valueHelp>
-                      <constraint>
-                        <validator name="numeric" argument="--range 0-65535"/>
-                      </constraint>
+                      #include <include/vpp/queue_size.xml.i>
                     </properties>
                     <defaultValue>0</defaultValue>
                   </leafNode>
                   <leafNode name="tx-queue-size">
                     <properties>
                       <help>Tranceive queue size</help>
-                      <valueHelp>
-                        <format>u32:0-65535</format>
-                        <description>Size of tranceive queue</description>
-                      </valueHelp>
-                      <constraint>
-                        <validator name="numeric" argument="--range 0-65535"/>
-                      </constraint>
+                      #include <include/vpp/queue_size.xml.i>
                     </properties>
                     <defaultValue>0</defaultValue>
                   </leafNode>
@@ -725,7 +883,7 @@
               <properties>
                 <help>default-log-level</help>
                 <completionHelp>
-                  <list>alert crit debug disabled emerg err info notice warn</list>
+                  <list>alert crit debug disabled emerg error info notice warn</list>
                 </completionHelp>
                 <valueHelp>
                   <format>alert</format>
@@ -748,7 +906,7 @@
                   <description>Emergency</description>
                 </valueHelp>
                 <valueHelp>
-                  <format>err</format>
+                  <format>error</format>
                   <description>Error</description>
                 </valueHelp>
                 <valueHelp>
@@ -764,7 +922,7 @@
                   <description>Warning</description>
                 </valueHelp>
                 <constraint>
-                  <regex>(alert|crit|debug|disabled|emerg|err|info|notice|warn)</regex>
+                  <regex>(alert|crit|debug|disabled|emerg|error|info|notice|warn)</regex>
                 </constraint>
               </properties>
             </leafNode>
@@ -958,14 +1116,45 @@
             <multi/>
           </properties>
         </leafNode>
-        <leafNode name="sample-rate">
+        <leafNode name="header-bytes">
           <properties>
-            <help>sFlow sample rate</help>
+            <help>sFlow maximum packet-header length</help>
+            <completionHelp>
+              <list>64 96 128 160 192 224 256</list>
+            </completionHelp>
             <valueHelp>
-              <format>u32</format>
-              <description>sFlow sample rate</description>
+              <format>64</format>
+              <description>64 bytes</description>
             </valueHelp>
+            <valueHelp>
+              <format>96</format>
+              <description>96 bytes</description>
+            </valueHelp>
+            <valueHelp>
+              <format>128</format>
+              <description>128 bytes</description>
+            </valueHelp>
+            <valueHelp>
+              <format>160</format>
+              <description>160 bytes</description>
+            </valueHelp>
+            <valueHelp>
+              <format>192</format>
+              <description>192 bytes</description>
+            </valueHelp>
+            <valueHelp>
+              <format>224</format>
+              <description>224 bytes</description>
+            </valueHelp>
+            <valueHelp>
+              <format>256</format>
+              <description>256 bytes</description>
+            </valueHelp>
+            <constraint>
+              <regex>(64|96|128|160|192|224|256)</regex>
+            </constraint>
           </properties>
+          <defaultValue>128</defaultValue>
         </leafNode>
       </children>
     </node>

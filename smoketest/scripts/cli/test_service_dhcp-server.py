@@ -33,9 +33,9 @@ from vyos.template import dec_ip
 
 PROCESS_NAME = 'kea-dhcp4'
 D2_PROCESS_NAME = 'kea-dhcp-ddns'
-KEA4_CONF = '/run/kea/kea-dhcp4.conf'
-KEA4_D2_CONF = '/run/kea/kea-dhcp-ddns.conf'
-KEA4_CTRL = '/run/kea/dhcp4-ctrl-socket'
+KEA4_CONF = '/var/run/kea/kea-dhcp4.conf'
+KEA4_D2_CONF = '/var/run/kea/kea-dhcp-ddns.conf'
+KEA4_CTRL = '/var/run/kea/dhcp4-ctrl-socket'
 HOSTSD_CLIENT = '/usr/bin/vyos-hostsd-client'
 base_path = ['service', 'dhcp-server']
 interface = 'dum8765'
@@ -66,6 +66,8 @@ class TestServiceDHCPServer(VyOSUnitTestSHIM.TestCase):
     def tearDown(self):
         self.cli_delete(base_path)
         self.cli_commit()
+        # always forward to base class
+        super().tearDown()
 
     def walk_path(self, obj, path):
         current = obj
@@ -112,27 +114,7 @@ class TestServiceDHCPServer(VyOSUnitTestSHIM.TestCase):
         range_1_start = inc_ip(subnet, 40)
         range_1_stop = inc_ip(subnet, 50)
 
-        self.cli_set(base_path + ['listen-interface', interface])
-
-        self.cli_set(base_path + ['shared-network-name', shared_net_name, 'ping-check'])
-
-        pool = base_path + ['shared-network-name', shared_net_name, 'subnet', subnet]
-        self.cli_set(pool + ['subnet-id', '1'])
-        self.cli_set(pool + ['ignore-client-id'])
-        self.cli_set(pool + ['ping-check'])
-        # we use the first subnet IP address as default gateway
-        self.cli_set(pool + ['option', 'default-router', router])
-        self.cli_set(pool + ['option', 'name-server', dns_1])
-        self.cli_set(pool + ['option', 'name-server', dns_2])
-        self.cli_set(pool + ['option', 'domain-name', domain_name])
-
-        # check validate() - No DHCP address range or active static-mapping set
-        with self.assertRaises(ConfigSessionError):
-            self.cli_commit()
-        self.cli_set(pool + ['range', '0', 'start', range_0_start])
-        self.cli_set(pool + ['range', '0', 'stop', range_0_stop])
-        self.cli_set(pool + ['range', '1', 'start', range_1_start])
-        self.cli_set(pool + ['range', '1', 'stop', range_1_stop])
+        self.setup_single_pool_range(range_0_start, range_0_stop, range_1_start, range_1_stop, shared_net_name)
 
         # commit changes
         self.cli_commit()
@@ -209,6 +191,112 @@ class TestServiceDHCPServer(VyOSUnitTestSHIM.TestCase):
         # Check for running process
         self.verify_service_running()
 
+    def setup_single_pool_range(self, range_0_start, range_0_stop, range_1_start, range_1_stop, shared_net_name):
+        self.cli_set(base_path + ['listen-interface', interface])
+        self.cli_set(base_path + ['shared-network-name', shared_net_name, 'ping-check'])
+
+        pool = base_path + ['shared-network-name', shared_net_name, 'subnet', subnet]
+
+        self.cli_set(pool + ['subnet-id', '1'])
+        self.cli_set(pool + ['ignore-client-id'])
+        self.cli_set(pool + ['ping-check'])
+        # we use the first subnet IP address as default gateway
+        self.cli_set(pool + ['option', 'default-router', router])
+        self.cli_set(pool + ['option', 'name-server', dns_1])
+        self.cli_set(pool + ['option', 'name-server', dns_2])
+        self.cli_set(pool + ['option', 'domain-name', domain_name])
+
+        # check validate() - No DHCP address range or active static-mapping set
+        with self.assertRaises(ConfigSessionError):
+            self.cli_commit()
+
+        self.cli_set(pool + ['range', '0', 'start', range_0_start])
+        self.cli_set(pool + ['range', '0', 'stop', range_0_stop])
+        self.cli_set(pool + ['range', '1', 'start', range_1_start])
+        self.cli_set(pool + ['range', '1', 'stop', range_1_stop])
+
+    def test_dhcp_client_class(self):
+        shared_net_name = 'SMOKE-1'
+
+        range_0_start = inc_ip(subnet, 10)
+        range_0_stop = inc_ip(subnet, 20)
+        range_1_start = inc_ip(subnet, 40)
+        range_1_stop = inc_ip(subnet, 50)
+
+        self.setup_single_pool_range(range_0_start, range_0_stop, range_1_start, range_1_stop, shared_net_name)
+
+        self.cli_set(base_path + ['shared-network-name', shared_net_name, 'subnet', subnet, 'client-class', 'test'])
+
+        # check validate() - Client class referenced that doesn't exist yet
+        with self.assertRaises(ConfigSessionError):
+            self.cli_commit()
+
+        self.cli_delete(base_path + ['shared-network-name', shared_net_name, 'subnet', subnet, 'client-class', 'test'])
+
+        self.cli_set(base_path + ['shared-network-name', shared_net_name, 'subnet', subnet, 'range', '0', 'client-class', 'test'])
+
+        # check validate() - Client class referenced that doesn't exist yet
+        with self.assertRaises(ConfigSessionError):
+            self.cli_commit()
+
+        self.cli_set(base_path + ['shared-network-name', shared_net_name, 'subnet', subnet, 'client-class', 'test'])
+
+        client_class = base_path + ['client-class', 'test']
+
+        # Test that invalid hex is rejected
+        self.cli_set(client_class + ['relay-agent-information', 'circuit-id', '0xHELLOWORLD'])
+
+        with self.assertRaises(ConfigSessionError):
+            self.cli_commit()
+
+        self.cli_delete(client_class + ['relay-agent-information', 'circuit-id'])
+        self.cli_set(client_class + ['relay-agent-information', 'remote-id', '0xHELLOWORLD'])
+
+        with self.assertRaises(ConfigSessionError):
+            self.cli_commit()
+
+        self.cli_delete(client_class + ['relay-agent-information', 'remote-id'])
+
+        # Test string literals
+        self.cli_set(client_class + ['relay-agent-information', 'circuit-id', 'foo'])
+        self.cli_set(client_class + ['relay-agent-information', 'remote-id', 'bar'])
+
+        self.cli_commit()
+
+        self.check_client_class_in_config()
+
+        self.cli_delete(client_class + ['relay-agent-information', 'circuit-id'])
+        self.cli_delete(client_class + ['relay-agent-information', 'remote-id'])
+
+        # Test hex strings
+        self.cli_set(client_class + ['relay-agent-information', 'circuit-id', '0x666f6f'])
+        self.cli_set(client_class + ['relay-agent-information', 'remote-id', '0x626172'])
+
+        self.cli_commit()
+
+        self.check_client_class_in_config()
+
+    def check_client_class_in_config(self):
+        config = read_file(KEA4_CONF)
+        obj = loads(config)
+        self.verify_config_value(
+            obj, ['Dhcp4', 'client-classes', 0], 'name', 'test'
+        )
+        self.verify_config_value(
+            obj, ['Dhcp4', 'client-classes', 0], 'test',
+            'relay4[1].hex == 0x666f6f and relay4[2].hex == 0x626172'
+        )
+        self.verify_config_value(
+            obj, ['Dhcp4', 'shared-networks', 0, 'subnet4', 0], 'client-class',
+            'test'
+        )
+        self.verify_config_value(
+            obj, ['Dhcp4', 'shared-networks', 0, 'subnet4', 0, 'pools', 0],
+            'client-class', 'test'
+        )
+        # Check for running process
+        self.verify_service_running()
+
     def test_dhcp_single_pool_options(self):
         shared_net_name = 'SMOKE-0815'
 
@@ -224,6 +312,7 @@ class TestServiceDHCPServer(VyOSUnitTestSHIM.TestCase):
         server_identifier = bootfile_server
         ipv6_only_preferred = '300'
         capwap_access_controller = '192.168.2.125'
+        interface_mtu = '1420'
 
         pool = base_path + ['shared-network-name', shared_net_name, 'subnet', subnet]
         self.cli_set(pool + ['subnet-id', '1'])
@@ -232,6 +321,7 @@ class TestServiceDHCPServer(VyOSUnitTestSHIM.TestCase):
         self.cli_set(pool + ['option', 'name-server', dns_1])
         self.cli_set(pool + ['option', 'name-server', dns_2])
         self.cli_set(pool + ['option', 'domain-name', domain_name])
+        self.cli_set(pool + ['option', 'interface-mtu', interface_mtu])
         self.cli_set(pool + ['option', 'ip-forwarding'])
         self.cli_set(pool + ['option', 'smtp-server', smtp_server])
         self.cli_set(pool + ['option', 'pop-server', smtp_server])
@@ -363,6 +453,11 @@ class TestServiceDHCPServer(VyOSUnitTestSHIM.TestCase):
             obj,
             ['Dhcp4', 'shared-networks', 0, 'subnet4', 0, 'option-data'],
             {'name': 'ip-forwarding', 'data': 'true'},
+        )
+        self.verify_config_object(
+            obj,
+            ['Dhcp4', 'shared-networks', 0, 'subnet4', 0, 'option-data'],
+            {'name': 'interface-mtu', 'data': interface_mtu},
         )
 
         # Time zone
@@ -1366,7 +1461,7 @@ class TestServiceDHCPServer(VyOSUnitTestSHIM.TestCase):
         def internal_cleanup():
             for seq in client_range:
                 ip_addr = inc_ip(subnet, seq)
-                kea_delete_lease(4, ip_addr)
+                kea_delete_lease(4, None, ip_addr)
                 cmd(
                     f'{HOSTSD_CLIENT} --delete-hosts --tag dhcp-server-{ip_addr} --apply'
                 )
@@ -1434,4 +1529,4 @@ class TestServiceDHCPServer(VyOSUnitTestSHIM.TestCase):
 
 
 if __name__ == '__main__':
-    unittest.main(verbosity=2)
+    unittest.main(verbosity=2, failfast=VyOSUnitTestSHIM.TestCase.debug_on())

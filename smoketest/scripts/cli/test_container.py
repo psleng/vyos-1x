@@ -23,6 +23,7 @@ from base_vyostest_shim import VyOSUnitTestSHIM
 from ipaddress import ip_interface
 
 from vyos.configsession import ConfigSessionError
+from vyos.utils.network import get_interface_vrf
 from vyos.utils.process import cmd
 from vyos.utils.process import process_named_running
 
@@ -33,12 +34,10 @@ PROCESS_PIDFILE = '/run/vyos-container-{0}.service.pid'
 busybox_image = 'busybox:stable'
 busybox_image_path = '/usr/share/vyos/busybox-stable.tar'
 
-
 def cmd_to_json(command):
     c = cmd(command + ' --format=json')
     data = json.loads(c)[0]
     return data
-
 
 class TestContainer(VyOSUnitTestSHIM.TestCase):
     @classmethod
@@ -53,6 +52,7 @@ class TestContainer(VyOSUnitTestSHIM.TestCase):
         # ensure we can also run this test on a live system - so lets clean
         # out the current configuration :)
         cls.cli_delete(cls, base_path)
+        cls.cli_delete(cls, ['vrf'])
 
     @classmethod
     def tearDownClass(cls):
@@ -70,6 +70,8 @@ class TestContainer(VyOSUnitTestSHIM.TestCase):
         # Ensure systemd units are removed
         units = glob.glob('/run/systemd/system/vyos-container-*')
         self.assertEqual(units, [])
+        # always forward to base class
+        super().tearDown()
 
     def test_basic(self):
         cont_name = 'c1'
@@ -112,7 +114,26 @@ class TestContainer(VyOSUnitTestSHIM.TestCase):
 
         l = cmd_to_json(f'sudo podman container inspect {cont_name}')
         self.assertEqual(l['HostConfig']['LogConfig']['Type'], 'journald')
+        self.assertEqual(l['Config']['Healthcheck']['Test'], ['NONE'])
 
+    def test_healthcheck(self):
+        cont_name = 'health-test'
+
+        self.cli_set(base_path + ['name', cont_name, 'allow-host-networks'])
+        self.cli_set(base_path + ['name', cont_name, 'image', busybox_image])
+
+        self.cli_set(base_path + ['name', cont_name, 'health-check', 'command', 'true'])
+        self.cli_set(base_path + ['name', cont_name, 'health-check', 'interval', '10'])
+        self.cli_set(base_path + ['name', cont_name, 'health-check', 'timeout', '1'])
+        self.cli_set(base_path + ['name', cont_name, 'health-check', 'retry', '2'])
+        self.cli_commit()
+
+        l = cmd_to_json(f'sudo podman container inspect {cont_name}')
+        self.assertEqual(l['HostConfig']['LogConfig']['Type'], 'journald')
+        self.assertEqual(l['Config']['Healthcheck']['Test'], ['CMD-SHELL', 'true'])
+        self.assertEqual(l['Config']['Healthcheck']['Interval'], 10000000000)
+        self.assertEqual(l['Config']['Healthcheck']['Timeout'], 1000000000)
+        self.assertEqual(l['Config']['Healthcheck']['Retries'], 2)
 
     def test_name_server(self):
         cont_name = 'dns-test'
@@ -223,6 +244,25 @@ class TestContainer(VyOSUnitTestSHIM.TestCase):
         self.assertEqual(n['network_interface'], 'pod-bridge2')
         self.assertEqual(n['subnets'][0]['subnet'], '10.0.2.0/24')
         self.assertEqual(n['subnets'][0]['gateway'], '10.0.2.1')
+
+    def test_user_defined_mac(self):
+        # Bridge Network
+        self.cli_set(base_path + ['network', 'bridge1', 'prefix', '10.0.1.0/24'])
+        self.cli_set(base_path + ['network', 'bridge1', 'type', 'bridge'])
+
+        self.cli_set(base_path + ['name', "test1", 'image', busybox_image])
+        self.cli_set(base_path + ['name', "test1", 'network', 'bridge1', 'address', '10.0.1.11'])
+        self.cli_set(base_path + ['name', "test1", 'network', 'bridge1', 'mac', '02:00:00:00:00:01'])
+
+        self.cli_set(base_path + ['name', "test2", 'image', busybox_image])
+        self.cli_set(base_path + ['name', "test2", 'network', 'bridge1', 'address', '10.0.1.12'])
+        self.cli_set(base_path + ['name', "test2", 'network', 'bridge1', 'mac', '02:00:00:00:00:02'])
+        self.cli_commit()
+
+        n = cmd_to_json(f'sudo podman container inspect test1')
+        self.assertEqual(n['NetworkSettings']['Networks']['bridge1']['MacAddress'], '02:00:00:00:00:01')
+        n = cmd_to_json(f'sudo podman container inspect test2')
+        self.assertEqual(n['NetworkSettings']['Networks']['bridge1']['MacAddress'], '02:00:00:00:00:02')
 
     def test_ipv4_network(self):
         prefix = '192.0.2.0/24'
@@ -478,6 +518,30 @@ class TestContainer(VyOSUnitTestSHIM.TestCase):
         # We expect the same amount of containers from the API that we started above
         self.assertEqual(len(container_list), len(tmp))
 
+    def test_network_vrf(self):
+        cont_name = 'vrf-test50'
+        net_name = 'vrf-test50'
+        vrf_name = 'red-15'
+
+        # create temporary VRF for testing
+        self.cli_set(['vrf', 'name', vrf_name, 'table', '100'])
+
+        self.cli_set(base_path + ['name', cont_name, 'image', busybox_image])
+        self.cli_set(base_path + ['name', cont_name, 'network', net_name])
+        self.cli_set(base_path + ['network', net_name, 'prefix', '192.168.0.0/24'])
+        self.cli_set(base_path + ['network', net_name, 'vrf', vrf_name])
+
+        self.cli_commit()
+
+        tmp = get_interface_vrf(f'pod-{net_name}')
+        self.assertEqual(tmp, vrf_name)
+
+        # Restart container and validate VRF assignment
+        self.op_mode(['restart', 'container', cont_name])
+        tmp = get_interface_vrf(f'pod-{net_name}')
+        self.assertEqual(tmp, vrf_name)
+
+        self.cli_delete(['vrf', 'name', vrf_name])
 
 if __name__ == '__main__':
-    unittest.main(verbosity=2)
+    unittest.main(verbosity=2, failfast=VyOSUnitTestSHIM.TestCase.debug_on())

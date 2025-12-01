@@ -112,6 +112,9 @@ drivers_support_interrupt: dict[str, list] = {
     'virtio_net': ['xdp'],
 }
 
+# drivers that require changing channels (half the maximum number of RX/TX queues)
+ethtool_channels_change_drv: list[str] = ['ena', 'gve']
+
 
 def _load_module(module_name: str):
     """
@@ -171,6 +174,52 @@ def _normalize_buffers(config: dict):
         config['settings']['buffers']['buffers_per_numa'] = str(buffers)
 
 
+def _get_max_xdp_rx_queues(config: dict):
+    """
+    Count max number of RX queues for XDP driver
+    - If the interface driver is in `ethtool_channels_change_drv`
+      only half of the available queues are used (to avoid NIC issues)
+    - For other interface drivers the full number of queues is returned.
+    - If neither `rx` nor `combined` is set, return 1.
+    """
+    for key in ('rx', 'combined'):
+        value = config['channels'].get(key)
+        if value:
+            if config['original_driver'] in ethtool_channels_change_drv:
+                return max(1, int(value) // 2)
+            else:
+                return int(value)
+
+    return 1
+
+
+def _check_removed_interfaces(config: dict, feature_name: str, interfaces_config: dict):
+    """
+    Check if removed interfaces are used in any feature configuration
+
+    Args:
+        config: The main configuration dictionary
+        feature_name: Human-readable feature name for error messages
+        interfaces_config: The interfaces dictionary from the feature config
+    Example:
+        _check_removed_interfaces(config, 'IPFIX monitoring', config.get('ipfix', {}).get('interface', {}))
+    """
+    if (
+        'removed_ifaces' not in config
+        or not config['removed_ifaces']
+        or not interfaces_config
+    ):
+        return
+
+    for removed_iface in config['removed_ifaces']:
+        iface_name = removed_iface.get('iface_name')
+        if iface_name and iface_name in interfaces_config:
+            raise ConfigError(
+                f'Cannot remove interface {iface_name} - it is currently configured for {feature_name}. '
+                f'Remove it from {feature_name} configuration first.'
+            )
+
+
 def get_config(config=None):
     # use persistent config to store interfaces data between executions
     # this is required because some interfaces after they are connected
@@ -214,20 +263,6 @@ def get_config(config=None):
             # add an interface to a list of interfaces that need
             # to be reinitialized after the commit
             set_dependents('ethernet', conf, removed_iface)
-
-    # NAT dependency
-    if conf.exists(['vpp', 'nat44']):
-        set_dependents('vpp_nat', conf)
-    if conf.exists(['vpp', 'nat', 'cgnat']):
-        set_dependents('vpp_nat_cgnat', conf)
-
-    # sFlow dependency
-    if conf.exists(['vpp', 'sflow']):
-        set_dependents('vpp_sflow', conf)
-
-    # ACL dependency
-    if conf.exists(['vpp', 'acl']):
-        set_dependents('vpp_acl', conf)
 
     # Get interfaces that are used in PPPoe for control-plane integration
     pppoe_conf = conf.get_config_dict(
@@ -283,6 +318,20 @@ def get_config(config=None):
         # Buffer normalization (auto → computed)
         _normalize_buffers(effective_config)
         config['effective'] = effective_config
+
+    # Save important info about all interfaces that cannot be retrieved later
+    # Add new interfaces (only if they are first time seen in a config)
+    for iface, iface_config in config.get('settings', {}).get('interface', {}).items():
+        if iface not in effective_config.get('settings', {}).get('interface', {}):
+            eth_ifaces_persist[iface] = {
+                'original_driver': EthtoolGDrvinfo(iface).driver,
+            }
+            eth_ifaces_persist[iface]['bus_id'] = control_host.get_bus_name(iface)
+            eth_ifaces_persist[iface]['dev_id'] = control_host.get_dev_id(iface)
+            eth_ifaces_persist[iface]['channels'] = control_host.get_eth_channels(iface)
+
+    # Return to config dictionary
+    config['persist_config'] = eth_ifaces_persist
 
     if 'settings' in config:
         if 'interface' in config['settings']:
@@ -344,14 +393,18 @@ def get_config(config=None):
                         'txq_size': int(iface_config['xdp_options']['tx_queue_size']),
                     }
                     if iface_config['xdp_options']['num_rx_queues'] == 'all':
-                        xdp_api_params['rxq_num'] = 0
+                        # 65535 is used as special value to request all available queues
+                        xdp_api_params['rxq_num'] = 65535
                     else:
                         xdp_api_params['rxq_num'] = int(
                             iface_config['xdp_options']['num_rx_queues']
                         )
                     if 'zero-copy' in iface_config['xdp_options']:
                         xdp_api_params['mode'] = 'zero-copy'
-                    if 'zero-copy' in iface_config['xdp_options']:
+                    if iface_config.get('rx_mode') in ('interrupt', 'adaptive') and any(
+                        key in config['settings'].get('cpu', {})
+                        for key in ('workers', 'corelist_workers')
+                    ):
                         xdp_api_params['flags'] = 'no_syscall_lock'
                     iface_config['xdp_api_params'] = xdp_api_params
 
@@ -374,25 +427,33 @@ def get_config(config=None):
                     iface_filter_eth(conf, iface)
                 set_dependents(dependency, conf, iface)
 
-    # Save important info about all interfaces that cannot be retrieved later
-    # Add new interfaces (only if they are first time seen in a config)
-    for iface, iface_config in config.get('settings', {}).get('interface', {}).items():
-        if iface not in effective_config.get('settings', {}).get('interface', {}):
-            eth_ifaces_persist[iface] = {
-                'original_driver': config['settings']['interface'][iface][
-                    'kernel_module'
-                ],
-            }
-            eth_ifaces_persist[iface]['bus_id'] = control_host.get_bus_name(iface)
-            eth_ifaces_persist[iface]['dev_id'] = control_host.get_dev_id(iface)
+    # kernel-interfaces dependency
+    if effective_config.get('kernel_interfaces'):
+        for iface in config.get('kernel_interfaces', {}):
+            set_dependents('vpp_kernel_interface', conf, iface)
+
+    # NAT dependency
+    if conf.exists(['vpp', 'nat44']):
+        set_dependents('vpp_nat', conf)
+    if conf.exists(['vpp', 'nat', 'cgnat']):
+        set_dependents('vpp_nat_cgnat', conf)
+
+    # sFlow dependency
+    if conf.exists(['vpp', 'sflow']):
+        set_dependents('vpp_sflow', conf)
+
+    # ACL dependency
+    if conf.exists(['vpp', 'acl']):
+        set_dependents('vpp_acl', conf)
+
+    # IPFIX dependency
+    if conf.exists(['vpp', 'ipfix']):
+        set_dependents('vpp_ipfix', conf)
 
     # PPPoE dependency
     if pppoe_map_ifaces:
         config['pppoe_ifaces'] = pppoe_map_ifaces
         set_dependents('pppoe_server', conf)
-
-    # Return to config dictionary
-    config['persist_config'] = eth_ifaces_persist
 
     return config
 
@@ -411,6 +472,11 @@ def verify(config):
             f'{", ".join(pppoe_removed_ifaces)} still in use by the PPPoE server. '
             'Disable PPPoE control-plane integration with VPP before proceeding.'
         )
+
+    # Check remove VPP interface that used in IPFIX
+    _check_removed_interfaces(
+        config, 'IPFIX monitoring', config.get('ipfix', {}).get('interface', {})
+    )
 
     # bail out early - looks like removal from running config
     if not config or ('removed_ifaces' in config and 'settings' not in config):
@@ -485,6 +551,14 @@ def verify(config):
                 )
         if iface_config['driver'] == 'xdp' and 'xdp_options' in iface_config:
             if iface_config['xdp_options']['num_rx_queues'] != 'all':
+                rx_queues = iface_config['xdp_api_params']['rxq_num']
+                max_rx_queues = _get_max_xdp_rx_queues(config['persist_config'][iface])
+                if rx_queues > max_rx_queues:
+                    raise ConfigError(
+                        f'Maximum supported number of RX queues for interface {iface} is {max_rx_queues}. '
+                        f'Please set "xdp-options num-rx-queues" to {max_rx_queues} or fewer'
+                    )
+
                 Warning(f'Not all RX queues will be connected to VPP for {iface}!')
 
         if iface_config['driver'] == 'xdp' and 'dpdk_options' in iface_config:
@@ -593,17 +667,19 @@ def initialize_interface(iface, driver, iface_config) -> None:
         iface_new_name: str = control_host.get_eth_name(iface_config['dev_id'])
         control_host.rename_iface(iface_new_name, iface)
 
-    # XDP - rename an interface, disable promisc and XDP
+    # XDP - rename an interface, disable promisc and XDP, set original channels
     if driver == 'xdp':
         control_host.set_promisc(f'defunct_{iface}', 'off')
         control_host.rename_iface(f'defunct_{iface}', iface)
         control_host.xdp_remove(iface)
+        if iface_config['original_driver'] in ethtool_channels_change_drv:
+            control_host.set_eth_channels(iface, iface_config['channels'])
 
     # Rename Mellanox NIC to a normal name
     try:
         if control_host.get_eth_driver(f'defunct_{iface}') == 'mlx5_core':
             control_host.rename_iface(f'defunct_{iface}', iface)
-    except FileNotFoundError:
+    except Exception:
         pass
 
     # Replace a driver with original for VMBus interfaces and rename it
@@ -644,11 +720,32 @@ def apply(config):
                     if iface_config['kernel_module'] == 'ena':
                         control_host.unsafe_noiommu_mode(True)
 
-                    if iface_config['kernel_module'] in override_drivers:
+                    original_driver = config['persist_config'][iface]['original_driver']
+                    effective_ifaces = (
+                        config.get('effective', {})
+                        .get('settings', {})
+                        .get('interface', {})
+                    )
+                    # Check if the driver needs to be overridden:
+                    # either the kernel module requires it, or the interface is being switched
+                    # from XDP (hv_netvsc) to DPDK (T7797)
+                    override_xdp_to_dpdk = (
+                        effective_ifaces.get(iface, {}).get('driver') == 'xdp'
+                        and original_driver == 'hv_netvsc'
+                    )
+                    k_module = (
+                        original_driver
+                        if override_xdp_to_dpdk
+                        else iface_config['kernel_module']
+                    )
+                    if (
+                        iface_config['kernel_module'] in override_drivers
+                        or override_xdp_to_dpdk
+                    ):
                         control_host.override_driver(
                             config['persist_config'][iface]['bus_id'],
                             config['persist_config'][iface]['dev_id'],
-                            override_drivers[iface_config['kernel_module']],
+                            override_drivers[k_module],
                         )
 
         call('systemctl daemon-reload')
@@ -691,6 +788,25 @@ def apply(config):
                 # add XDP interfaces
                 if iface_config['driver'] == 'xdp':
                     control_host.rename_iface(iface, f'defunct_{iface}')
+
+                    # Some cloud NICs fail to load XDP if all RX queues are configured. To avoid this,
+                    # we limit the number of queues to half of the maximum supported by the driver.
+                    if (
+                        config['persist_config'][iface]['original_driver']
+                        in ethtool_channels_change_drv
+                    ):
+                        max_rx_queues = _get_max_xdp_rx_queues(
+                            config['persist_config'][iface]
+                        )
+                        channels_orig = config['persist_config'][iface]['channels']
+                        channels = {}
+                        if channels_orig.get('rx'):
+                            channels = {'rx': max_rx_queues, 'tx': max_rx_queues}
+                        if channels_orig.get('combined'):
+                            channels['combined'] = max_rx_queues
+                        if channels:
+                            control_host.set_eth_channels(f'defunct_{iface}', channels)
+
                     vpp_control.xdp_iface_create(
                         host_if=f'defunct_{iface}',
                         name=iface,
@@ -740,11 +856,6 @@ def apply(config):
 
             # NAT44 settings
             nat44_settings = config['settings'].get('nat44', {})
-
-            enable_forwarding = True
-            if 'no_forwarding' in nat44_settings:
-                enable_forwarding = False
-            vpp_control.enable_disable_nat44_forwarding(enable_forwarding)
 
             vpp_control.set_nat44_session_limit(
                 int(nat44_settings.get('session_limit'))

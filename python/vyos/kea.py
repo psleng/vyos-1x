@@ -15,6 +15,7 @@
 
 import json
 import os
+import re
 import socket
 
 from datetime import datetime
@@ -25,7 +26,7 @@ from vyos.template import is_ipv6
 from vyos.template import netmask_from_cidr
 from vyos.utils.dict import dict_search_args
 from vyos.utils.file import file_permissions
-from vyos.utils.process import run
+from vyos.utils.process import run, rc_cmd
 
 kea4_options = {
     'name_server': 'domain-name-servers',
@@ -45,6 +46,7 @@ kea4_options = {
     'ipv6_only_preferred': 'v6-only-preferred',
     'captive_portal': 'v4-captive-portal',
     'capwap_controller': 'capwap-ac-v4',
+    'interface_mtu': 'interface-mtu',
 }
 
 kea6_options = {
@@ -60,7 +62,7 @@ kea6_options = {
     'capwap_controller': 'capwap-ac-v6',
 }
 
-kea_ctrl_socket = '/run/kea/dhcp{inet}{vrf_append}-ctrl-socket'
+kea_ctrl_socket = '/var/run/kea/dhcp{inet}{vrf_append}-ctrl-socket'
 
 
 def _format_hex_string(in_str):
@@ -85,6 +87,14 @@ def _find_list_of_dict_index(lst, key='ip', value=''):
     idx = next((index for (index, d) in enumerate(lst) if d[key] == value), None)
     return idx
 
+def kea_test_config(process: str, config_path: str) -> tuple[bool, str]:
+    result, output = rc_cmd(f'{process} -t {config_path}')
+
+    if result == 0:
+        return (True, None)
+
+    find = re.search(r'Error encountered:\s([^\n$]+)', output)
+    return (False, find[1] if find else None)
 
 def kea_parse_options(config):
     options = []
@@ -169,6 +179,9 @@ def kea_parse_subnet(subnet, config):
     if 'ping_check' in config:
         out['user-context']['enable-ping-check'] = True
 
+    if 'client_class' in config:
+        out['client-class'] = config['client_class']
+
     if 'range' in config:
         pools = []
         for num, range_config in config['range'].items():
@@ -183,6 +196,9 @@ def kea_parse_subnet(subnet, config):
 
                 if 'bootfile_server' in range_config['option']:
                     pool['next-server'] = range_config['option']['bootfile_server']
+
+            if 'client_class' in range_config:
+                pool['client-class'] = range_config['client_class']
 
             pools.append(pool)
         out['pools'] = pools
@@ -480,7 +496,7 @@ def kea_add_lease(
     return False
 
 
-def kea_delete_lease(inet, ip_address, vrf_name=''):
+def kea_delete_lease(inet, vrf_name, ip_address):
     args = {'ip-address': ip_address}
 
     result = _ctrl_socket_command(inet, vrf_name, f'lease{inet}-del', args)
@@ -667,3 +683,22 @@ def kea_get_server_leases(config, inet, vrf_name, pools=[], state=[], origin=Non
                     data.pop(idx)
 
     return data
+
+def _build_relay_hex_condition(sub_option_index, value):
+    if value.startswith("0x"):
+        return f"relay4[{sub_option_index}].hex == {value}"
+    else:
+        return f"relay4[{sub_option_index}].hex == 0x{value.encode().hex().lower()}"
+
+def kea_build_client_class_test(config):
+    conditions = []
+
+    if "relay_agent_information" in config:
+        if "circuit_id" in config["relay_agent_information"]:
+            conditions.append(_build_relay_hex_condition(1, config["relay_agent_information"]["circuit_id"]))
+        if "remote_id" in config["relay_agent_information"]:
+            conditions.append(_build_relay_hex_condition(2, config["relay_agent_information"]["remote_id"]))
+
+    test = " and ".join(conditions)
+
+    return test

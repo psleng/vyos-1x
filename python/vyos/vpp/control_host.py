@@ -23,6 +23,8 @@ from time import sleep
 
 from pyroute2 import IPRoute
 
+from vyos.ethtool import Ethtool
+from vyos.ifconfig import EthernetIf
 from vyos.vpp.utils import EthtoolGDrvinfo
 
 
@@ -266,14 +268,16 @@ def get_eth_driver(iface: str) -> str:
     Returns:
         str: kernel module name
     """
-    iface_driver: str = ''
     driver_dir = Path(f'/sys/class/net/{iface}/device/driver/module')
-    if not driver_dir.exists():
-        # raise error if device was not found
-        raise FileNotFoundError(f'PCI device {iface} not found in ethernet interfaces')
+    # Try to detect via sysfs (works for PCI devices)
+    if driver_dir.exists():
+        return driver_dir.resolve().name
 
-    iface_driver: str = driver_dir.resolve().name
-    return iface_driver
+    # Fallback: use ethtool (works for veth, tun, etc.)
+    try:
+        return Ethtool(iface).get_driver_name()
+    except Exception as error:
+        raise Exception(f'Could not determine driver for "{iface}": {error}') from error
 
 
 def unsafe_noiommu_mode(status: bool) -> None:
@@ -373,3 +377,40 @@ def flush_ip(iface_name: str) -> None:
     """
     iproute = IPRoute()
     iproute.flush_addr(label=iface_name)
+
+
+def get_eth_channels(iface_name: str) -> dict:
+    """
+    Get the current hardware queue counts for channels of an interface using ethtool.
+
+    Args:
+        iface_name (str): name of an interface
+
+    Returns:
+        dict: Mapping of channel types to their current values:
+              - 'rx' (int | None): RX channel count.
+              - 'tx' (int | None): TX channel count.
+              - 'combined' (int | None): Combined channel count.
+              Returns None if the channel type is not supported.
+    """
+    ethtool = Ethtool(iface_name)
+
+    channels = {}
+    for channel in ['rx', 'tx', 'combined']:
+        queues_list = ethtool.get_channels(channel)
+        channels[channel] = queues_list[-1] if (len(queues_list) == 2) else None
+
+    return channels
+
+
+def set_eth_channels(iface_name: str, channels: dict) -> None:
+    """Configure the number of RX, TX, or combined channels for an interface.
+
+    Args:
+        iface_name (str): name of an interface
+        channels (dict): channels to set
+    """
+    interface = EthernetIf(iface_name)
+    for channel, value in channels.items():
+        if value:
+            interface.set_channels(channel, value)

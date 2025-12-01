@@ -46,6 +46,7 @@ directories = {
 
 systemd_services = {
     'haproxy' : 'haproxy.service',
+    'openconnect': 'ocserv.service',
     'syslog' : 'syslog.service',
     'snmpd' : 'snmpd.service',
 }
@@ -61,6 +62,8 @@ config_files = {
 config_status = '/tmp/vyos-config-status'
 api_config_state = '/run/http-api-state'
 frr_debug_enable = '/tmp/vyos.frr.debug'
+static_route_dhcp_interfaces_path = '/tmp/static_dhcp_interfaces'
+vyos_configd_socket_path = 'ipc:///run/vyos-configd.sock'
 
 cfg_group = 'vyattacfg'
 

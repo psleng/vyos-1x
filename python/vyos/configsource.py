@@ -326,10 +326,11 @@ class ConfigSourceVyconfSession(ConfigSource):
         else:
             self.__session_env = None
 
-        if session_env and 'CONFIGSESSION_PID' in session_env:
-            self.pid = int(session_env['CONFIGSESSION_PID'])
+        if session_env and 'SESSION_PID' in session_env:
+            self.pid = int(session_env['SESSION_PID'])
         else:
-            self.pid = os.getppid()
+            pid = os.environ.get('SESSION_PID', '')
+            self.pid = int(pid) if pid else os.getppid()
 
         self._vyconf_session = VyconfSession(pid=self.pid)
         try:
@@ -353,13 +354,6 @@ class ConfigSourceVyconfSession(ConfigSource):
         # N.B. level not yet implemented pending integration with legacy CLI
         # cf. T7374
         self._level = []
-
-    def __del__(self):
-        try:
-            if not self._vyconf_session.in_session():
-                self._vyconf_session.teardown()
-        except AttributeError:
-            pass
 
     def get_level(self):
         return self._level

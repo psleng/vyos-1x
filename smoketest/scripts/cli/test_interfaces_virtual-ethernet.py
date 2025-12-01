@@ -16,10 +16,8 @@
 
 import unittest
 
-from netifaces import interfaces
-
-from vyos.utils.process import process_named_running
 from base_interfaces_test import BasicInterfaceTest
+from base_vyostest_shim import VyOSUnitTestSHIM
 
 class VEthInterfaceTest(BasicInterfaceTest.TestCase):
     @classmethod
@@ -34,25 +32,5 @@ class VEthInterfaceTest(BasicInterfaceTest.TestCase):
         # call base-classes classmethod
         super(VEthInterfaceTest, cls).setUpClass()
 
-    # As we always need a pair of veth interfaces, we can not rely on the base
-    # class check to determine if there is a dhcp6c or dhclient instance running.
-    # This test will always fail as there is an instance running on the peer
-    # interface.
-    def tearDown(self):
-        self.cli_delete(self._base_path)
-        self.cli_commit()
-
-        # Verify that no previously interface remained on the system
-        for intf in self._interfaces:
-            self.assertNotIn(intf, interfaces())
-
-    @classmethod
-    def tearDownClass(cls):
-        # No daemon started during tests should remain running
-        for daemon in ['dhcp6c', 'dhclient']:
-            cls.assertFalse(cls, process_named_running(daemon))
-
-        super(VEthInterfaceTest, cls).tearDownClass()
-
 if __name__ == '__main__':
-    unittest.main(verbosity=2)
+    unittest.main(verbosity=2, failfast=VyOSUnitTestSHIM.TestCase.debug_on())
