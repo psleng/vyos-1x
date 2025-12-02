@@ -30,11 +30,11 @@ from vyos.configverify import verify_mirror_redirect
 from vyos.configverify import verify_vrf
 from vyos.configverify import verify_mtu_ipv6
 from vyos.ifconfig import WWANIf
-from vyos.utils.dict import dict_search
+#from vyos.utils.dict import dict_search
 from vyos.utils.network import is_wwan_connected
 from vyos.utils.process import cmd
-from vyos.utils.process import call
-from vyos.utils.process import DEVNULL
+#from vyos.utils.process import call
+#from vyos.utils.process import DEVNULL
 from vyos.utils.process import is_systemd_service_active
 from vyos.utils.file import write_file
 from vyos import ConfigError
@@ -191,79 +191,69 @@ def parse_wwan_profile_config(wwan_profile:dict):
             username = ''
             password = ''
 
-    wwan_dict = {
-        "APN": apn,
-        "CID": cid,
-        "PDP Type": pdp_type,
-        "Roaming": roaming,
-        "SIM Slot": sim_slot,
-        "Technology": {technology_type: bands},
-        "Authentication": {auth_type: {username: password}}
-    }
-    print(wwan_dict)
+        wwan_dict = {
+            "APN": apn,
+            "CID": cid,
+            "PDP Type": pdp_type,
+            "Roaming": roaming,
+            "SIM Slot": sim_slot,
+            "Technology": {technology_type: bands},
+            "Authentication": {auth_type: {username: password}}
+        }
+        print(f"***wwan_dict parse_wwan_profile_config***")
+        print(wwan_dict) # TODO : debug - properly log this
+
+    else:
+        wwan_dict = {}
+
     return wwan_dict
 
 def apply(wwan):
-    # ModemManager is required to dial WWAN connections - one instance is
-    # required to serve all modems. Activate ModemManager on first invocation
-    # of any WWAN interface.
+    # Ensure ModemManager is running
     if not is_systemd_service_active(service_name):
         cmd(f'systemctl start {service_name}')
-
         counter = 100
-        # Wait until a modem is detected and then we can continue
         while counter > 0:
             counter -= 1
             tmp = cmd('mmcli -L')
             if tmp != 'No modems were found':
                 break
             sleep(0.250)
-    modem = None
-    if 'shutdown_required' in wwan or (not is_wwan_connected(wwan['ifname'])):
-        # deprecated: we only need the modem number. wwan0 -> 0, wwan1 -> 1
-        # modem = wwan['ifname'].lstrip('wwan')
-        # get the modem index of the first modem, assuming only one modem detected
-        tmp = cmd('mmcli -L')
-        modem = tmp.split("/Modem/")[1].split()[0]
-        base_cmd = f'mmcli --modem {modem}'
-        # Number of bearers is limited - always disconnect first
-        cmd(f'{base_cmd} --simple-disconnect')
 
     w = WWANIf(wwan['ifname'])
     if 'deleted' in wwan or 'disable' in wwan:
         w.remove()
-
-        # We are the last WWAN interface - there are no other WWAN interfaces
-        # remaining, thus we can stop ModemManager and free resources.
         if 'other_interfaces' not in wwan:
             cmd(f'systemctl stop {service_name}')
-            # Clean CRON helper script which is used for to re-connect when
-            # RF signal is lost
             if os.path.exists(cron_script):
                 os.unlink(cron_script)
-
         return None
 
+    # Use DBus ModemConnectionService to set connection params and connect
+    async def dbus_connect():
+        modem_index = wwan['ifname'].lstrip('wwan')
+        modem_path = f'/org/freedesktop/ModemManager1/Modem/{modem_index}'
+        apn = wwan.get('apn', '')
+        username = wwan.get('authentication', {}).get('username', '')
+        password = wwan.get('authentication', {}).get('password', '')
+        sim_slot = wwan.get('sim_slot', -1)
+        pdp_type = wwan.get('pdp_type', '')
+
+        bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+        proxy_object = bus.get_proxy_object(
+            'com.perle.ModemConnectionService',
+            '/com/perle/ModemConnectionService',
+            await bus.introspect('com.perle.ModemConnectionService', '/com/perle/ModemConnectionService')
+        )
+        interface = proxy_object.get_interface('com.perle.ModemConnectionService.Interface')
+        # Set connection params (now includes sim_slot and pdp_type)
+        await interface.call_SetConnectionParams(modem_path, apn, username, password, int(sim_slot), pdp_type)
+        # Connect
+        await interface.call_Connect(modem_path, apn)
+
+    # Only connect if shutdown required or not connected
     if 'shutdown_required' in wwan or (not is_wwan_connected(wwan['ifname'])):
-        ip_type = 'ipv4'
-        slaac = dict_search('ipv6.address.autoconf', wwan) != None
-        if 'address' in wwan:
-            if 'dhcp' in wwan['address'] and ('dhcpv6' in wwan['address'] or slaac):
-                ip_type = 'ipv4v6'
-            elif 'dhcpv6' in wwan['address'] or slaac:
-                ip_type = 'ipv6'
-            elif 'dhcp' in wwan['address']:
-                ip_type = 'ipv4'
-
-        options = f'ip-type={ip_type},apn=' #+ wwan['apn']
-        if 'authentication' in wwan:
-            options += ',user={username},password={password}'.format(**wwan['authentication'])
-
-        if False: # Change to True to use the new DBus interface. Ensure the com.perle.ModemConnectionService is running first "wwan_dbus_interface.py"
-            asyncio.run(simple_connect(f'/org/freedesktop/ModemManager1/Modem/{modem}', ['apn'])) # TODO : instead of connect just write the dict to the DBus interface and send a signal to update connection
-        else:
-            command = f'{base_cmd} --simple-connect="{options}"'
-            call(command, stdout=DEVNULL)
+        asyncio.run(dbus_connect())
 
     w.update(wwan)
 

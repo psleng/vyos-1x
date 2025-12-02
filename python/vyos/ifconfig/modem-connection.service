@@ -1,0 +1,12 @@
+[Unit]
+Description=Modem Connection D-Bus Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/env python3 /usr/share/vyos/python/vyos/ifconfig/interfaces_wwan_ModemConnectionDbusService.py
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

@@ -144,6 +144,61 @@ state_machine = [
     }
 ]
 
+# state machine function definitions:
+def on_enter_unavailable(self):
+    logger.debug("Entering Unavailable state")
+    self.state_machine.transition('next')
+
+def on_enter_disconnected(self):
+    logger.debug("Entering Disconnected state")
+    self.state_machine.transition('next')
+
+def on_enter_prepare(self):
+    logger.debug("Entering Prepare state")
+
+    self.state_machine.transition('next')
+
+def on_enter_wait_for_sim(self):
+    logger.debug("Entering Wait for SIM state")
+    self.state_machine.transition('next')
+
+def on_enter_unlock(self):
+    logger.debug("Entering Unlock state")
+    self.state_machine.transition('next')
+
+def on_enter_wait_for_ready(self):
+    logger.debug("Entering Wait for Ready state")
+    self.state_machine.transition('next')
+
+def on_enter_initial_eps_bearer(self):
+    logger.debug("Entering Initial EPS Bearer state")
+    self.state_machine.transition('next')
+
+def on_enter_connect(self):
+
+    logger.debug("Entering Connect state")
+    self.state_machine.transition('next')
+
+def on_enter_last(self):
+    logger.debug("Entering Last state")
+    self.state_machine.transition('next')
+
+def on_enter_activated(self):
+    logger.debug("Entering Activated state")
+    # Stay in Activated state until a disconnect is requested
+
+def on_enter_deactivating(self):
+    logger.debug("Entering Deactivating state")
+    self.state_machine.transition('next')
+
+def on_enter_failed(self):
+    logger.debug("Entering Failed state")
+    self.state_machine.transition('next')
+
+def on_exit_state(self):
+    logger.debug(f"Exiting {self.state_machine.current_state.name} state")
+    self.state_machine.transition('next')
+
 class ModemConnectionStateService(ServiceInterface):
     """
     Top layer abstraction for handling modem connections.
