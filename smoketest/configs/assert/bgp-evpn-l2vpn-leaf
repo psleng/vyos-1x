@@ -1,30 +1,34 @@
-set interfaces ethernet eth0 address '192.0.2.51/27'
-set interfaces ethernet eth0 address '2001:db8::51/64'
+set interfaces bridge br100 member interface eth3
+set interfaces bridge br100 member interface vxlan100
+set interfaces dummy dum0 address '172.29.0.1/32'
+set interfaces ethernet eth0 address '2001:db8::41/64'
+set interfaces ethernet eth0 address '192.0.2.41/27'
 set interfaces ethernet eth0 description 'Out-of-Band Managament Port'
 set interfaces ethernet eth0 vrf 'MGMT'
-set interfaces ethernet eth1 address '172.29.1.0/31'
-set interfaces ethernet eth1 mtu '1600'
-set interfaces ethernet eth2 address '172.29.1.2/31'
-set interfaces ethernet eth2 mtu '1600'
+set interfaces ethernet eth1 address '172.29.1.1/31'
+set interfaces ethernet eth2 address '172.29.2.1/31'
 set interfaces ethernet eth2 offload gro
-set interfaces ethernet eth3 address '172.29.1.4/31'
-set interfaces ethernet eth3 mtu '1600'
 set interfaces ethernet eth3 offload gro
 set interfaces loopback lo
+set interfaces vxlan vxlan100 parameters nolearning
+set interfaces vxlan vxlan100 port '8472'
+set interfaces vxlan vxlan100 source-address '172.29.0.1'
+set interfaces vxlan vxlan100 vni '100'
 set protocols bgp address-family ipv4-unicast maximum-paths ibgp '4'
 set protocols bgp address-family ipv4-unicast redistribute connected
-set protocols bgp listen range 172.29.1.0/24 peer-group 'evpn'
+set protocols bgp address-family l2vpn-evpn advertise-all-vni
+set protocols bgp neighbor 172.29.1.0 peer-group 'evpn'
+set protocols bgp neighbor 172.29.2.0 peer-group 'evpn'
 set protocols bgp parameters log-neighbor-changes
-set protocols bgp peer-group evpn address-family ipv4-unicast route-reflector-client
-set protocols bgp peer-group evpn address-family l2vpn-evpn route-reflector-client
-set protocols bgp peer-group evpn capability dynamic
+set protocols bgp peer-group evpn address-family ipv4-unicast nexthop-self
+set protocols bgp peer-group evpn address-family l2vpn-evpn nexthop-self
 set protocols bgp peer-group evpn remote-as '65010'
 set protocols bgp system-as '65010'
 set service lldp interface all
 set service ntp allow-client address '0.0.0.0/0'
 set service ntp allow-client address '::/0'
-set service ntp listen-address '192.0.2.51'
-set service ntp listen-address '2001:db8::51'
+set service ntp listen-address '192.0.2.41'
+set service ntp listen-address '2001:db8::41'
 set service ntp server 0.de.pool.ntp.org prefer
 set service ntp vrf 'MGMT'
 set service ssh disable-host-validation

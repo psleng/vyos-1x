@@ -14,6 +14,7 @@ VYOS_MIBS_DIR := usr/share/snmp/mibs
 VYOS_LOCALUI_DIR := srv/localui
 
 VYCONF := usr/libexec/vyos/vyconf
+VYCONF_BIN := $(VYCONF)/bin
 VYCONF_CONF := $(VYCONF)/config
 VYCONF_SESSION := $(VYCONF)/session
 VYCONF_DATA := usr/share/vyos/vyconf
@@ -157,12 +158,8 @@ override_dh_auto_install: /usr/share/vyos/vyconf
 	cp -r smoketest/scripts/* $(DIR)/$(VYOS_LIBEXEC_DIR)/tests/smoke
 
 	# Install smoke test configs
-	mkdir -p $(DIR)/$(VYOS_LIBEXEC_DIR)/tests/config/
-	cp -r smoketest/configs/* $(DIR)/$(VYOS_LIBEXEC_DIR)/tests/config
-
-	# Install smoke test config tests
-	mkdir -p $(DIR)/$(VYOS_LIBEXEC_DIR)/tests/config-tests/
-	cp -r smoketest/config-tests/* $(DIR)/$(VYOS_LIBEXEC_DIR)/tests/config-tests
+	mkdir -p $(DIR)/$(VYOS_LIBEXEC_DIR)/tests/configs/
+	cp -r smoketest/configs/* $(DIR)/$(VYOS_LIBEXEC_DIR)/tests/configs
 
 	# Install system programs
 	mkdir -p $(DIR)/$(VYOS_BIN_DIR)
@@ -193,11 +190,13 @@ override_dh_auto_install: /usr/share/vyos/vyconf
 	mkdir -p $(DIR_LIBVYOSCONFIG)/$(VYCONF_SESSION)
 	mkdir -p $(DIR_LIBVYOSCONFIG)/$(VYCONF_DATA)
 	mkdir -p $(DIR_LIBVYOSCONFIG)/$(VYCONF_DEF)
+	mkdir -p $(DIR_LIBVYOSCONFIG)/$(VYCONF_BIN)
 
 	cp $(OCAML_DIR)/share/vyconf/vyconf.proto $(DIR_LIBVYOSCONFIG)/$(VYCONF_DATA)
 	cp $(OCAML_DIR)/share/vyconf/vyconfd.conf $(DIR_LIBVYOSCONFIG)/$(VYCONF_DEF)
 	cp $(OCAML_DIR)/bin/vyconfd $(DIR_LIBVYOSCONFIG)/$(VYCONF)
 	cp $(OCAML_DIR)/bin/vyconf_cli $(DIR_LIBVYOSCONFIG)/$(VYCONF)
+	cp $(OCAML_DIR)/bin/vyconf_cli_compat $(DIR_LIBVYOSCONFIG)/$(VYCONF_BIN)
 	cp libvyosconfig/_build/libvyosconfig.so $(DIR_LIBVYOSCONFIG)/$(VYOS_LIB_DIR)/libvyosconfig.so.0
 
 override_dh_installsystemd:
