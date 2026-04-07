@@ -15,9 +15,10 @@
 # with this program; if not, write to the Free Software Foundation, Inc.,
 # 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
+import re
+
 from collections.abc import Callable
 from functools import wraps
-from re import search as re_search, MULTILINE as re_M
 from systemd import journal
 from time import sleep
 from typing import TypeVar, ParamSpec, Literal
@@ -330,7 +331,7 @@ class VPPControl:
         hw_info = self.cli_cmd(f'show hardware-interfaces {ifname}').reply
 
         regex_filter = r'^\s+pci: device (?P<device>\w+:\w+) subsystem (?P<subsystem>\w+:\w+) address (?P<address>\w+:\w+:\w+\.\w+) numa (?P<numa>\w+)$'
-        re_obj = re_search(regex_filter, hw_info, re_M)
+        re_obj = re.search(regex_filter, hw_info, re.MULTILINE)
 
         # return empty string if no interface or no PCI info was found
         if not hw_info or not re_obj:
@@ -439,26 +440,6 @@ class VPPControl:
                 return iface.interface_dev_type
         return None
 
-    @_Decorators.api_call
-    def set_nat44_session_limit(self, session_limit: int) -> None:
-        """Set NAT44 session limit
-
-        Args:
-            session_limit (int): Maximum number of sessions per thread
-        """
-        self.__vpp_api_client.api.nat44_set_session_limit(
-            session_limit=session_limit,
-        )
-
-    @_Decorators.api_call
-    def set_nat_workers(self, workers: int) -> None:
-        """Set NAT44 session limit
-
-        Args:
-            workers (int): Bitmask of workers list
-        """
-        self.__vpp_api_client.api.nat_set_workers(worker_mask=workers)
-
     @property
     def connected(self) -> bool:
         """Check if VPP API is connected
@@ -479,18 +460,156 @@ class VPPControl:
         return self.__vpp_api_client.api
 
     @_Decorators.api_call
-    def map_pppoe_interface(self, ifname: str, is_add: bool) -> None:
-        """Create or delete PPPoE mapping between data-plain and control-plane interfaces
+    def map_pppoe_interface(self, ifname: str) -> None:
+        """
+        Create PPPoE mapping between data-plane and control-plane interfaces.
 
         Args:
-            ifname (str): name of an interface in kernel
-            is_add (bool): create or delete mapping
+            ifname (str): Name of an interface in kernel.
         """
         vpp_pair = self.lcp_pair_find(kernel_name=ifname)
         if vpp_pair:
+            vpp_iface_name = vpp_pair['vpp_name_hw']
             vpp_pair_name = vpp_pair['vpp_name_kernel']
             self.__vpp_api_client.api.pppoe_add_del_cp(
-                dp_sw_if_index=self.get_sw_if_index(ifname),
+                dp_sw_if_index=self.get_sw_if_index(vpp_iface_name),
                 cp_sw_if_index=self.get_sw_if_index(vpp_pair_name),
-                is_add=is_add,
+                is_add=True,
+            )
+
+    @_Decorators.api_call
+    def get_pppoe_interface_mapping(self) -> dict:
+        """
+        Parse the output of 'show pppoe control-plane binding' to build a mapping
+        between data-plane and control-plane interfaces.
+
+        Returns:
+            dict: Mapping of data-plane interface names/indices to control-plane interface names/indices.
+        """
+        reply = self.cli_cmd('show pppoe control-plane binding').reply
+        result = {}
+
+        deleted_re = re.compile(r'DELETED\s*\((\d+)\)')
+
+        lines = reply.strip().splitlines()
+
+        # If there are less than 2 lines, assume no PPPoE configured
+        if len(lines) < 2:
+            return result
+
+        # Skip header lines (first 2 lines)
+        for line in lines[2:]:
+            line = line.strip()
+            if not line:
+                continue
+
+            # Split into two columns by 2+ spaces
+            cols = re.split(r'\s{2,}', line, maxsplit=1)
+            if len(cols) != 2:
+                continue
+
+            # Determine key/value depending on which column has "DELETED (index)"
+            col_a, col_b = cols
+
+            match_a = deleted_re.search(col_a)
+            match_b = deleted_re.search(col_b)
+
+            key = int(match_a.group(1)) if match_a else col_a
+            value = int(match_b.group(1)) if match_b else col_b
+
+            result[key] = value
+
+        return result
+
+    @_Decorators.api_call
+    def delete_pppoe_mapping(self, dp_iface: str | int, cp_iface: str | int) -> None:
+        """
+        Delete PPPoE mapping between data-plane and control-plane interfaces.
+
+        Args:
+            dp_iface (str|int): Name or index of an interface in data-plane.
+            cp_iface (str|int): Name or index of an interface in control plane.
+        """
+        dp_index = dp_iface
+        if isinstance(dp_iface, str):
+            dp_index = self.get_sw_if_index(dp_iface)
+        cp_index = cp_iface
+        if isinstance(cp_iface, str):
+            cp_index = self.get_sw_if_index(cp_iface)
+        self.__vpp_api_client.api.pppoe_add_del_cp(
+            dp_sw_if_index=dp_index,
+            cp_sw_if_index=cp_index,
+            is_add=False,
+        )
+
+    @_Decorators.api_call
+    def enable_dhcp_client(self, ifname: str) -> None:
+        """Enable DHCP client detection on a given interface
+
+        Args:
+            ifname (str): name of an interface in kernel
+        """
+        iface_index = self.get_sw_if_index(ifname)
+        feature_is_enabled = self.__vpp_api_client.api.feature_is_enabled(
+            sw_if_index=iface_index,
+            feature_name='ip4-dhcp-client-detect',
+            arc_name='ip4-unicast',
+        )
+        if not feature_is_enabled.is_enabled:
+            self.__vpp_api_client.api.dhcp_client_detect_enable_disable(
+                sw_if_index=iface_index,
+                enable=True,
+            )
+
+    @_Decorators.api_call
+    def disable_dhcp_client(self, ifname: str) -> None:
+        """Disable DHCP client detection on a given interface
+
+        Args:
+            ifname (str): name of an interface in kernel
+        """
+        self.__vpp_api_client.api.dhcp_client_detect_enable_disable(
+            sw_if_index=self.get_sw_if_index(ifname),
+            enable=False,
+        )
+
+    @_Decorators.api_call
+    def enable_icmpv6_ra_punt(self, ifname: str) -> None:
+        """Enable ip6-icmp-ra-punt feature on a given interface for both ip6-unicast and ip6-multicast arcs.
+
+        This ensures that IPv6 ICMP Router Advertisements (RA) are punted to the host, which is typically required
+        for features such as DHCPv6 client operation.
+
+        Args:
+            ifname (str): name of an interface in kernel
+        """
+        iface_index = self.get_sw_if_index(ifname)
+        for arc_name in ['ip6-unicast', 'ip6-multicast']:
+            feature_is_enabled = self.__vpp_api_client.api.feature_is_enabled(
+                sw_if_index=iface_index,
+                feature_name='ip6-icmp-ra-punt',
+                arc_name=arc_name,
+            )
+
+            if not feature_is_enabled.is_enabled:
+                self.__vpp_api_client.api.feature_enable_disable(
+                    sw_if_index=iface_index,
+                    enable=True,
+                    arc_name=arc_name,
+                    feature_name='ip6-icmp-ra-punt',
+                )
+
+    @_Decorators.api_call
+    def disable_icmpv6_ra_punt(self, ifname: str) -> None:
+        """Disable ip6-icmp-ra-punt feature on a given interface
+
+        Args:
+            ifname (str): name of an interface in kernel
+        """
+        for arc_name in ['ip6-unicast', 'ip6-multicast']:
+            self.__vpp_api_client.api.feature_enable_disable(
+                sw_if_index=self.get_sw_if_index(ifname),
+                enable=False,
+                arc_name=arc_name,
+                feature_name='ip6-icmp-ra-punt',
             )

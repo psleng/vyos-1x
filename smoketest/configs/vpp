@@ -71,6 +71,12 @@ vpp {
             }
             mode "802.3ad"
         }
+        bridge br1 {
+            description "Bridge1"
+            member {
+                interface "eth2"
+            }
+        }
         gre gre10 {
             description "Layer-3"
             mode "point-to-point"
@@ -110,6 +116,7 @@ vpp {
         }
         interface eth2 {
             driver "dpdk"
+            rx-mode "polling"
         }
         interface eth3 {
             driver "xdp"
@@ -119,9 +126,18 @@ vpp {
         }
         interface eth4 {
             driver "dpdk"
+            dpdk-options {
+                num-rx-desc "512"
+                num-tx-desc "512"
+                num-rx-queues "1"
+                num-tx-queues "1"
+            }
         }
         unix {
             poll-sleep-usec "12"
+        }
+        logging {
+            default-log-level "debug"
         }
     }
 }

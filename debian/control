@@ -50,9 +50,9 @@ Standards-Version: 3.9.6
 Package: vyos-1x
 Architecture: amd64 arm64
 Pre-Depends:
-  libpam-runtime [amd64],
-  libnss-tacplus [amd64],
-  libpam-tacplus [amd64],
+  libpam-runtime,
+  libnss-tacplus,
+  libpam-tacplus,
   vyos-libpam-radius-auth,
   vyos-libnss-mapuser,
   tzdata (>= 2025b)
@@ -351,6 +351,12 @@ Depends:
   vpp-plugin-core,
   vpp-plugin-dpdk,
 # End "vpp"
+# For "serial"
+  psl-iolan-monitor,
+# End "serial"
+# For web interface
+  flask-react-web,
+# End web interface
 ## End Configuration mode
 ## Operational mode
 # Used for hypervisor model in "run show version"
@@ -387,6 +393,9 @@ Depends:
 # For "run format disk"
   parted,
 # End Operational mode
+# For apn functionality
+  apnscripts,
+# End apn functionality
 ## TPM tools
   cryptsetup,
   tpm2-tools,

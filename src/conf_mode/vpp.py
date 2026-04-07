@@ -29,12 +29,16 @@ from vyos import ConfigError
 from vyos import airbag
 from vyos.base import Warning
 from vyos.config import Config, config_dict_merge
-from vyos.configdep import set_dependents, call_dependents
-from vyos.configdict import node_changed, leaf_node_changed
+from vyos.configdep import set_dependents
+from vyos.configdep import call_dependents
+from vyos.configdict import node_changed
+from vyos.configverify import verify_interface_exists
+from vyos.configverify import verify_virtual_interface_exists
 from vyos.ifconfig import Section
 from vyos.logger import getLogger
 from vyos.template import render
 from vyos.utils.boot import boot_configuration_complete
+from vyos.utils.cpu import get_available_cpus
 from vyos.utils.kernel import check_kmod
 from vyos.utils.kernel import unload_kmod
 from vyos.utils.kernel import list_loaded_modules
@@ -44,17 +48,13 @@ from vyos.utils.process import is_systemd_service_active
 from vyos.vpp import VPPControl
 from vyos.vpp import control_host
 from vyos.vpp import VppNotRunningError
+from vyos.vpp.config_deps import deps_bond_dict
+from vyos.vpp.config_deps import deps_bridge_dict
 from vyos.vpp.config_deps import deps_xconnect_dict
 from vyos.vpp.config_verify import (
-    verify_dev_driver,
     verify_vpp_minimum_cpus,
     verify_vpp_minimum_memory,
-    verify_vpp_settings_cpu,
-    verify_vpp_settings_cpu_corelist_workers,
-    verify_vpp_cpu_main_core,
-    verify_vpp_settings_cpu_skip_cores,
-    verify_vpp_settings_cpu_workers,
-    verify_vpp_nat44_workers,
+    verify_vpp_cpu_cores,
     verify_vpp_memory,
     verify_vpp_statseg_size,
     verify_vpp_interfaces_dpdk_num_queues,
@@ -63,6 +63,7 @@ from vyos.vpp.config_verify import (
     verify_vpp_buffers,
 )
 from vyos.vpp.config_resource_checks import memory
+from vyos.vpp.config_resource_checks.resource_defaults import default_resource_map
 from vyos.vpp.config_filter import iface_filter_eth
 from vyos.vpp.utils import EthtoolGDrvinfo
 from vyos.vpp.configdb import JSONStorage
@@ -80,8 +81,6 @@ vpp_log = getLogger(
 dependency_interface_type_map = {
     'vpp_interfaces_bonding': 'bonding',
     'vpp_interfaces_bridge': 'bridge',
-    'vpp_interfaces_ethernet': 'ethernet',
-    'vpp_interfaces_geneve': 'geneve',
     'vpp_interfaces_gre': 'gre',
     'vpp_interfaces_ipip': 'ipip',
     'vpp_interfaces_loopback': 'loopback',
@@ -115,6 +114,21 @@ drivers_support_interrupt: dict[str, list] = {
 
 # drivers that require changing channels (half the maximum number of RX/TX queues)
 ethtool_channels_change_drv: list[str] = ['ena', 'gve']
+
+# List of NICs where VPP activation is supported
+SUPPORTED_PCI_IDS = (
+    '15b3:1019',  # Mellanox Technologies MT28800 Family [ConnectX-5 Ex]
+    '15b3:101d',  # Mellanox Technologies MT2892 Family [ConnectX-6 Dx]
+    '15b3:101e',  # Mellanox Technologies ConnectX Family mlx5Gen Virtual Function
+    '8086:1592',  # Intel Corporation Ethernet Controller E810-C for QSFP
+    '1ae0:0042',  # Google, Inc. Compute Engine Virtual Ethernet [gVNIC]
+    '1af4:1000',  # Red Hat, Inc. Virtio network device (legacy ID)
+    '1af4:1041',  # Red Hat, Inc. Virtio network device (modern ID)
+    '1d0f:ec20',  # Amazon.com, Inc. Elastic Network Adapter (ENA)
+)
+SUPPORTED_DRIVERS = (
+    'hv_netvsc',  # Microsoft Hyper-V network interface card
+)
 
 
 def _load_module(module_name: str):
@@ -153,26 +167,34 @@ def _unload_module(module_name: str):
         raise
 
 
-def _get_workers_count(cpu_settings: dict) -> int:
-    if 'corelist_workers' in cpu_settings:
-        corelist_workers = []
-        for worker_range in cpu_settings['corelist_workers']:
-            core_numbers = worker_range.split('-')
-            corelist_workers.extend(
-                range(int(core_numbers[0]), int(core_numbers[-1]) + 1)
-            )
+def _configure_vpp_cpu_settings(config: dict):
+    """Configure VPP CPU settings: main-core, workers and skip-cores based on 'cpu-cores'"""
+    cpu_cores = int(config['settings']['resource_allocation']['cpu_cores'])
+    reserved_cpus = default_resource_map.get('reserved_cpu_cores')
 
-        return len(corelist_workers)
+    # Get sorted list of available CPU IDs
+    available = sorted({cpu['cpu'] for cpu in get_available_cpus()})
 
-    return int(cpu_settings.get('workers', 0))
+    if reserved_cpus < len(available):
+        main_core = available[reserved_cpus]  # first non-reserved CPU
+        config['settings']['cpu'] = {
+            'main_core': str(main_core),
+            'skip_cores': str(reserved_cpus),
+        }
+        if cpu_cores > 1:
+            config['settings']['cpu']['workers'] = str(cpu_cores - 1)
 
 
 def _normalize_buffers(config: dict):
     """Replace 'auto' buffers_per_numa with calculated value"""
-    if config['settings']['buffers']['buffers_per_numa'] == 'auto':
-        workers = _get_workers_count(config['settings'].get('cpu', {}))
-        buffers = memory.buffers_required(config['settings'], workers)
-        config['settings']['buffers']['buffers_per_numa'] = str(buffers)
+    if (
+        config['settings']['resource_allocation']['buffers']['buffers_per_numa']
+        == 'auto'
+    ):
+        buffers = memory.buffers_required(config['settings'])
+        config['settings']['resource_allocation']['buffers']['buffers_per_numa'] = str(
+            buffers
+        )
 
 
 def _get_max_xdp_rx_queues(config: dict):
@@ -221,15 +243,38 @@ def _check_removed_interfaces(config: dict, feature_name: str, interfaces_config
             )
 
 
+def _is_device_allowed(config: dict, iface: str):
+    """
+    Determines if a network interface device is allowed to be used
+    with VPP based on its PCI ID or driver.
+    """
+    if 'allow_unsupported_nics' in config['settings']:
+        return True
+
+    persist_config = config['persist_config'][iface]
+
+    pci_id = persist_config.get('pci_id')
+    # PCI ID is sufficient by itself, if presented
+    if pci_id is not None and pci_id in SUPPORTED_PCI_IDS:
+        return True
+
+    # If the PCI ID did not match or does not exist, fall back to a driver
+    original_driver = persist_config.get('original_driver')
+    if original_driver is not None and original_driver in SUPPORTED_DRIVERS:
+        return True
+
+    return False
+
+
 def get_config(config=None):
     # use persistent config to store interfaces data between executions
     # this is required because some interfaces after they are connected
     # to VPP is really hard or impossible to restore without knowing
     # their original parameters (like IDs)
-    persist_config = JSONStorage('vpp_conf')
-    eth_ifaces_persist: dict[str, dict[str, str]] = persist_config.read(
-        'eth_ifaces', {}
-    )
+    with JSONStorage('vpp_conf') as persist_config:
+        eth_ifaces_persist: dict[str, dict[str, str]] = persist_config.read(
+            'eth_ifaces', {}
+        )
 
     if config:
         conf = config
@@ -249,6 +294,8 @@ def get_config(config=None):
     )
 
     xconn_members = deps_xconnect_dict(conf)
+    bridge_members = deps_bridge_dict(conf)
+    bond_members = deps_bond_dict(conf)
 
     removed_ifaces = []
     tmp = node_changed(conf, base_settings + ['interface'])
@@ -256,34 +303,45 @@ def get_config(config=None):
         for removed_iface in tmp:
             to_append = {
                 'iface_name': removed_iface,
-                'driver': effective_config['settings']['interface'][removed_iface][
-                    'driver'
-                ],
+                'driver': 'dpdk',
             }
             removed_ifaces.append(to_append)
             # add an interface to a list of interfaces that need
             # to be reinitialized after the commit
             set_dependents('ethernet', conf, removed_iface)
 
-    # Get interfaces that are used in PPPoe for control-plane integration
-    pppoe_conf = conf.get_config_dict(
-        ['service', 'pppoe-server'],
+    # Get interfaces that should be used in PPPoE for control-plane integration
+    pppoe_ifaces = conf.get_config_dict(
+        ['service', 'pppoe-server', 'interface'],
         key_mangling=('-', '_'),
         get_first_key=True,
         no_tag_node_value_mangle=True,
     )
-    pppoe_map_ifaces = [
-        ifname
-        for ifname, iface_conf in pppoe_conf.get('interface', {}).items()
-        if 'vpp_cp' in iface_conf
+    changed_pppoe_ifaces = [
+        iface for iface in pppoe_ifaces if iface.split('.')[0] in tmp
     ]
 
+    interfaces_config = conf.get_config_dict(
+        ['interfaces', 'vpp'],
+        key_mangling=('-', '_'),
+        get_first_key=True,
+        no_tag_node_value_mangle=True,
+        with_defaults=True,
+        with_recursive_defaults=True,
+    )
+
     if not conf.exists(base):
+        if changed_pppoe_ifaces:
+            set_dependents('pppoe_server', conf)
         return {
             'removed_ifaces': removed_ifaces,
             'xconn_members': xconn_members,
+            'bridge_members': bridge_members,
+            'bond_members': bond_members,
             'persist_config': eth_ifaces_persist,
-            **({'pppoe_ifaces': pppoe_map_ifaces} if pppoe_map_ifaces else {}),
+            'interfaces_vpp': interfaces_config,
+            'pppoe_ifaces': pppoe_ifaces,
+            'remove': {},
         }
 
     config = conf.get_config_dict(
@@ -297,18 +355,17 @@ def get_config(config=None):
     # dictionary retrieved.
     default_values = conf.get_config_defaults(**config.kwargs, recursive=True)
 
-    # delete driver-incompatible defaults
-    for iface, iface_config in config.get('settings', {}).get('interface', {}).items():
-        if iface_config.get('driver') == 'dpdk':
-            del default_values['settings']['interface'][iface]['xdp_options']
-        elif iface_config.get('driver') == 'xdp':
-            del default_values['settings']['interface'][iface]['dpdk_options']
+    # Since XDP is no longer configurable via the CLI (T8202),
+    # this code is kept commented out to simplify reintroducing XDP in the future.
+    #
+    # # delete driver-incompatible defaults
+    # for iface, iface_config in config.get('settings', {}).get('interface', {}).items():
+    #     if iface_config.get('driver') == 'dpdk':
+    #         del default_values['settings']['interface'][iface]['xdp_options']
+    #     elif iface_config.get('driver') == 'xdp':
+    #         del default_values['settings']['interface'][iface]['dpdk_options']
 
     config = config_dict_merge(default_values, config)
-
-    # Ignore default XML values if config doesn't exists
-    if not conf.exists(base_settings + ['ipsec']):
-        del config['settings']['ipsec']
 
     # add running config
     if effective_config:
@@ -318,6 +375,8 @@ def get_config(config=None):
         effective_config = config_dict_merge(default_values_effective, effective_config)
         # Buffer normalization (auto → computed)
         _normalize_buffers(effective_config)
+        for iface_config in effective_config['settings']['interface'].values():
+            iface_config['driver'] = 'dpdk'
         config['effective'] = effective_config
 
     # Save important info about all interfaces that cannot be retrieved later
@@ -329,6 +388,7 @@ def get_config(config=None):
             }
             eth_ifaces_persist[iface]['bus_id'] = control_host.get_bus_name(iface)
             eth_ifaces_persist[iface]['dev_id'] = control_host.get_dev_id(iface)
+            eth_ifaces_persist[iface]['pci_id'] = control_host.get_pci_id(iface)
             eth_ifaces_persist[iface]['channels'] = control_host.get_eth_channels(iface)
 
     # Return to config dictionary
@@ -336,19 +396,17 @@ def get_config(config=None):
 
     if 'settings' in config:
         if 'interface' in config['settings']:
+            interface_rx_mode = config['settings'].get('interface_rx_mode')
+
             for iface, iface_config in config['settings']['interface'].items():
-                # Driver must be configured to continue
-                if 'driver' not in iface_config:
-                    raise ConfigError(
-                        f'"driver" must be configured for {iface} interface!'
-                    )
+                iface_config['driver'] = 'dpdk'
 
-                old_driver = leaf_node_changed(
-                    conf, base_settings + ['interface', iface, 'driver']
-                )
-
-                if old_driver:
-                    config['settings']['interface'][iface]['driver_changed'] = {}
+                # old_driver = leaf_node_changed(
+                #     conf, base_settings + ['interface', iface, 'driver']
+                # )
+                #
+                # if old_driver:
+                #     config['settings']['interface'][iface]['driver_changed'] = {}
 
                 # Get current kernel module, required for extra verification and
                 # logic for VMBus interfaces
@@ -360,13 +418,13 @@ def get_config(config=None):
                 iface_filter_eth(conf, iface)
                 set_dependents('ethernet', conf, iface)
                 # Interfaces with changed driver should be removed/readded
-                if old_driver and old_driver[0] == 'dpdk':
-                    removed_ifaces.append(
-                        {
-                            'iface_name': iface,
-                            'driver': 'dpdk',
-                        }
-                    )
+                # if old_driver and old_driver[0] == 'dpdk':
+                #     removed_ifaces.append(
+                #         {
+                #             'iface_name': iface,
+                #             'driver': 'dpdk',
+                #         }
+                #     )
 
                 # Get PCI address or device ID
                 if iface_config['driver'] == 'dpdk':
@@ -381,8 +439,8 @@ def get_config(config=None):
                     else:
                         try:
                             iface_to_search = iface
-                            if old_driver and old_driver[0] == 'xdp':
-                                iface_to_search = f'defunct_{iface}'
+                            # if old_driver and old_driver[0] == 'xdp':
+                            #     iface_to_search = f'defunct_{iface}'
                             iface_config['dpdk_options']['dev_id'] = (
                                 control_host.get_dev_id(iface_to_search)
                             )
@@ -405,40 +463,45 @@ def get_config(config=None):
                         )
                     if 'zero-copy' in iface_config['xdp_options']:
                         xdp_api_params['mode'] = 'zero-copy'
-                    if iface_config.get('rx_mode') in ('interrupt', 'adaptive') and any(
-                        key in config['settings'].get('cpu', {})
-                        for key in ('workers', 'corelist_workers')
+                    if (
+                        interface_rx_mode in ('interrupt', 'adaptive')
+                        and int(config['settings']['resource_allocation']['cpu_cores'])
+                        > 1
                     ):
                         xdp_api_params['flags'] = 'no_syscall_lock'
                     iface_config['xdp_api_params'] = xdp_api_params
 
         # Buffer normalization (auto → computed)
         _normalize_buffers(config)
+        # Configure VPP main-core and workers 'cpu-cores' settings
+        _configure_vpp_cpu_settings(config)
 
     if removed_ifaces:
         config['removed_ifaces'] = removed_ifaces
         config['xconn_members'] = xconn_members
+        config['bridge_members'] = bridge_members
+        config['bond_members'] = bond_members
+
+    config['interfaces_vpp'] = interfaces_config
 
     # Dependencies
     for dependency, interface_type in dependency_interface_type_map.items():
-        # if conf.exists(base + ['interfaces', interface_type]):
-        if effective_config.get('interfaces', {}).get(interface_type):
-            for iface, iface_config in (
-                config.get('interfaces', {}).get(interface_type, {}).items()
-            ):
-                # filter unsupported config nodes
-                if interface_type == 'ethernet':
-                    iface_filter_eth(conf, iface)
+        if conf.exists(['interfaces', 'vpp', interface_type]):
+            for iface, iface_config in interfaces_config.get(
+                interface_type, {}
+            ).items():
                 set_dependents(dependency, conf, iface)
 
-    # kernel-interfaces dependency
-    if effective_config.get('kernel_interfaces'):
-        for iface in config.get('kernel_interfaces', {}):
-            set_dependents('vpp_kernel_interface', conf, iface)
+    config['ipoe_conf'] = conf.get_config_dict(
+        ['service', 'ipoe-server'],
+        key_mangling=('-', '_'),
+        get_first_key=True,
+        no_tag_node_value_mangle=True,
+    )
 
     # NAT dependency
-    if conf.exists(['vpp', 'nat44']):
-        set_dependents('vpp_nat', conf)
+    if conf.exists(['vpp', 'nat', 'nat44']):
+        set_dependents('vpp_nat_nat44', conf)
     if conf.exists(['vpp', 'nat', 'cgnat']):
         set_dependents('vpp_nat_cgnat', conf)
 
@@ -455,35 +518,41 @@ def get_config(config=None):
         set_dependents('vpp_ipfix', conf)
 
     # PPPoE dependency
-    if pppoe_map_ifaces:
-        config['pppoe_ifaces'] = pppoe_map_ifaces
+    added_pppoe_ifaces = [
+        iface
+        for iface in pppoe_ifaces
+        if iface.split('.')[0] in config.get('settings', {}).get('interface', {})
+    ]
+    changed_pppoe_ifaces.extend(added_pppoe_ifaces)
+    if changed_pppoe_ifaces:
         set_dependents('pppoe_server', conf)
+    config['changed_pppoe_ifaces'] = changed_pppoe_ifaces
 
     return config
 
 
 def verify(config):
-    # Cannot remove interface if PPPoE control-plane is still enabled
-    removed_ifaces = [iface['iface_name'] for iface in config.get('removed_ifaces', [])]
-    pppoe_removed_ifaces = [
-        p
-        for p in config.get('pppoe_ifaces', [])
-        for r in removed_ifaces
-        if p == r or p.startswith(f'{r}.')
-    ]
-    if pppoe_removed_ifaces:
-        raise ConfigError(
-            f'{", ".join(pppoe_removed_ifaces)} still in use by the PPPoE server. '
-            'Disable PPPoE control-plane integration with VPP before proceeding.'
-        )
-
     # Check remove VPP interface that used in IPFIX
     _check_removed_interfaces(
         config, 'IPFIX monitoring', config.get('ipfix', {}).get('interface', {})
     )
 
+    if config.get('interfaces_vpp') and 'remove' in config:
+        raise ConfigError(
+            'VPP cannot be removed while VPP interfaces exist. Remove all "interfaces vpp" first!'
+        )
+
+    # Find PPPoE ifaces where the base matches any VPP interface (base or VLAN)
+    pppoe_vpp_ifaces = [
+        iface for iface in config.get('pppoe_ifaces', {}) if iface.startswith('vpp')
+    ]
+    if 'remove' in config and pppoe_vpp_ifaces:
+        raise ConfigError(
+            f'Cannot remove VPP: PPPoE server still uses VPP interface(s): {", ".join(pppoe_vpp_ifaces)}'
+        )
+
     # bail out early - looks like removal from running config
-    if not config or ('removed_ifaces' in config and 'settings' not in config):
+    if not config or 'remove' in config:
         return None
 
     if 'settings' not in config:
@@ -491,6 +560,20 @@ def verify(config):
 
     if 'interface' not in config['settings']:
         raise ConfigError('"settings interface" is required but not set!')
+
+    ipoe_ifaces = list(
+        {
+            iface
+            for iface in config['settings']['interface']
+            for ipoe_iface in config.get('ipoe_conf', {}).get('interface', {})
+            if iface == ipoe_iface or ipoe_iface.startswith(f'{iface}.')
+        }
+    )
+    if ipoe_ifaces:
+        raise ConfigError(
+            f'Interface(s) {", ".join(ipoe_ifaces)} cannot be added to VPP because '
+            'IPoE is already configured. An interface cannot be used by both VPP and IPoE!'
+        )
 
     # check if the system meets minimal requirements
     verify_vpp_minimum_memory()
@@ -502,46 +585,20 @@ def verify(config):
             raise ConfigError(f'Interface {iface} does not exist or is not Ethernet!')
 
     # Resource usage checks
-    cpu_settings = config['settings'].get('cpu', {})
-
-    if not any(key in cpu_settings for key in ('workers', 'corelist_workers')):
-        verify_vpp_minimum_cpus()
-
-    if 'cpu' in config['settings']:
-        # Check whether the workers and corelist-workers are configured properly
-        verify_vpp_settings_cpu(cpu_settings)
-
-        # Check if there are enough CPU cores to skip according to config
-        if 'skip_cores' in cpu_settings:
-            skip_cores = int(cpu_settings['skip_cores'])
-            verify_vpp_settings_cpu_skip_cores(skip_cores)
-
-        # Check if there are enough CPU cores to add workers
-        if 'workers' in cpu_settings:
-            verify_vpp_settings_cpu_workers(cpu_settings)
-
-        if 'main_core' in cpu_settings:
-            verify_vpp_cpu_main_core(cpu_settings)
-
-        # Check the CPU main core not falling to the corelist-workers
-        if 'corelist_workers' in cpu_settings:
-            verify_vpp_settings_cpu_corelist_workers(cpu_settings)
-
-    workers = _get_workers_count(config['settings'].get('cpu', {}))
-
-    if 'workers' in config['settings']['nat44']:
-        verify_vpp_nat44_workers(
-            workers=workers, nat44_workers=config['settings']['nat44']['workers']
-        )
+    cpu_cores = int(config['settings']['resource_allocation']['cpu_cores'])
+    verify_vpp_minimum_cpus()
+    verify_vpp_cpu_cores(cpu_cores)
 
     verify_vpp_main_heap_size(config['settings'])
     verify_vpp_statseg_size(config['settings'])
 
     # Check buffers
-    verify_vpp_buffers(config['settings'], workers)
+    verify_vpp_buffers(config['settings'])
 
     # Check if available memory is enough for current VPP config
     verify_vpp_memory(config)
+
+    interface_rx_mode = config['settings'].get('interface_rx_mode')
 
     # ensure DPDK/XDP settings are properly configured
     for iface, iface_config in config['settings']['interface'].items():
@@ -553,10 +610,13 @@ def verify(config):
             not in config.get('effective', {}).get('settings', {}).get('interface', {})
             or 'driver_changed' in iface_config
         ):
-            if not verify_dev_driver(iface_config['driver'], original_driver):
+            if not _is_device_allowed(config, iface):
                 raise ConfigError(
-                    f'Driver {iface_config["driver"]} is not compatible with interface {iface}!'
+                    f'NIC used by "{iface}" is not validated for VPP on VyOS. '
+                    'Using it is unsafe and unsupported and will void support for the entire system. '
+                    'To proceed at your own risk, enable: "set vpp settings allow-unsupported-nics".'
                 )
+
         if iface_config['driver'] == 'xdp' and 'xdp_options' in iface_config:
             if iface_config['xdp_options']['num_rx_queues'] != 'all':
                 rx_queues = iface_config['xdp_api_params']['rxq_num']
@@ -569,27 +629,21 @@ def verify(config):
 
                 Warning(f'Not all RX queues will be connected to VPP for {iface}!')
 
-        if iface_config['driver'] == 'xdp' and 'dpdk_options' in iface_config:
-            raise ConfigError('DPDK options are not applicable for XDP driver!')
-
-        if iface_config['driver'] == 'dpdk' and 'xdp_options' in iface_config:
-            raise ConfigError('XDP options are not applicable for DPDK driver!')
-
-        if iface_config['driver'] == 'dpdk' and 'dpdk_options' in iface_config:
-            if 'num_rx_queues' in iface_config['dpdk_options']:
-                rx_queues = int(iface_config['dpdk_options']['num_rx_queues'])
+        if iface_config['driver'] == 'dpdk':
+            if 'num_rx_queues' in iface_config:
+                rx_queues = int(iface_config['num_rx_queues'])
                 verify_vpp_interfaces_dpdk_num_queues(
-                    qtype='receive', num_queues=rx_queues, workers=workers
+                    qtype='receive', num_queues=rx_queues, workers=cpu_cores
                 )
 
-            if 'num_tx_queues' in iface_config['dpdk_options']:
-                tx_queues = int(iface_config['dpdk_options']['num_tx_queues'])
+            if 'num_tx_queues' in iface_config:
+                tx_queues = int(iface_config['num_tx_queues'])
                 verify_vpp_interfaces_dpdk_num_queues(
-                    qtype='transmit', num_queues=tx_queues, workers=workers
+                    qtype='transmit', num_queues=tx_queues, workers=cpu_cores
                 )
 
         # RX-mode verification
-        rx_mode = iface_config.get('rx_mode')
+        rx_mode = interface_rx_mode
         if rx_mode and rx_mode != 'polling':
             # By default drivers operate in polling mode. Not all NIC drivers support
             # RX mode interrupt and adaptive
@@ -602,61 +656,31 @@ def verify(config):
                     f'RX mode {rx_mode} is not supported for interface {iface}'
                 )
 
-    # check GRE tunnels as part of the bridge, only tunnel-type teb is allowed
-    #   set vpp interfaces bridge br1 member interface gre1
-    #   set vpp interfaces gre gre1 tunnel-type teb
-    if 'interfaces' in config:
-        if 'bridge' in config['interfaces']:
-            for iface, iface_config in config['interfaces']['bridge'].items():
-                if 'member' in iface_config:
-                    for member in iface_config['member'].get('interface', []):
-                        if member.startswith('gre'):
-                            if (
-                                'gre' in config['interfaces']
-                                and config['interfaces']['gre']
-                                .get(member, {})
-                                .get('tunnel_type')
-                                != 'teb'
-                            ):
-                                raise ConfigError(
-                                    f'Only tunnel-type teb is allowed for GRE interfaces in bridge {iface}'
-                                )
-
-        # Only one multipoint GRE tunnel is allowed from the same source address
-        #   set vpp interfaces gre gre0 mode 'point-to-multipoint'
-        #   set vpp interfaces gre gre0 remote '0.0.0.0'
-        #   set vpp interfaces gre gre0 source-address '192.0.2.1'
-        #   set vpp interfaces gre gre1 mode 'point-to-multipoint'
-        #   set vpp interfaces gre gre1 remote '0.0.0.0'
-        #   set vpp interfaces gre gre1 source-address '192.0.2.1'
-        if 'gre' in config['interfaces']:
-            for iface, iface_config in config['interfaces']['gre'].items():
-                if iface_config['mode'] == 'point-to-multipoint':
-                    for other_iface, other_iface_config in config['interfaces'][
-                        'gre'
-                    ].items():
-                        if (
-                            other_iface_config['mode'] == 'point-to-multipoint'
-                            and other_iface_config['source_address']
-                            == iface_config['source_address']
-                            and iface != other_iface
-                        ):
-                            raise ConfigError(
-                                'Only one multipoint GRE tunnel is allowed from the same source address'
-                            )
-
-    # Check if deleted interfaces are not xconnect memebrs
+    # Check if deleted interfaces are not xconnect/bridge/bond members
     for iface_config in config.get('removed_ifaces', []):
         if iface_config['iface_name'] in config.get('xconn_members', {}):
             raise ConfigError(
                 f'Interface {iface_config["iface_name"]} is an xconnect member and cannot be removed'
             )
+        if iface_config['iface_name'] in config.get('bridge_members', {}):
+            raise ConfigError(
+                f'Interface {iface_config["iface_name"]} is a bridge member and cannot be removed'
+            )
+        if iface_config['iface_name'] in config.get('bond_members', {}):
+            raise ConfigError(
+                f'Interface {iface_config["iface_name"]} is a bond member and cannot be removed'
+            )
 
-    verify_routes_count(config['settings'], workers)
+    verify_routes_count(config['settings'])
 
+    for pppoe_iface in config.get('changed_pppoe_ifaces', []):
+        if '.' in pppoe_iface:
+            verify_virtual_interface_exists(config, pppoe_iface)
+        else:
+            verify_interface_exists(config, pppoe_iface)
 
 def generate(config):
-    if not config or ('removed_ifaces' in config and 'settings' not in config):
+    if not config or 'remove' in config:
         # Remove old config and return
         service_conf.unlink(missing_ok=True)
         return None
@@ -670,7 +694,13 @@ def generate(config):
 def initialize_interface(iface, driver, iface_config) -> None:
     # DPDK - rescan PCI to use a proper driver
     if driver == 'dpdk' and iface_config['original_driver'] not in not_pci_drv:
-        control_host.pci_rescan(iface_config['dev_id'])
+        # 'gve' devices require a specific unbind/bind process instead of a standard PCI rescan.
+        if iface_config['original_driver'] == 'gve':
+            control_host.rebind_gve_driver(
+                iface, iface_config['bus_id'], iface_config['dev_id']
+            )
+        else:
+            control_host.pci_rescan(iface_config['dev_id'])
         # rename to the proper name
         iface_new_name: str = control_host.get_eth_name(iface_config['dev_id'])
         control_host.rename_iface(iface_new_name, iface)
@@ -702,10 +732,10 @@ def apply(config):
     modules = ('vfio_iommu_type1', 'vfio_pci', 'vfio_pci_core', 'vfio')
     # Open persistent config
     # It is required for operations with interfaces
-    persist_config = JSONStorage('vpp_conf')
-    if not config or ('removed_ifaces' in config and 'settings' not in config):
+    if not config or 'remove' in config:
         # Cleanup persistent config
-        persist_config.delete()
+        with JSONStorage('vpp_conf') as persist_config:
+            persist_config.delete()
         # And stop the service
         call(f'systemctl stop {service_name}.service')
         # Unlod modules (modprobe -r)
@@ -772,6 +802,8 @@ def apply(config):
             del config['persist_config'][iface['iface_name']]
 
     if 'settings' in config and 'interface' in config.get('settings'):
+        interface_rx_mode = config['settings'].get('interface_rx_mode')
+
         # connect to VPP
         try:
             # Bail out early if VPP service is not running
@@ -783,20 +815,13 @@ def apply(config):
             vpp_control = VPPControl()
 
             # preconfigure LCP plugin
-            if 'ignore_kernel_routes' in config.get('settings', {}).get('lcp', {}):
+            if 'ignore_kernel_routes' in config['settings']:
                 vpp_control.cli_cmd('lcp param route-no-paths off')
             else:
                 vpp_control.cli_cmd('lcp param route-no-paths on')
             # add interfaces
             iproute = IPRoute()
             for iface, iface_config in config['settings']['interface'].items():
-                # promisc option for DPDK interfaces
-                if iface_config['driver'] == 'dpdk':
-                    if 'promisc' in iface_config['dpdk_options']:
-                        if_index = vpp_control.get_sw_if_index(iface)
-                        vpp_control.api.sw_interface_set_promisc(
-                            sw_if_index=if_index, promisc_on=True
-                        )
                 # add XDP interfaces
                 if iface_config['driver'] == 'xdp':
                     control_host.rename_iface(iface, f'defunct_{iface}')
@@ -853,7 +878,7 @@ def apply(config):
                 iproute.link('set', index=dev_index, state='up')
 
                 # Set rx-mode. Should be configured after interface state set to UP
-                rx_mode = iface_config.get('rx_mode')
+                rx_mode = interface_rx_mode
                 if rx_mode:
                     # to hardware side
                     vpp_control.iface_rxmode(iface, rx_mode)
@@ -865,23 +890,6 @@ def apply(config):
 
             # Syncronize routes via LCP
             vpp_control.lcp_resync()
-
-            # NAT44 settings
-            nat44_settings = config['settings'].get('nat44', {})
-
-            vpp_control.set_nat44_session_limit(
-                int(nat44_settings.get('session_limit'))
-            )
-
-            if nat44_settings.get('workers'):
-                bitmask = 0
-                for worker_range in nat44_settings['workers']:
-                    worker_numbers = worker_range.split('-')
-                    for wid in range(
-                        int(worker_numbers[0]), int(worker_numbers[-1]) + 1
-                    ):
-                        bitmask |= 1 << wid
-                vpp_control.set_nat_workers(bitmask)
 
         except (VPPIOError, VPPValueError, VppNotRunningError) as e:
             # if cannot connect to VPP or an error occurred then
@@ -899,7 +907,8 @@ def apply(config):
 
     # Save persistent config
     if 'persist_config' in config and config['persist_config']:
-        persist_config.write('eth_ifaces', config['persist_config'])
+        with JSONStorage('vpp_conf') as persist_config:
+            persist_config.write('eth_ifaces', config['persist_config'])
 
     # reinitialize interfaces, but not during the first boot
     if boot_configuration_complete():

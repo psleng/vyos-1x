@@ -28,8 +28,8 @@ libvyosconfig:
 
 .PHONY: interface_definitions
 .ONESHELL:
-interface_definitions: $(config_xml_obj)
-	mkdir -p $(TMPL_DIR)
+interface_definitions: libvyosconfig $(config_xml_obj)
+	rm -rf $(TMPL_DIR); mkdir -p $(TMPL_DIR)
 
 	$(CURDIR)/scripts/override-default $(BUILD_DIR)/interface-definitions
 
@@ -50,10 +50,11 @@ interface_definitions: $(config_xml_obj)
 	# could mask help strings or mandatory priority statements
 	find $(TMPL_DIR) -name node.def -type f -empty -exec false {} + || sh -c 'echo "There are empty node.def files! Check your interface definitions." && exit 1'
 
+
 .PHONY: op_mode_definitions
 .ONESHELL:
 op_mode_definitions: $(op_xml_obj)
-	mkdir -p $(OP_TMPL_DIR)
+	rm -rf $(OP_TMPL_DIR); mkdir -p $(OP_TMPL_DIR)
 
 	find $(BUILD_DIR)/op-mode-definitions/ -type f -name "*.xml" | xargs -I {} $(CURDIR)/scripts/build-command-op-templates {} $(CURDIR)/schema/op-mode-definition.rng $(OP_TMPL_DIR) || exit 1
 
@@ -108,7 +109,7 @@ check_migration_scripts_executable:
 pylint: interface_definitions
 	@echo Running "pylint ..."
 	@set -e; \
-	PYTHONPATH="python/:smoketest/scripts/cli/" pylint --errors-only $(shell git ls-files python/vyos/ifconfig/*.py python/vyos/utils/*.py src/conf_mode/*.py src/op_mode/*.py src/migration-scripts src/services/vyos* smoketest/scripts); \
+	PYTHONPATH="python/:smoketest/scripts/cli/" pylint --errors-only $(shell git ls-files python/**/*.py src/conf_mode/*.py src/op_mode/*.py src/migration-scripts src/services/vyos* smoketest/scripts); \
 	PYTHONPATH=python/ pylint --disable=all --enable=W0611 $(shell git ls-files *.py src/migration-scripts src/services)
 
 .PHONY: j2lint

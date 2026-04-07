@@ -33,7 +33,7 @@ DELETE_IMAGE_PROMPT_MSG: str = 'Select an image to delete:'
 MSG_DELETE_IMAGE_RUNNING: str = 'Currently running image cannot be deleted; reboot into another image first'
 MSG_DELETE_IMAGE_DEFAULT: str = 'Default image cannot be deleted; set another image as default first'
 
-ConsoleType: TypeAlias = Literal['tty', 'ttyS']
+ConsoleType: TypeAlias = Literal['tty', 'ttyS', 'ttyAMA']
 
 def annotate_list(images_list: list[str]) -> list[str]:
     """Annotate list of images with additional info
@@ -141,7 +141,8 @@ def set_image(image_name: Optional[str] = None,
 
     # set default boot image
     try:
-        grub.set_default(image_name, persistence_storage)
+        # PSL - grub.set_default(image_name, persistence_storage)
+        grub.set_current_default(image_name, persistence_storage)
         print(f'The image "{image_name}" is now default boot image')
     except Exception as err:
         exit(f'Unable to set default image "{image_name}": {err}')

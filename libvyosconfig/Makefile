@@ -42,8 +42,8 @@ all: sharedlib
 PHONY: depends
 depends:
 	sudo sh -c 'eval $$(opam env --root=/opt/opam --set-root) ;\
-		opam pin add vyos1x-config https://github.com/psleng/vyos1x-config.git#6cf3918875b11dd94f9dc380b4083cc4258da74c -y ; \
-		opam pin add vyconf https://github.com/psleng/vyconf.git#ee86cf713f45d3bcd735440f432b5b7b57a31ca8 -y'
+		opam pin add vyos1x-config https://github.com/psleng/vyos1x-config.git#52132ad2c0992bf6f17a06173384030d93a29053 -y ; \
+		opam pin add vyconf https://github.com/psleng/vyconf.git#e25b13ae3040d02326f01bf9bedd097795fb3a62 -y'
 
 sharedlib: depends $(BUILDDIR)/libvyosconfig$(EXTDLL)
 
