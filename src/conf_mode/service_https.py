@@ -208,14 +208,15 @@ def apply(https):
     https_service_name = 'nginx.service'
     # Perle: check if flask configuration exists
     flask_conf_exists = os.path.exists('/etc/nginx/flask.conf')
+    flask_service_name = 'flask.service'
 
     if https is None:
         if is_systemd_service_active(http_api_service_name):
             call(f'systemctl stop {http_api_service_name}')
 
         # Perle change: stop flask.service if it exists since it depends on nginx
-        if flask_conf_exists:
-            call(f'systemctl stop flask.service')
+        if flask_conf_exists and is_systemd_service_active(flask_service_name):
+            call(f'systemctl stop {flask_service_name}')
         # Perle change end
 
         call(f'systemctl stop {https_service_name}')
@@ -233,9 +234,9 @@ def apply(https):
     else:
         call(f'systemctl reload-or-restart {https_service_name}')
 
-    # Perle change: restart flask service
-    if flask_conf_exists:
-        call(f'systemctl restart flask.service')
+    # Perle change: only start flask service if not active
+    if flask_conf_exists and is_systemd_service_active(http_api_service_name) and not is_systemd_service_active(flask_service_name):
+        call(f'systemctl start {flask_service_name}')
     # Perle change end
 
 if __name__ == '__main__':
