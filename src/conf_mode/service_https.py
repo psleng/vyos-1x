@@ -206,10 +206,18 @@ def apply(https):
     call('systemctl daemon-reload')
     http_api_service_name = 'vyos-http-api.service'
     https_service_name = 'nginx.service'
+    # Perle: check if flask configuration exists
+    flask_conf_exists = os.path.exists('/etc/nginx/flask.conf')
 
     if https is None:
         if is_systemd_service_active(http_api_service_name):
             call(f'systemctl stop {http_api_service_name}')
+
+        # Perle change: stop flask.service if it exists since it depends on nginx
+        if flask_conf_exists:
+            call(f'systemctl stop flask.service')
+        # Perle change end
+
         call(f'systemctl stop {https_service_name}')
         return
 
@@ -224,6 +232,11 @@ def apply(https):
         call(f'systemctl restart {https_service_name}')
     else:
         call(f'systemctl reload-or-restart {https_service_name}')
+
+    # Perle change: restart flask service
+    if flask_conf_exists:
+        call(f'systemctl restart flask.service')
+    # Perle change end
 
 if __name__ == '__main__':
     try:
