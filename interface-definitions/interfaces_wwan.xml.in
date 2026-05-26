@@ -128,7 +128,7 @@
           </node>
           #include <include/interface/dhcpv6-options.xml.i>
           <!-- ── Connection mode ─────────────────────────────────── -->
-          <leafNode name="connection-mode">
+          <node name="connection-mode">
             <properties>
               <help>Connection establishment strategy</help>
               <completionHelp>
@@ -168,7 +168,7 @@
                 <defaultValue>30</defaultValue>
               </leafNode>
             </children>
-          </leafNode>
+          </node>
           <!-- ── Network mode ────────────────────────────────────── -->
           <leafNode name="network-mode">
             <properties>
