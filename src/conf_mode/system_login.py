@@ -17,7 +17,6 @@
 import re
 import os
 import json
-from urllib.parse import urlparse
 
 from copy import deepcopy
 from passlib.hosts import linux_context
