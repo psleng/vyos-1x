@@ -148,7 +148,6 @@
               <node name="dial-on-demand">
                 <properties>
                   <help>Connect when traffic is detected on the interface</help>
-                  <valueless/>
                 </properties>
                 <children>
                   <leafNode name="idle-timeout">
