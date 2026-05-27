@@ -131,42 +131,42 @@
           <node name="connection-mode">
             <properties>
               <help>Connection establishment strategy</help>
-              <completionHelp>
-                <list>always-on connect-on-demand dial-on-demand</list>
-              </completionHelp>
-              <valueHelp>
-                <format>always-on</format>
-                <description>Connect at boot and stay connected (default)</description>
-              </valueHelp>
-              <valueHelp>
-                <format>connect-on-demand</format>
-                <description>Park at registered-idle, connect via D-Bus call</description>
-              </valueHelp>
-              <valueHelp>
-                <format>dial-on-demand</format>
-                <description>Connect when traffic is detected on the interface</description>
-              </valueHelp>
-              <constraint>
-                <regex>^(always-on|connect-on-demand|dial-on-demand)$</regex>
-              </constraint>
-              <constraintErrorMessage>Connection mode must be always-on, connect-on-demand, or dial-on-demand</constraintErrorMessage>
             </properties>
-            <defaultValue>always-on</defaultValue>
             <children>
-              <leafNode name="idle-timeout">
+              <leafNode name="always-on">
                 <properties>
-                  <help>Max wait to stay idle before disconnecting</help>
-                  <valueHelp>
-                    <format>u32:5-120</format>
-                    <description>Timeout in seconds</description>
-                  </valueHelp>
-                  <constraint>
-                    <validator name="numeric" argument="--range 5-120"/>
-                  </constraint>
-                  <constraintErrorMessage>Idling timeout must be 5-120 seconds</constraintErrorMessage>
+                  <help>Connect at boot and stay connected (default)</help>
+                  <valueless/>
                 </properties>
-                <defaultValue>30</defaultValue>
               </leafNode>
+              <leafNode name="connect-on-demand">
+                <properties>
+                  <help>Park at registered-idle, connect via D-Bus call</help>
+                  <valueless/>
+                </properties>
+              </leafNode>
+              <node name="dial-on-demand">
+                <properties>
+                  <help>Connect when traffic is detected on the interface</help>
+                  <valueless/>
+                </properties>
+                <children>
+                  <leafNode name="idle-timeout">
+                    <properties>
+                      <help>Max wait to stay idle before disconnecting</help>
+                      <valueHelp>
+                        <format>u32:5-120</format>
+                        <description>Timeout in seconds</description>
+                      </valueHelp>
+                      <constraint>
+                        <validator name="numeric" argument="--range 5-120"/>
+                      </constraint>
+                      <constraintErrorMessage>Idling timeout must be 5-120 seconds</constraintErrorMessage>
+                    </properties>
+                    <defaultValue>30</defaultValue>
+                  </leafNode>
+                </children>
+              </node>
             </children>
           </node>
           <!-- ── Network mode ────────────────────────────────────── -->
