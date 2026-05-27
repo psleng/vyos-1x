@@ -66,6 +66,12 @@ tacacs_pam_config_file = "/etc/tacplus_servers"
 tacacs_nss_config_file = "/etc/tacplus_nss.conf"
 nss_config_file = "/etc/nsswitch.conf"
 login_motd_dsa_warning = r'/run/motd.d/92-vyos-user-dsa-deprecation-warning'
+saml_sp_dir = '/etc/saml-sp'
+saml_config_file = f'{saml_sp_dir}/saml.conf'
+saml_user_map_file = f'{saml_sp_dir}/saml-user.map'
+
+# Default value of the encrypted-password leafNode (no password set).
+SAML_ALLOWED_ENCRYPTED_PASSWORD = '!'
 
 # LOGIN_TIMEOUT from /etc/loign.defs minus 10 sec
 MAX_RADIUS_TIMEOUT: int = 50
@@ -179,8 +185,35 @@ def verify(login):
         if tmp in login['rm_users']:
             raise ConfigError(f'Attempting to delete current user: {tmp}')
 
+    # Verify root SAML block: if defined, provider/metadata-url/entity-id must
+    # all be present together (jit is optional).
+    if 'saml' in login:
+        saml_required = ('provider', 'metadata_url', 'entity_id')
+        missing = [k for k in saml_required if k not in login['saml']]
+        if missing:
+            pretty = ', '.join(m.replace('_', '-') for m in missing)
+            raise ConfigError(
+                f'system login saml: provider, metadata-url and entity-id '
+                f'must all be defined together (missing: {pretty})'
+            )
+
     if 'user' in login:
         system_users = get_local_passwd_entries()
+        # Collect users with a SAML email defined for cross-checks.
+        saml_users = {
+            u: c
+            for u, c in login['user'].items()
+            if dict_search('authentication.saml', c)
+        }
+        # If users use SAML emails but the global SAML block is not defined,
+        # warn the operator that those accounts will not be accessible.
+        if saml_users and 'saml' not in login:
+            names = ', '.join(sorted(saml_users))
+            Warning(
+                'system login saml block is not configured; users with a SAML '
+                f'identifier will not be accessible: {names}'
+            )
+
         for user, user_config in login['user'].items():
             # Linux system users range up until UID 1000, we can not create a
             # VyOS CLI user which already exists as system user
@@ -188,6 +221,37 @@ def verify(login):
                 if s_user.pw_name == user and s_user.pw_uid < MIN_USER_UID:
                     raise ConfigError(
                         f'User "{user}" can not be created, conflict with local system account!'
+                    )
+
+            # When a user authenticates via SAML, no other authentication method
+            # may be configured for that user.
+            if user in saml_users:
+                auth = user_config.get('authentication', {})
+                if dict_search('plaintext_password', auth):
+                    raise ConfigError(
+                        f'User "{user}": plaintext-password cannot be set when '
+                        'authentication saml is configured'
+                    )
+                enc = dict_search('encrypted_password', auth)
+                if enc and enc != SAML_ALLOWED_ENCRYPTED_PASSWORD:
+                    raise ConfigError(
+                        f'User "{user}": encrypted-password cannot be set when '
+                        'authentication saml is configured'
+                    )
+                if 'otp' in auth:
+                    raise ConfigError(
+                        f'User "{user}": otp cannot be set when '
+                        'authentication saml is configured'
+                    )
+                if 'public_keys' in auth:
+                    raise ConfigError(
+                        f'User "{user}": public-keys cannot be set when '
+                        'authentication saml is configured'
+                    )
+                if 'principal' in auth:
+                    raise ConfigError(
+                        f'User "{user}": principal cannot be set when '
+                        'authentication saml is configured'
                     )
 
             plaintext_password = dict_search(
@@ -506,6 +570,38 @@ def generate(login):
 
     with open('/etc/vyos/operators.json', 'w') as of:
         json.dump(operator_config, of)
+
+    # SAML service-provider configuration and user map
+    if 'saml' in login:
+        os.makedirs(saml_sp_dir, exist_ok=True)
+
+        saml_conf = {
+            'provider': login['saml']['provider'],
+            'metadata-url': login['saml']['metadata_url'],
+            'entity-id': login['saml']['entity_id'],
+        }
+        if 'jit' in login['saml']:
+            saml_conf['jit'] = True
+
+        with open(saml_config_file, 'w') as f:
+            json.dump(saml_conf, f)
+
+        saml_user_lines = []
+        if 'user' in login:
+            for user, user_config in login['user'].items():
+                email = dict_search('authentication.saml', user_config)
+                if email:
+                    saml_user_lines.append(f'{email} {user}')
+
+        with open(saml_user_map_file, 'w') as f:
+            if saml_user_lines:
+                f.write('\n'.join(sorted(saml_user_lines)) + '\n')
+    else:
+        for path in (saml_config_file, saml_user_map_file):
+            if os.path.isfile(path):
+                os.unlink(path)
+        if os.path.isdir(saml_sp_dir) and not os.listdir(saml_sp_dir):
+            os.rmdir(saml_sp_dir)
 
     return None
 

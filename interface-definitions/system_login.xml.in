@@ -84,6 +84,19 @@
                   <help>Authentication settings</help>
                 </properties>
                 <children>
+                  <leafNode name="saml">
+                    <properties>
+                      <help>SAML v2 identifier (email)</help>
+                      <valueHelp>
+                        <format>txt</format>
+                        <description>Email address used as SAML NameID</description>
+                      </valueHelp>
+                      <constraint>
+                        <regex>[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}</regex>
+                      </constraint>
+                      <constraintErrorMessage>Invalid email identifier</constraintErrorMessage>
+                    </properties>
+                  </leafNode>
                   <leafNode name="encrypted-password">
                     <properties>
                       <help>Encrypted password</help>
@@ -281,6 +294,54 @@
                 </children>
               </tagNode>
               #include <include/interface/vrf.xml.i>
+            </children>
+          </node>
+          <node name="saml">
+            <properties>
+              <help>SAML based user authentication</help>
+            </properties>
+            <children>
+              <leafNode name="provider">
+                <properties>
+                  <help>SAML provider name configuration</help>
+                  <valueHelp>
+                    <format>name</format>
+                    <description>SAML provider name</description>
+                  </valueHelp>
+                </properties>
+              </leafNode>
+              <leafNode name="metadata-url">
+                <properties>
+                  <help>SAML provider metadata configuration</help>
+                  <valueHelp>
+                    <format>url</format>
+                    <description>SAML provider metadata URL (HTTP/HTTPS)</description>
+                  </valueHelp>
+                  <constraint>
+                    <regex>https?:\/\/(www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_\+.~#?&amp;//=]*)</regex>
+                  </constraint>
+                  <constraintErrorMessage>Invalid SAML metadata URL. Must be a valid HTTP or HTTPS URL.</constraintErrorMessage>
+                </properties>
+              </leafNode>
+              <leafNode name="entity-id">
+                <properties>
+                  <help>SAML application entity id configuration</help>
+                  <valueHelp>
+                    <format>url</format>
+                    <description>SAML entity id URI, must match what is configured in SAML provider</description>
+                  </valueHelp>
+                  <constraint>
+                    <regex>https?:\/\/(www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_\+.~#?&amp;//=]*)</regex>
+                  </constraint>
+                  <constraintErrorMessage>Invalid SAML entity ID. Must be a valid HTTP or HTTPS URI matching the SAML provider configuration.</constraintErrorMessage>
+                </properties>
+              </leafNode>
+              <leafNode name="jit">
+                <properties>
+                  <help>SAML JIT provisioning configuration</help>
+                  <valueless/>
+                </properties>
+              </leafNode>
             </children>
           </node>
           <node name="tacacs">
