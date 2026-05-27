@@ -3,485 +3,727 @@ Section: contrib/net
 Priority: extra
 Maintainer: VyOS Package Maintainers <maintainers@vyos.net>
 Build-Depends:
-  debhelper (>= 9),
-  dh-python,
-  fakeroot,
-  gcc,
-  iproute2,
-  libzmq3-dev,
-  python3 (>= 3.10),
+debhelper (>= 9),
+dh-python,
+fakeroot,
+gcc,
+iproute2,
+libzmq3-dev,
+python3 (>= 3.10),
+
 # For libvyosconfig
-  libpcre2-dev,
-  libffi-dev,
+
+libpcre2-dev,
+libffi-dev,
+
 # For QA/Lint
-  pylint,
-  python3-vici (>= 5.7.2),
-  python3-fastapi,
-  python3-pyudev,
-  python3-systemd,
-  python3-certbot-nginx,
-  python3-pam,
-  python3-dbus,
-  python3-pyroute2,
-  python3-voluptuous,
+
+pylint,
+python3-vici (>= 5.7.2),
+python3-fastapi,
+python3-pyudev,
+python3-systemd,
+python3-certbot-nginx,
+python3-pam,
+python3-dbus,
+python3-pyroute2,
+python3-voluptuous,
+
 # For generating command definitions
-  python3-lxml,
-  python3-xmltodict,
+
+python3-lxml,
+python3-xmltodict,
+
 # For generating serialization functions
-  protobuf-compiler,
+
+protobuf-compiler,
+
 # For running tests
-  python3-coverage,
-  python3-hurry.filesize,
-  python3-netaddr,
-  python3-netifaces,
-  python3-nose2,
-  python3-jinja2,
-  python3-paramiko,
-  python3-passlib,
-  python3-psutil,
-  python3-requests,
-  python3-setuptools,
-  python3-tabulate,
-  python3-zmq,
-  quilt,
-  whois
+
+python3-coverage,
+python3-hurry.filesize,
+python3-netaddr,
+python3-netifaces,
+python3-nose2,
+python3-jinja2,
+python3-paramiko,
+python3-passlib,
+python3-psutil,
+python3-requests,
+python3-setuptools,
+python3-tabulate,
+python3-zmq,
+quilt,
+whois
 Standards-Version: 3.9.6
 
 Package: vyos-1x
 Architecture: amd64 arm64
 Pre-Depends:
-  libpam-runtime,
-  libnss-tacplus,
-  libpam-tacplus,
-  vyos-libpam-radius-auth,
-  vyos-libnss-mapuser,
-  tzdata (>= 2025b)
+libpam-runtime,
+libnss-tacplus,
+libpam-tacplus,
+vyos-libpam-radius-auth,
+vyos-libnss-mapuser,
+tzdata (>= 2025b)
 Depends:
+
 ## Fundamentals
-  ${python3:Depends} (>= 3.10),
-  dialog,
-  libvyosconfig0,
-  libpam-cap,
-  bash-completion,
-  ipvsadm,
-  udev,
-  less,
-  at,
-  rsync,
-  vyatta-bash,
-  vyatta-biosdevname,
-  vyatta-cfg,
-  vyos-http-api-tools,
+
+${python3:Depends} (>= 3.10),
+dialog,
+libvyosconfig0,
+libpam-cap,
+bash-completion,
+ipvsadm,
+udev,
+less,
+at,
+rsync,
+vyatta-bash,
+vyatta-biosdevname,
+vyatta-cfg,
+vyos-http-api-tools,
+
 ## End of Fundamentals
+
 ## Python libraries used in multiple modules and scripts
-  python3,
-  python3-cryptography,
-  python3-hurry.filesize,
-  python3-inotify,
-  python3-jinja2,
-  python3-jmespath,
-  python3-netaddr,
-  python3-netifaces,
-  python3-paramiko,
-  python3-passlib,
-  python3-protobuf,
-  python3-pyroute2,
-  python3-psutil,
-  python3-pyhumps,
-  python3-pystache,
-  python3-pyudev,
-  python3-six,
-  python3-systemd,
-  python3-tabulate,
-  python3-tomli,
-  python3-voluptuous,
-  python3-xmltodict,
-  python3-zmq,
+
+python3,
+python3-cryptography,
+python3-hurry.filesize,
+python3-inotify,
+python3-jinja2,
+python3-jmespath,
+python3-netaddr,
+python3-netifaces,
+python3-paramiko,
+python3-passlib,
+python3-protobuf,
+python3-pyroute2,
+python3-psutil,
+python3-pyhumps,
+python3-pystache,
+python3-pyudev,
+python3-six,
+python3-systemd,
+python3-tabulate,
+python3-tomli,
+python3-voluptuous,
+python3-xmltodict,
+python3-zmq,
+
 ## End of Python libraries
+
 ## Basic System services and utilities
-  coreutils,
-  sudo,
-  systemd,
-  bsdmainutils,
-  openssl,
-  curl,
-  dbus,
-  file,
-  iproute2 (>= 6.0.0),
-  linux-cpupower,
-  hwloc,
-  kexec-tools,
+
+coreutils,
+sudo,
+systemd,
+bsdmainutils,
+openssl,
+curl,
+dbus,
+file,
+iproute2 (>= 6.0.0),
+linux-cpupower,
+hwloc,
+kexec-tools,
+
 # ipaddrcheck is widely used in IP value validators
-  ipaddrcheck,
-  ethtool (>= 6.10),
-  lm-sensors,
-  procps,
-  sed,
-  ssl-cert,
-  tuned,
-  beep,
-  wide-dhcpv6-client,
+
+ipaddrcheck,
+ethtool (>= 6.10),
+lm-sensors,
+procps,
+sed,
+ssl-cert,
+tuned,
+beep,
+wide-dhcpv6-client,
+
 # Generic colorizer
-  grc,
+
+grc,
+
 ## End of System services and utilities
+
 ## For the installer
-  fdisk,
-  gdisk,
-  mdadm,
-  efibootmgr,
-  libefivar1,
-  dosfstools,
-  grub-efi-amd64-signed [amd64],
-  grub-efi-arm64-bin [arm64],
-  mokutil,
-  shim-signed [amd64],
-  sbsigntool,
+
+fdisk,
+gdisk,
+mdadm,
+efibootmgr,
+libefivar1,
+dosfstools,
+grub-efi-amd64-signed [amd64],
+grub-efi-arm64-bin [arm64],
+mokutil,
+shim-signed [amd64],
+sbsigntool,
+
 # Image signature verification tool
-  minisign,
+
+minisign,
+
 # Live filesystem tools
-  squashfs-tools,
-  fuse-overlayfs,
+
+squashfs-tools,
+fuse-overlayfs,
+
 # Tools for checking password strength
-  python3-cracklib,
+
+python3-cracklib,
+
 ## End installer
-  auditd,
-  iputils-arping,
-  iputils-ping,
-  isc-dhcp-client,
+
+auditd,
+iputils-arping,
+iputils-ping,
+isc-dhcp-client,
+
 # For "vpn pptp", "vpn l2tp", "vpn sstp", "service ipoe-server"
-  accel-ppp-ng,
+
+accel-ppp-ng,
+
 # End "vpn pptp", "vpn l2tp", "vpn sstp", "service ipoe-server"
-  avahi-daemon,
-  conntrack,
-  conntrackd,
+
+avahi-daemon,
+conntrack,
+conntrackd,
+
 ## Conf mode features
+
 # For "interfaces wireless"
-  hostapd,
-  hsflowd,
-  iw,
-  wireless-regdb,
-  wpasupplicant (>= 0.6.7),
+
+hostapd,
+hsflowd,
+iw,
+wireless-regdb,
+wpasupplicant (>= 0.6.7),
+
 # End "interfaces wireless"
+
 # For "interfaces wwan"
-  modemmanager,
-  usb-modeswitch,
-  libqmi-utils,
+
+modemmanager,
+usb-modeswitch,
+libqmi-utils,
+
 # End "interfaces wwan"
+
 # For "interfaces openvpn"
-  openvpn,
-  openvpn-auth-ldap,
-  openvpn-auth-radius,
-  openvpn-otp,
-  openvpn-dco,
-  libpam-google-authenticator,
+
+openvpn,
+openvpn-auth-ldap,
+openvpn-auth-radius,
+openvpn-otp,
+openvpn-dco,
+libpam-google-authenticator,
+
 # End "interfaces openvpn"
+
 # For "interfaces wireguard"
-  wireguard-tools,
-  qrencode,
+
+wireguard-tools,
+qrencode,
+
 # End "interfaces wireguard"
+
 # For "interfaces pppoe"
-  pppoe,
+
+pppoe,
+
 # End "interfaces pppoe"
+
 # For "interfaces sstpc"
-  sstp-client,
+
+sstp-client,
+
 # End "interfaces sstpc"
-# For "protocols *"
-  frr (>= 10.2),
-  frr-pythontools,
-  frr-rpki-rtrlib,
-  frr-snmp,
-# End "protocols *"
+
+# For "protocols \*"
+
+frr (>= 10.2),
+frr-pythontools,
+frr-rpki-rtrlib,
+frr-snmp,
+
+# End "protocols \*"
+
 # For "protocols igmp-proxy"
-  igmpproxy,
+
+igmpproxy,
+
 # End "protocols igmp-proxy"
+
 # For "pki"
-  certbot,
+
+certbot,
+
 # End "pki"
+
 # For "service console-server"
-  conserver-client,
-  conserver-server,
-  console-data,
-  dropbear,
+
+conserver-client,
+conserver-server,
+console-data,
+dropbear,
+
 # End "service console-server"
+
 # For "service dns dynamic"
-  ddclient (>= 3.11.1),
+
+ddclient (>= 3.11.1),
+
 # End "service dns dynamic"
+
 # # For "service ids"
-  suricata,
-  suricata-update,
+
+suricata,
+suricata-update,
+
 # End "service ids"
+
 # # For "service ndp-proxy"
-  ndppd,
+
+ndppd,
+
 # End "service ndp-proxy"
+
 # For "service router-advert"
-  radvd (>= 2.20),
+
+radvd (>= 2.20),
+
 # End "service route-advert"
+
 # For "load-balancing haproxy"
-  haproxy,
+
+haproxy,
+
 # End "load-balancing haproxy"
+
 # For "service dhcp-relay"
-  isc-dhcp-relay,
+
+isc-dhcp-relay,
+
 # For "service dhcp-server"
-  isc-kea-dhcp4,
-  isc-kea-dhcp6,
-  isc-kea-dhcp-ddns,
-  isc-kea-hooks,
+
+isc-kea-dhcp4,
+isc-kea-dhcp6,
+isc-kea-dhcp-ddns,
+isc-kea-hooks,
+
 # End "service dhcp-server"
+
 # For "service lldp"
-  lldpd,
+
+lldpd,
+
 # End "service lldp"
+
 # For "service https"
-  nginx-light,
+
+nginx-light,
+
 # End "service https"
+
 # For "service ssh"
-  openssh-server,
-  sshguard,
-  ssh-tpm-agent,
+
+openssh-server,
+sshguard,
+ssh-tpm-agent,
+
 # End "service ssh"
+
 # For "service salt-minion"
-  salt-minion,
+
+salt-minion,
+
 # End "service salt-minion"
+
 # For "service snmp"
-  snmp,
-  snmpd,
+
+snmp,
+snmpd,
+
 # End "service snmp"
+
 # For "service webproxy"
-  squid,
-  squidclient,
-  squidguard,
+
+squid,
+squidclient,
+squidguard,
+
 # End "service webproxy"
+
 # For "service monitoring prometheus node-exporter"
-  node-exporter,
+
+node-exporter,
+
 # End "service monitoring prometheus node-exporter"
+
 # For "service monitoring prometheus frr-exporter"
-  frr-exporter,
+
+frr-exporter,
+
 # End "service monitoring prometheus frr-exporter"
+
 # For "service monitoring prometheus blackbox-exporter"
-  blackbox-exporter,
+
+blackbox-exporter,
+
 # End "service monitoring prometheus blackbox-exporter"
+
 # For "service monitoring telegraf"
-  telegraf (>= 1.20),
+
+telegraf (>= 1.20),
+
 # End "service monitoring telegraf"
+
 # For "service monitoring zabbix-agent"
-  zabbix-agent2,
+
+zabbix-agent2,
+
 # End "service monitoring zabbix-agent"
+
 # For "service tftp-server"
-  tftpd-hpa,
+
+tftpd-hpa,
+
 # End "service tftp-server"
+
 # For "service dns forwarding"
-  pdns-recursor,
+
+pdns-recursor,
+
 # End "service dns forwarding"
+
 # For "service sla owamp"
-  owamp-client,
-  owamp-server,
+
+owamp-client,
+owamp-server,
+
 # End "service sla owamp"
+
 # For "service sla twamp"
-  twamp-client,
-  twamp-server,
+
+twamp-client,
+twamp-server,
+
 # End "service sla twamp"
+
 # For "service broadcast-relay"
-  udp-broadcast-relay,
+
+udp-broadcast-relay,
+
 # End "service broadcast-relay"
+
 # For "high-availability vrrp"
-  keepalived (>=2.0.5),
+
+keepalived (>=2.0.5),
+
 # End "high-availability-vrrp"
+
 # For "system console"
-  util-linux,
+
+util-linux,
+
 # End "system console"
+
 # For "system task-scheduler"
-  cron,
+
+cron,
+
 # End "system task-scheduler"
+
 # For "system lcd"
-  lcdproc,
-  lcdproc-extra-drivers,
+
+lcdproc,
+lcdproc-extra-drivers,
+
 # End "system lcd"
+
 # For "system config-management commit-archive"
-  git,
+
+git,
+
 # End "system config-management commit-archive"
+
 # For firewall
-  libndp-tools,
-  libnetfilter-conntrack3,
-  libnfnetlink0,
-  nfct,
-  nftables (>= 0.9.3),
+
+libndp-tools,
+libnetfilter-conntrack3,
+libnfnetlink0,
+nfct,
+nftables (>= 0.9.3),
+
 # For "vpn ipsec"
-  strongswan (>= 5.9),
-  strongswan-swanctl (>= 5.9),
-  charon-systemd,
-  libcharon-extra-plugins (>=5.9),
-  libcharon-extauth-plugins (>=5.9),
-  libstrongswan-extra-plugins (>=5.9),
-  libstrongswan-standard-plugins (>=5.9),
-  python3-vici (>= 5.7.2),
+
+strongswan (>= 5.9),
+strongswan-swanctl (>= 5.9),
+charon-systemd,
+libcharon-extra-plugins (>=5.9),
+libcharon-extauth-plugins (>=5.9),
+libstrongswan-extra-plugins (>=5.9),
+libstrongswan-standard-plugins (>=5.9),
+python3-vici (>= 5.7.2),
+
 # End "vpn ipsec"
+
 # For "nat64"
-  jool,
+
+jool,
+
 # End "nat64"
+
 # For "system conntrack modules rtsp"
-  nat-rtsp,
+
+nat-rtsp,
+
 # End "system conntrack modules rtsp"
+
 # For "service ntp"
-  chrony,
+
+chrony,
+
 # End "system ntp"
+
 # For "vpn openconnect"
-  ocserv,
+
+ocserv,
+
 # End "vpn openconnect"
+
 # For "system syslog"
-  rsyslog,
-  rsyslog-openssl,
+
+rsyslog,
+rsyslog-openssl,
+
 # End "system syslog"
+
 # For "system option keyboard-layout"
-  kbd,
+
+kbd,
+
 # End "system option keyboard-layout"
+
 # For "container"
-  podman (>=4.9.5),
-  netavark,
-  aardvark-dns,
+
+podman (>=4.9.5),
+netavark,
+aardvark-dns,
+
 # iptables is only used for containers now, not the the firewall CLI
-  iptables,
+
+iptables,
+
 # End container
+
 # For "vpp"
-  libvppinfra,
-  python3-vpp-api,
-  vpp,
-  vpp-crypto-engines,
-  vpp-dev,
-  vpp-plugin-core,
-  vpp-plugin-dpdk,
+
+libvppinfra,
+python3-vpp-api,
+vpp,
+vpp-crypto-engines,
+vpp-dev,
+vpp-plugin-core,
+vpp-plugin-dpdk,
+
 # End "vpp"
+
 # For "serial"
-  psl-iolan-monitor,
+
+psl-iolan-monitor,
+
 # End "serial"
+
 # For web interface
-  flask-react-web,
+
+flask-react-web,
+
 # End web interface
+
 ## End Configuration mode
+
 ## Operational mode
+
 # Used for hypervisor model in "run show version"
-  hvinfo,
+
+hvinfo,
+
 # For "run traceroute"
-  traceroute,
+
+traceroute,
+
 # For "run monitor traffic"
-  tcpdump,
+
+tcpdump,
+
 # End "run monitor traffic"
+
 # For "show hardware dmi"
-  dmidecode,
+
+dmidecode,
+
 # For "show protocols static arp"
-  net-tools,
+
+net-tools,
+
 # For "run show hardware storage smart"
-  smartmontools,
+
+smartmontools,
+
 # For "run show hardware scsi"
-  lsscsi,
+
+lsscsi,
+
 # For "run show hardware pci"
-  pciutils,
+
+pciutils,
+
 # For "show hardware usb"
-  usbutils,
+
+usbutils,
+
 # For "run show hardware storage nvme"
-  nvme-cli,
+
+nvme-cli,
+
 # For "run monitor bandwidth-test"
-  iperf,
-  iperf3,
+
+iperf,
+iperf3,
+
 # End "run monitor bandwidth-test"
+
 # For "run reset openvpn client"
-  socat,
+
+socat,
+
 # For "run wake-on-lan"
-  etherwake,
+
+etherwake,
+
 # For "run force ipv6-nd"
-  ndisc6,
+
+ndisc6,
+
 # For "run monitor bandwidth"
-  bmon,
+
+bmon,
+
 # For "run format disk"
-  parted,
+
+parted,
+
 # End Operational mode
+
 # For apn functionality
-  apnscripts,
+
+apnscripts,
+
 # End apn functionality
+
 ## TPM tools
-  cryptsetup,
-  tpm2-tools,
+
+cryptsetup,
+tpm2-tools,
+
 ## End TPM tools
+
 ## Optional utilities
-  easy-rsa,
-  tcptraceroute,
-  mtr-tiny,
-  telnet,
-  stunnel4,
-  uidmap,
-  saml-sso,
-  igos-cloud-proxy,
+
+easy-rsa,
+tcptraceroute,
+mtr-tiny,
+telnet,
+stunnel4,
+uidmap,
+igos-cloud-proxy,
+
 ## End optional utilities
+
 ## Serial telnet server
-  telnetd,
+
+telnetd,
+
 ## End serial telnet server
+
 ## Serial nfs remote port buffer
-  nfs-common
+
+nfs-common
+
 ## End serial nfs remote port buffer
+
 Description: VyOS configuration scripts and data
- VyOS configuration scripts, interface definitions, and everything
+VyOS configuration scripts, interface definitions, and everything
 
 Package: libvyosconfig0
 Architecture: any
 Depends: ${shlibs:Depends},
-  ${misc:Depends}
+${misc:Depends}
 Description: VyConf config tree manipulation library
-  VyConf config tree parsing and manipulation library
+VyConf config tree parsing and manipulation library
 
 Package: vyos-1x-aws
 Architecture: all
 Depends:
- vyos-1x,
+vyos-1x,
+
 # For "service aws glb"
- aws-gwlbtun,
+
+aws-gwlbtun,
 Description: VyOS configuration scripts and data for AWS Gateway Load Balancer
- Adds configuration files required for AWS Gateway Load Balancer service
- running on top of VyOS.
+Adds configuration files required for AWS Gateway Load Balancer service
+running on top of VyOS.
 
 Package: vyos-1x-smoketest
 Architecture: all
 Depends:
- skopeo,
- vyos-1x,
- vmtouch
+skopeo,
+vyos-1x,
+vmtouch
 Description: VyOS build sanity checking toolkit
 
 Package: vyos-1x-vmware
 Architecture: all
 Depends:
- vyos-1x,
- open-vm-tools
+vyos-1x,
+open-vm-tools
 Description: VyOS configuration scripts and data for VMware
- Adds configuration files required for VyOS running on VMware hosts.
+Adds configuration files required for VyOS running on VMware hosts.
 
 Package: vyos-user-utils
 Architecture: all
 Depends:
-  aptitude,
-  arpwatch,
-  atop,
-  bgpq3,
-  dnsdist,
-  dnsutils,
-  exfat-fuse,
-  exfatprogs,
-  fancontrol,
-  grepcidr,
-  haveged,
-  htop,
-  iftop,
-  iotop,
-  ipcalc,
-  ipmitool,
-  jq,
-  libnss-myhostname,
-  localepurge,
-  lsof,
-  minicom,
-  nano,
-  netcat-openbsd,
-  nmap,
-  numactl,
-  openssh-client,
-  screen,
-  sipcalc
+aptitude,
+arpwatch,
+atop,
+bgpq3,
+dnsdist,
+dnsutils,
+exfat-fuse,
+exfatprogs,
+fancontrol,
+grepcidr,
+haveged,
+htop,
+iftop,
+iotop,
+ipcalc,
+ipmitool,
+jq,
+libnss-myhostname,
+localepurge,
+lsof,
+minicom,
+nano,
+netcat-openbsd,
+nmap,
+numactl,
+openssh-client,
+screen,
+sipcalc
 Description: VyOS user utilities metapackage
- Installs utilities that are provided for the users but not used by VyOS scripts.
+Installs utilities that are provided for the users but not used by VyOS scripts.
