@@ -237,7 +237,7 @@ def verify(login):
                         f'User "{user}": encrypted-password cannot be set when '
                         'authentication saml is configured'
                     )
-                if 'otp' in auth:
+                if dict_search('otp.key', auth):
                     raise ConfigError(
                         f'User "{user}": otp cannot be set when '
                         'authentication saml is configured'
