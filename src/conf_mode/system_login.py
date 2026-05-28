@@ -196,6 +196,25 @@ def verify(login):
                 f'must all be defined together (missing: {pretty})'
             )
 
+        # Verify JIT role mappings have at least one attribute with values
+        if 'jit' in login['saml']:
+            for role in ('admin', 'operator'):
+                if role in login['saml']['jit']:
+                    role_config = login['saml']['jit'][role]
+                    if 'attribute' not in role_config:
+                        raise ConfigError(
+                            f'system login saml jit {role}: '
+                            f'at least one attribute must be defined'
+                        )
+                    for attr_name, attr_config in role_config.get(
+                        'attribute', {}
+                    ).items():
+                        if 'value' not in attr_config:
+                            raise ConfigError(
+                                f'system login saml jit {role} attribute {attr_name}: '
+                                f'at least one value must be defined'
+                            )
+
     if 'user' in login:
         system_users = get_local_passwd_entries()
         # Collect users with a SAML email defined for cross-checks.
@@ -580,7 +599,16 @@ def generate(login):
             'entity-id': login['saml']['entity_id'],
         }
         if 'jit' in login['saml']:
-            saml_conf['jit'] = True
+            jit_conf = {}
+            for role in ('admin', 'operator'):
+                if role in login['saml']['jit']:
+                    keys = {}
+                    for attr_name, attr_config in (
+                        login['saml']['jit'][role].get('attribute', {}).items()
+                    ):
+                        keys[attr_name] = attr_config.get('value', [])
+                    jit_conf[role] = keys
+            saml_conf['jit'] = jit_conf
 
         with open(saml_config_file, 'w') as f:
             json.dump(saml_conf, f)
