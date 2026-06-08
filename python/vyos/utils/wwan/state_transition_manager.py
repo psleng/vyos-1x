@@ -1,3 +1,18 @@
+# Copyright (C) 2024-2026 Perle Systems Limited
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License version 2 or later as
+# published by the Free Software Foundation.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
 """
 WWAN State Transition Management Module
 
@@ -111,6 +126,10 @@ class StateTransitionManager:
             transitions=[
                 StateTransition("WAITING_FOR_SIM", "CONFIGURING", "SIM_READY", "SIM card ready"),
                 StateTransition("FAILED", "CONFIGURING", "SIM_READY", "Recovery with SIM ready"),
+                # SIM missing — absorb connection failures while waiting for SIM
+                StateTransition("WAITING_FOR_SIM", "WAITING_FOR_SIM", "CONNECTION_FAILED", "Connection failed while SIM missing"),
+                StateTransition("WAITING_FOR_SIM", "WAITING_FOR_SIM", "RECONFIGURE", "Reconfigure while waiting for SIM"),
+                StateTransition("WAITING_FOR_SIM", "WAITING_FOR_SIM", "SIM_MISSING", "Duplicate SIM missing while already waiting"),
 
                 # SIM missing detection
                 StateTransition("DISCONNECTED", "WAITING_FOR_SIM", "SIM_MISSING", "SIM removed while disconnected"),

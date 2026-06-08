@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
-# filepath: /home/jfeeney/vyos-1x/python/vyos/utils/wwan/interfaces_wwan_state_machine.py
+# Copyright (C) 2024-2026 Perle Systems Limited
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License version 2 or later as
+# published by the Free Software Foundation.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
 import asyncio
 import time
 import os
@@ -10,6 +24,7 @@ import socket
 import struct
 import logging
 from enum import Enum
+from collections import deque
 from dbus_next.aio import MessageBus  # pylint: disable=import-error
 from dbus_next.message import Message  # pylint: disable=import-error
 from dbus_next.errors import DBusError  # pylint: disable=import-error
@@ -83,6 +98,105 @@ DEFAULT_CONNECTIVITY_CONFIG = {
     'ipv4_targets': ['8.8.8.8', '1.1.1.1'],
     'ipv6_targets': ['2001:4860:4860::8888', '2606:4700:4700::1111'],
 }
+
+# ── Signal strength averaging for LED indicator ──────────────────────────────
+class SignalStrengthTracker:
+    """Tracks rolling-window average of signal strength with change detection.
+
+    Maintains a FIFO history of signal samples (in dBm) and detects when the
+    signal "level bin" changes to trigger periodic LED indicator updates.
+    Uses 8 levels (0-7) like smartphone signal bars for fine-grained indication:
+      - 0: No signal (< -110 dBm)
+      - 1: Very poor (-110 to -100 dBm)
+      - 2: Poor (-100 to -90 dBm)
+      - 3: Fair (-90 to -80 dBm)
+      - 4: Good (-80 to -70 dBm)
+      - 5: Very good (-70 to -60 dBm)
+      - 6: Excellent (-60 to -50 dBm)
+      - 7: Maximum (>= -50 dBm)
+    """
+
+    def __init__(self, window_size: int = 12, led_callback=None):
+        """
+        Args:
+            window_size: number of samples to average (default 12 = ~60s @ 5s MM refresh)
+            led_callback: async callable(level_int, avg_dbm, detail_dict) triggered on level change
+                - level_int: 0-7 (no signal to maximum)
+                - avg_dbm: rolling average in dBm (or None if no samples yet)
+                - detail_dict: full signal detail from MM (rssi, rsrp, rsrq, snr, technology)
+        """
+        self.window_size = max(1, int(window_size))
+        self.led_callback = led_callback
+        self.samples: deque = deque(maxlen=self.window_size)
+        self.current_level = None  # Current level: 0-7
+        self.last_update_time = 0
+
+    def _classify_level(self, avg_dbm: float) -> int:
+        """Classify signal dBm into an 8-level band (0=no signal, 7=maximum)."""
+        if avg_dbm is None or avg_dbm < -110:
+            return 0  # No signal
+        if avg_dbm < -100:
+            return 1  # Very poor
+        if avg_dbm < -90:
+            return 2  # Poor
+        if avg_dbm < -80:
+            return 3  # Fair
+        if avg_dbm < -70:
+            return 4  # Good
+        if avg_dbm < -60:
+            return 5  # Very good
+        if avg_dbm < -50:
+            return 6  # Excellent
+        return 7  # Maximum
+
+    async def update(self, signal_dbm: float, signal_detail: dict = None) -> None:
+        """Add a new signal sample and check for level change; trigger LED if changed."""
+        if signal_dbm is None:
+            return
+
+        self.samples.append(signal_dbm)
+        avg_dbm = sum(self.samples) / len(self.samples)
+        new_level = self._classify_level(avg_dbm)
+
+        if (new_level != self.current_level or
+            time.monotonic() - self.last_update_time > 10.0):  # Also update every 10s
+            self.current_level = new_level
+            self.last_update_time = time.monotonic()
+
+            level_names = ['no-signal', 'very-poor', 'poor', 'fair', 'good', 'very-good', 'excellent', 'maximum']
+            level_name = level_names[new_level] if 0 <= new_level < len(level_names) else 'unknown'
+
+            logger.info(
+                f"Signal level: {level_name} [{new_level}/7] "
+                f"(avg={avg_dbm:.1f} dBm, samples={len(self.samples)})",
+                extra={'level': new_level, 'avg_dbm': avg_dbm, 'level_name': level_name}
+            )
+
+            if self.led_callback:
+                try:
+                    if hasattr(self.led_callback, '__call__'):
+                        result = self.led_callback(
+                            new_level,
+                            round(avg_dbm, 1),
+                            signal_detail or {}
+                        )
+                        if hasattr(result, '__await__'):
+                            await result
+                except Exception as e:
+                    logger.warning(f"LED callback failed: {e}")
+
+    def get_current_level(self) -> tuple[int, float]:
+        """Return (level, avg_dbm) — level is 0-7, avg_dbm is rolling average or None."""
+        if not self.samples:
+            return (0, None)
+        avg = sum(self.samples) / len(self.samples)
+        return (self.current_level or 0, round(avg, 1))
+
+    def reset(self) -> None:
+        """Clear history (e.g., on SIM switch or reconnection)."""
+        self.samples.clear()
+        self.current_level = None
+        self.last_update_time = 0
 
 # Enums for clarity
 class ModemState(str, Enum):
@@ -159,6 +273,7 @@ class ModemStateMachine:
         self._bearer_disconnect_timer = None
         self._registration_debounce_timer = None
         self._ip_monitoring_task = None
+        self._signal_poll_task = None
         self.usage_monitor_task = None
         # Egress-filter / MSS-clamp state also referenced during teardown
         self._ipv6_egress_filter_active = False
@@ -360,6 +475,14 @@ class ModemStateMachine:
         # new bearer has no IPv6, leaving Windows clients on the old SLAAC
         # address until its previously-advertised preferred lifetime expires.
         self._passthrough = PassthroughManager(self.interface_number)
+
+        # Signal strength monitoring for LED indicators
+        # Tracks rolling-window average and triggers LED callback on level changes
+        # using 8 levels. Window set to 12 samples ≈ 60 seconds @ 5s MM refresh.
+        self.signal_tracker = SignalStrengthTracker(
+            window_size=12,
+            led_callback=self._update_signal_led
+        )
 
         # Initialize configuration loader
         self.config_loader = ConfigurationLoader(interface_number)
@@ -1672,11 +1795,18 @@ class ModemStateMachine:
         elif mm_state == 6:  # ENABLED - Could indicate SIM insertion
             if current_fsm_state in [ModemState.WAITING_FOR_SIM.value,
                                      ModemState.FAILED.value]:
-                # SIM might have been inserted (or re-inserted after eject/insert cycle)
+                # SIM might have been inserted (or re-inserted after eject/insert cycle).
+                # NOTE: Do NOT cancel the failed-retry here. A bare
+                # `searching -> enabled` MM transition happens on every
+                # carrier-search loop iteration when registration is
+                # impossible (e.g. SIM requires a band the modem does not
+                # support). The insertion gate in `_check_sim_insertion`
+                # compares the current SIM identifier to the last-known
+                # one and only cancels the retry / resumes configuration
+                # when the SIM identity actually changed.
                 logger.info("Modem enabled while in %s - checking for SIM insertion",
                            current_fsm_state,
                            extra={'interface_number': self.interface_number})
-                self._cancel_failed_retry()  # SIM event supersedes retry
                 self._safe_create_task(self._handle_potential_sim_insertion())
             elif current_fsm_state == ModemState.CONFIGURING.value:
                 # Modem enabled successfully during configuration - can proceed
@@ -1958,6 +2088,17 @@ class ModemStateMachine:
                               'current_state': new_state,
                               'previous_state': old_state})
 
+            # Policy: clear LED (OFF) in no-connection states so stale bars
+            # from previous bearer sessions are not shown.
+            if new_state in [
+                ModemState.WAITING_FOR_SIM.value,
+                ModemState.DISCONNECTED.value,
+                ModemState.FAILED.value,
+            ]:
+                self._safe_create_task(
+                    self._clear_signal_led(reason=f"fsm_state:{new_state}")
+                )
+
             # Log detailed failure info when entering FAILED state
             if new_state == ModemState.FAILED.value and old_state != ModemState.FAILED.value:
                 logger.error("Modem entered FAILED state",
@@ -2179,7 +2320,7 @@ class ModemStateMachine:
                           'current_state': self.machine.current_state})
 
     def _apply_parsed_configuration(self):
-        """Apply parsed configuration to instance variables for backward compatibility"""
+        """Apply parsed configuration to instance variables consumed by the rest of the FSM."""
         # Logging sink + level are applied process-wide so all WWAN modules
         # follow the same output destination policy.
         raw_log_level = str(self.parsed_config.raw_config.get('log_level', 'info')).upper()
@@ -2326,6 +2467,26 @@ class ModemStateMachine:
             state_variant = await props.call_get(MODEM_INTERFACE, "State")
             state = state_variant.value
 
+            # Step 0a: If the modem is already in FAILED state at attach
+            # time, do NOT walk the configure → enable → connect cascade.
+            # On a FAILED modem the Modem.Simple D-Bus interface is not
+            # exposed, so any later Simple.Connect() call dies with
+            # `interface not found … Modem.Simple` and the FSM then
+            # enters FAILED for the wrong reason. Route through the
+            # existing FAILED-state investigator which reads
+            # StateFailedReason and triggers SIM failover for
+            # sim-missing / sim-error, or schedules the failed-retry
+            # backoff for other reasons.
+            if state == -1:  # MM_MODEM_STATE_FAILED
+                logger.warning(
+                    "Modem already in FAILED state at initial configuration — "
+                    "skipping configuration cascade and investigating reason",
+                    extra={'interface_number': self.interface_number,
+                           'modem_state': state})
+                self.initial_configuration_in_progress = False
+                await self._handle_failed_state_event(state)
+                return
+
             # Only reset if modem is actually connected (abnormal startup condition)
             # States: 4=DISABLED, 6=ENABLING, 7=ENABLED, 8=SEARCHING, 9=REGISTERED, 11=CONNECTING, 12=CONNECTED
             if state >= 11:  # Only CONNECTING or CONNECTED states need reset
@@ -2433,6 +2594,47 @@ class ModemStateMachine:
 
             logger.info("Starting APN connection attempts with proper priority order",
                        extra={'interface_number': self.interface_number})
+
+            # Registration gate — never call Simple.Connect() on a modem
+            # that has not yet reached REGISTERED. On a search-loop
+            # modem (e.g. SIM that requires an unsupported band) the
+            # MM Simple.Connect call will internally wait up to ~60s
+            # for registration and then fail with a misleading
+            # "Network timeout", driving the FSM into FAILED for the
+            # wrong reason. The post-FAILED path (apply_modem_configuration)
+            # already has this gate; replicate it here for the startup
+            # cascade in _configure_modem_initial as well.
+            try:
+                state_v = await props.call_get(MODEM_INTERFACE, "State")
+                pre_connect_state = state_v.value
+            except Exception:
+                pre_connect_state = None
+
+            if pre_connect_state is not None and pre_connect_state < 8:
+                logger.info(
+                    "Waiting for modem to reach REGISTERED before connection cascade",
+                    extra={'interface_number': self.interface_number,
+                           'modem_state': pre_connect_state})
+                registered = await self._wait_for_registered()
+                if not registered:
+                    logger.warning(
+                        "Modem did not register in time — aborting connection cascade",
+                        extra={'interface_number': self.interface_number})
+                    self.last_failure_reason = (
+                        "Modem failed to reach REGISTERED state within the "
+                        "configured registration timeout. The SIM and/or "
+                        "supported bands may not match any available carrier."
+                    )
+                    self.last_failure_time = time.time()
+                    # Bump the failure counter and route through the
+                    # standard FAILED path so dual-SIM failover can run
+                    # via the same logic used for connection failures.
+                    self.initial_connection_failure_count += 1
+                    self.transition(ModemEvent.CONNECTION_FAILED)
+                    # Give dual-SIM failover a chance — no-op when no
+                    # alternate SIM exists.
+                    await self._handle_sim_missing_failover()
+                    return
 
             # Get SIM config for connection parameters
             active_slot = self.config.get('primary_sim_slot', 1) if self.config else 1
@@ -5153,15 +5355,41 @@ class ModemStateMachine:
                         imsi = imsi_variant.value
 
                         if imsi:  # SIM is present and readable
+                            # Only treat this as a real SIM insertion event
+                            # when the SIM identity has actually changed
+                            # since the last time we observed it. Without
+                            # this gate, MM's normal `searching -> enabled`
+                            # carrier-search oscillation (which happens
+                            # continuously when registration is impossible,
+                            # e.g. SIM requires an unsupported band) is
+                            # repeatedly misread as a hot-swap, tearing
+                            # down a perfectly fine modem and cancelling
+                            # the carrier-friendly failed-retry backoff.
+                            last_imsi = ''
+                            if isinstance(self.last_known_sim_info, dict):
+                                last_imsi = self.last_known_sim_info.get('imsi', '') or ''
+
+                            if last_imsi and last_imsi == imsi:
+                                logger.debug(
+                                    "Modem enabled but SIM identity unchanged "
+                                    "- not a hot-swap, leaving failed-retry intact",
+                                    extra={'interface_number': self.interface_number,
+                                           'sim_slot': config_sim_slot})
+                                return False
+
                             logger.info("SIM insertion detected in configured slot",
                                        extra={'interface_number': self.interface_number,
                                               'sim_slot': config_sim_slot,
-                                              'imsi': imsi[:6] + '...'})  # Partial IMSI for privacy
+                                              'imsi': imsi[:6] + '...',  # Partial IMSI for privacy
+                                              'previous_imsi_known': bool(last_imsi)})
 
-                            # SIM is back! Resume configuration
-                            self.transition(ModemEvent.SIM_READY)
-                            await self._configure_modem_initial()
-                            return True
+                            # Confirmed SIM identity change — now it is
+                            # safe to supersede the failed-retry backoff
+                            # and resume the configuration lane.
+                            self._cancel_failed_retry()
+
+                            # SIM is back! Resume the normal configuration/connection lane.
+                            return await self._resume_after_sim_available()
 
                     except Exception as e:
                         logger.debug(f"SIM slot {config_sim_slot} not ready: {e}",
@@ -5171,6 +5399,59 @@ class ModemStateMachine:
 
         except Exception as e:
             logger.error(f"Error checking SIM insertion: {e}",
+                        extra={'interface_number': self.interface_number})
+            return False
+
+    async def _resume_after_sim_available(self):
+        """Resume the normal configuration flow once a SIM becomes available.
+
+        This is the explicit recovery path for the boot-with-no-SIM case.
+        It re-enters the CONFIGURING lane using the same FSM events used by
+        startup/recovery, then hands control back to _configure_modem_initial()
+        so the existing connection cascade can complete normally.
+        """
+        try:
+            if self._sim_switch_in_progress or self._sim_failover_in_progress:
+                logger.debug("SIM resume skipped — SIM switch/failover in progress",
+                            extra={'interface_number': self.interface_number})
+                return False
+
+            if not self.proxy or not self.config:
+                logger.warning("Cannot resume configuration after SIM availability — missing proxy or config",
+                              extra={'interface_number': self.interface_number,
+                                     'has_proxy': bool(self.proxy),
+                                     'has_config': bool(self.config)})
+                return False
+
+            # SIM appearance supersedes any stale retry / failover loops.
+            self._cancel_failed_retry()
+
+            current_state = self.machine.current_state
+            logger.info("Resuming configuration after SIM availability",
+                       extra={'interface_number': self.interface_number,
+                              'current_state': current_state})
+
+            # The FSM rules already map WAITING_FOR_SIM → CONFIGURING on SIM_READY,
+            # and FAILED → CONFIGURING on SIM_READY. Use that explicit event so the
+            # later connection flow re-enters the normal configuration lane.
+            if current_state in (ModemState.WAITING_FOR_SIM.value,
+                                 ModemState.FAILED.value):
+                self.transition(ModemEvent.SIM_READY)
+
+            # If the state machine did not land in CONFIGURING, do not force the
+            # connection cascade — log and let the caller retry on the next poll.
+            if self.machine.current_state != ModemState.CONFIGURING.value:
+                logger.warning("SIM resume did not reach CONFIGURING state",
+                              extra={'interface_number': self.interface_number,
+                                     'current_state': self.machine.current_state,
+                                     'previous_state': current_state})
+                return False
+
+            await self._configure_modem_initial()
+            return True
+
+        except Exception as e:
+            logger.error(f"Error resuming after SIM availability: {e}",
                         extra={'interface_number': self.interface_number})
             return False
 
@@ -5190,6 +5471,24 @@ class ModemStateMachine:
             sim_inserted = await self._check_sim_insertion()
 
             if not sim_inserted:
+                # `_check_sim_insertion` returns False for two very
+                # different reasons:
+                #   (a) the configured slot really has no SIM, OR
+                #   (b) the SIM identity is unchanged since the last
+                #       observation (i.e. this is just MM's normal
+                #       `searching -> enabled` carrier-search
+                #       oscillation, not a hot-swap).
+                # Only case (a) warrants triggering SIM failover —
+                # case (b) should be a quiet no-op so the existing
+                # carrier-friendly failed-retry backoff is not
+                # repeatedly disturbed.
+                if await self._is_configured_sim_present():
+                    logger.debug(
+                        "SIM still present in configured slot - "
+                        "no failover needed (search-loop oscillation)",
+                        extra={'interface_number': self.interface_number})
+                    return
+
                 # Still no configured SIM - check for any available SIM
                 if self._is_sim_failover_enabled():
                     logger.info("No configured SIM found, checking for failover options",
@@ -5202,6 +5501,29 @@ class ModemStateMachine:
         except Exception as e:
             logger.error(f"Error handling potential SIM insertion: {e}",
                         extra={'interface_number': self.interface_number})
+
+    async def _is_configured_sim_present(self) -> bool:
+        """Return True if a SIM is currently present in the configured slot.
+
+        Used by ``_handle_potential_sim_insertion`` to distinguish a real
+        "SIM removed" condition from MM's normal `searching <-> enabled`
+        oscillation on an unregisterable carrier (e.g. band mismatch).
+        """
+        try:
+            if not self.proxy or not self.config:
+                return False
+            props = self.proxy.get_interface("org.freedesktop.DBus.Properties")
+            sim_slots_variant = await props.call_get(MODEM_INTERFACE, "SimSlots")
+            sim_slots = sim_slots_variant.value
+            config_sim_slot = self.config.get('primary_sim_slot', 1)
+            if len(sim_slots) < config_sim_slot:
+                return False
+            slot_path = sim_slots[config_sim_slot - 1]
+            return bool(slot_path and slot_path != '/')
+        except Exception as e:
+            logger.debug(f"Could not check configured SIM presence: {e}",
+                        extra={'interface_number': self.interface_number})
+            return False
 
     async def _periodic_sim_check(self):
         """Periodic check for SIM insertion while in WAITING_FOR_SIM state"""
@@ -6218,6 +6540,69 @@ class ModemStateMachine:
             return
 
         try:
+            # Registration gate — never attempt Simple.Connect() on a
+            # modem that is not at least REGISTERED. The Modem.Simple
+            # D-Bus interface is not exposed on modems in FAILED /
+            # LOCKED / DISABLED / ENABLED / SEARCHING, so attempting
+            # the cascade in those states produces a misleading
+            # `interface not found on this object:
+            # org.freedesktop.ModemManager1.Modem.Simple` error and
+            # then drives the FSM into FAILED for the wrong reason.
+            # Check current MM state first; only wait if the modem is
+            # plausibly in the process of registering.
+            try:
+                props = self.proxy.get_interface("org.freedesktop.DBus.Properties")
+                state_variant = await props.call_get(MODEM_INTERFACE, "State")
+                mm_state = state_variant.value
+            except Exception as e:
+                logger.warning(f"Could not read modem state before connection cascade: {e}",
+                              extra={'interface_number': self.interface_number})
+                mm_state = None
+
+            # MM state numbers: -1 FAILED, 2 LOCKED, 3 DISABLED,
+            # 6 ENABLED, 7 SEARCHING, 8 REGISTERED, 10 CONNECTING,
+            # 11 CONNECTED.
+            if mm_state is not None and mm_state < 6:
+                logger.warning(
+                    "Modem not in a connectable state - aborting connection cascade",
+                    extra={'interface_number': self.interface_number,
+                           'modem_state': mm_state})
+                # Let the FSM's existing failed/locked state handlers
+                # decide recovery (SIM failover, retry, etc.).
+                self.transition(ModemEvent.CONNECTION_FAILED)
+                # Give dual-SIM failover a chance — this is functionally
+                # equivalent to SIM-missing from the connection-cascade
+                # point of view. _handle_sim_missing_failover is a no-op
+                # if no alternate SIM exists, failover is disabled, or
+                # cooldown is active.
+                await self._handle_sim_missing_failover()
+                return
+
+            if mm_state is None or mm_state < 8:
+                logger.info(
+                    "Waiting for modem to reach REGISTERED before connection cascade",
+                    extra={'interface_number': self.interface_number,
+                           'modem_state': mm_state})
+                registered = await self._wait_for_registered()
+                if not registered:
+                    logger.warning(
+                        "Modem did not register in time - aborting connection cascade",
+                        extra={'interface_number': self.interface_number})
+                    self.last_failure_reason = (
+                        "Modem failed to reach REGISTERED state within the "
+                        "configured registration timeout. The SIM and/or "
+                        "supported bands may not match any available carrier."
+                    )
+                    self.last_failure_time = time.time()
+                    self.transition(ModemEvent.CONNECTION_FAILED)
+                    # Registration timeout on the active SIM looks
+                    # identical to a dead/unusable SIM from a failover
+                    # standpoint (e.g. SIM requires a band this modem
+                    # does not support). Offer dual-SIM failover; it
+                    # is a no-op when no alternate SIM is configured.
+                    await self._handle_sim_missing_failover()
+                    return
+
             # 🔧 FIX: Check if bearer is already connected before attempting new connections
             is_already_connected = await self._is_bearer_connected()
             if is_already_connected:
@@ -6231,6 +6616,15 @@ class ModemStateMachine:
                 if self.machine.current_state != ModemState.CONNECTED.value:
                     self.transition(ModemEvent.CONNECTED)
                 return
+
+            # 🆕 Clean up any stale bearer before fresh connection attempt
+            # This ensures we don't try to create a new bearer while MM still
+            # has a partial/disconnected bearer from before.
+            if self.bearer_path:
+                logger.info("Cleaning up stale bearer before fresh connection attempt",
+                           extra={'interface_number': self.interface_number})
+                await self._cleanup_bearers()
+                self.bearer_path = None
 
             # Detect runtime SIM identity changes before choosing APN
             # strategy. This catches out-of-band SIM mux + modem reset
@@ -6302,11 +6696,47 @@ class ModemStateMachine:
             if not apn_candidates:
                 logger.warning("No APN candidates found, trying automatic assignment",
                               extra={'interface_number': self.interface_number})
-                await self._try_automatic_apn_assignment(active_sim_config)
+                auto_ok = await self._try_automatic_apn_assignment(active_sim_config)
+                if not auto_ok:
+                    self.last_failure_reason = (
+                        "No APN candidates were discovered and automatic APN assignment failed."
+                    )
+                    self.last_failure_time = time.time()
+                    self.last_failed_apn = '(auto-assignment)'
+                    self.configured_apn_rejected = False
+                    self.transition(ModemEvent.CONNECTION_FAILED)
                 return
 
-            # Try each APN candidate in priority order
-            await self._try_apn_candidates(apn_candidates, active_sim_config, sim_info)
+            # Try each APN candidate in priority order with explicit outcome handling.
+            success, discovery_reason = await self._try_apn_candidates(
+                apn_candidates, active_sim_config, sim_info
+            )
+            if success:
+                return
+
+            # Non-APN modem/network failure while testing candidates -> restart full flow.
+            if discovery_reason == 'restart_required':
+                self.last_failure_reason = (
+                    "Non-APN modem/network failure occurred during APN discovery; "
+                    "restarting connection workflow from the beginning."
+                )
+                self.last_failure_time = time.time()
+                self.last_failed_apn = '(apn-discovery)'
+                self.configured_apn_rejected = False
+                self.transition(ModemEvent.CONNECTION_FAILED)
+                return
+
+            # Candidate exhaustion paths fall back to automatic APN assignment.
+            auto_ok = await self._try_automatic_apn_assignment(active_sim_config)
+            if not auto_ok:
+                self.last_failure_reason = (
+                    "All APN discovery candidates failed and automatic APN assignment also failed."
+                )
+                self.last_failure_time = time.time()
+                self.last_failed_apn = '(apn-discovery)'
+                self.configured_apn_rejected = False
+                self.transition(ModemEvent.CONNECTION_FAILED)
+                return
 
         except Exception as e:
             logger.error(f"Connection configuration failed: {e}",
@@ -6433,22 +6863,132 @@ class ModemStateMachine:
 
         except Exception:
             return 5 + index
-    async def _try_apn_candidates(self, candidates, sim_config, sim_info):
-        """Try APN candidates using new ConnectionManager"""
-        # Set proxy for connection manager
-        self.connection_manager.set_proxy(self.proxy)
+    async def _try_apn_candidates(self, candidates, sim_config, sim_info=None):
+        """Try a pre-built list of APN candidates with full escalation semantics.
 
-        # Use the extracted connection manager
-        success = await self.connection_manager.try_apn_candidates(candidates, sim_config, sim_info)
+        This is the single, canonical APN-iteration loop used by both the
+        initial-configuration path (via _try_apn_candidates_from_discovery) and
+        the runtime reconnection path (via apply_modem_configuration).
 
-        if success:
-            # Update bearer path for backward compatibility
-            self.bearer_path = self.connection_manager.get_current_bearer_path()
-        else:
-            # All candidates failed, try automatic assignment
-            logger.warning("All APN candidates failed, trying automatic assignment",
-                          extra={'interface_number': self.interface_number,
-                                 'total_candidates_tried': len(candidates)})
+        Returns:
+            (success: bool, reason: str)
+              - success=True,  reason='success'
+              - success=False, reason='all_apn_failed'   (all candidates exhausted)
+              - success=False, reason='restart_required' (non-APN modem/network failure;
+                                                          caller should trigger CONNECTION_FAILED)
+        """
+        # State-code → name mapping used for logging in the timeout branch.
+        _STATE_NAMES = {
+            -1: 'FAILED', 2: 'LOCKED', 3: 'DISABLED', 4: 'DISABLING',
+            5: 'ENABLING', 6: 'ENABLED', 7: 'SEARCHING', 8: 'REGISTERED',
+            9: 'DISCONNECTING', 10: 'CONNECTING', 11: 'CONNECTED',
+        }
+
+        if not candidates:
+            return (False, 'all_apn_failed')
+
+        logger.info("Trying APN candidates (canonical loop)",
+                   extra={'interface_number': self.interface_number,
+                          'candidate_count': len(candidates)})
+
+        for i, apn_data in enumerate(candidates):
+            apn_name = apn_data.get('name', 'unknown')
+            logger.info(f"Trying APN candidate {i + 1}/{len(candidates)}",
+                       extra={'interface_number': self.interface_number,
+                              'apn_name': apn_name,
+                              'apn_type': apn_data.get('type', 'default'),
+                              'priority': apn_data.get('priority', 0)})
+
+            apn_config = {
+                'name': apn_data.get('name', ''),
+                'username': apn_data.get('username', ''),
+                'password': apn_data.get('password', ''),
+                'auth_type': apn_data.get('auth_type', 'none'),
+                'pdp_type': apn_data.get('pdp_type', 'ipv4v6'),
+            }
+
+            success, reason = await self._try_connection_with_apn(apn_config, sim_config)
+
+            if success:
+                logger.info("APN candidate connected successfully",
+                           extra={'interface_number': self.interface_number,
+                                  'apn_name': apn_name,
+                                  'attempt': i + 1})
+                return (True, 'success')
+
+            # ── Non-APN modem/network failure: abort immediately and ask caller
+            # to restart the whole connection workflow rather than burning through
+            # remaining APNs for a non-APN problem.
+            if reason == 'connection_failed':
+                logger.warning(
+                    "Non-APN ModemManager failure while testing APN; requesting full restart",
+                    extra={'interface_number': self.interface_number,
+                           'apn_name': apn_name,
+                           'failure_reason': reason})
+                await self._cleanup_bearers()
+                return (False, 'restart_required')
+
+            # ── Timeout: check MM modem state.  If still CONNECTING, poll up to
+            # 60 s for a terminal MM decision before giving up on this APN.
+            if reason == 'timeout':
+                modem_state = None
+                try:
+                    if self.proxy:
+                        props = self.proxy.get_interface("org.freedesktop.DBus.Properties")
+                        state_v = await props.call_get(MODEM_INTERFACE, "State")
+                        modem_state = state_v.value if hasattr(state_v, 'value') else state_v
+                except Exception as state_err:
+                    logger.debug(f"Could not read modem state after timeout (non-fatal): {state_err}",
+                               extra={'interface_number': self.interface_number})
+
+                state_name = _STATE_NAMES.get(modem_state, f'UNKNOWN({modem_state})')
+                logger.info(f"Connection timeout — modem state: {state_name}",
+                           extra={'interface_number': self.interface_number,
+                                  'modem_state': modem_state,
+                                  'apn_name': apn_name})
+
+                # 10 = CONNECTING: MM may still be negotiating; give it 60 s more.
+                if modem_state == 10:
+                    logger.info(
+                        "Modem still CONNECTING after timeout; waiting up to 60 s for MM decision",
+                        extra={'interface_number': self.interface_number,
+                               'apn_name': apn_name})
+                    poll_deadline = time.monotonic() + 60
+                    while time.monotonic() < poll_deadline:
+                        await asyncio.sleep(5)
+                        try:
+                            if self.proxy:
+                                props = self.proxy.get_interface("org.freedesktop.DBus.Properties")
+                                state_v = await props.call_get(MODEM_INTERFACE, "State")
+                                current_state = state_v.value if hasattr(state_v, 'value') else state_v
+                                if current_state != 10:  # MM has reached a decision
+                                    new_name = _STATE_NAMES.get(current_state, f'UNKNOWN({current_state})')
+                                    logger.info(f"MM reached decision on APN: {new_name}",
+                                               extra={'interface_number': self.interface_number,
+                                                      'modem_state': current_state,
+                                                      'apn_name': apn_name})
+                                    modem_state = current_state
+                                    break
+                        except Exception as poll_err:
+                            logger.debug(f"Poll error reading modem state (non-fatal): {poll_err}",
+                                       extra={'interface_number': self.interface_number})
+                    else:
+                        logger.warning(
+                            "MM still CONNECTING after 60 s wait; moving to next APN candidate",
+                            extra={'interface_number': self.interface_number,
+                                   'apn_name': apn_name})
+
+            # ── APN-specific or transient outcome (apn_rejected / verification_failed /
+            # error / timeout with non-CONNECTING final state): clean up and continue.
+            logger.info(f"APN candidate failed ({reason}), cleaning up and continuing",
+                       extra={'interface_number': self.interface_number,
+                              'apn_name': apn_name})
+            await self._cleanup_bearers()
+
+        logger.warning("All APN candidates exhausted",
+                      extra={'interface_number': self.interface_number,
+                             'total_candidates_tried': len(candidates)})
+        return (False, 'all_apn_failed')
     async def _try_connection_with_apn(self, apn_config, sim_config):
         """Try connection using new ConnectionManager"""
         # Set proxy for connection manager
@@ -6463,7 +7003,8 @@ class ModemStateMachine:
         success, reason = await self.connection_manager.try_connection_with_apn(apn_config, sim_config_with_timeout)
 
         if success:
-            # Update bearer path for backward compatibility
+            # Mirror the bearer path onto self so other FSM code paths
+            # that read self.bearer_path see the live value.
             self.bearer_path = self.connection_manager.get_current_bearer_path()
 
         return (success, reason)
@@ -6672,200 +7213,50 @@ class ModemStateMachine:
             return False
 
     async def _try_apn_candidates_from_discovery(self, sim_config):
-        """Try APNs from external discovery service"""
+        """Discover APN candidates from the Android DB and try them via the canonical loop.
+
+        This is a thin discovery wrapper around _try_apn_candidates(); all
+        reason-aware escalation and timeout handling lives there.
+        """
         try:
-            # Extract current SIM info if available
             sim_info = await self._get_sim_information()
             if not sim_info:
                 logger.warning("No SIM info available for APN discovery",
                               extra={'interface_number': self.interface_number})
                 return (False, 'no_sim_info')
 
-            # Discover APN candidates using Android library
             apn_candidates = await self._discover_apn_candidates(sim_info, sim_config)
             if not apn_candidates:
                 logger.warning("No APN candidates discovered",
                               extra={'interface_number': self.interface_number})
                 return (False, 'no_candidates')
 
-            logger.info(f"Discovered {len(apn_candidates)} APN candidates, attempting connections",
+            logger.info(f"Discovered {len(apn_candidates)} APN candidates, delegating to canonical loop",
                        extra={'interface_number': self.interface_number})
-
-            # Try each discovered APN
-            for apn_data in apn_candidates:
-                logger.info(f"Trying discovered APN: {apn_data.get('name', 'unknown')}",
-                           extra={'interface_number': self.interface_number})
-
-                # Create APN config for connection attempt
-                apn_config = {
-                    'name': apn_data.get('name', ''),
-                    'username': apn_data.get('username', ''),
-                    'password': apn_data.get('password', ''),
-                    'auth_type': apn_data.get('auth_type', 'none'),
-                    'pdp_type': apn_data.get('pdp_type', 'ipv4v6')
-                }
-
-                # Attempt connection with this APN
-                # (returns bool, does not throw exceptions)
-                success, reason = await self._try_connection_with_apn(apn_config, sim_config)
-                if success:
-                    logger.info(f"Successfully connected with discovered APN: {apn_config['name']}",
-                               extra={'interface_number': self.interface_number})
-                    return (True, 'success')
-
-                # Connection failed. Check modem state to determine next action:
-                # - If MM still CONNECTING: it's legitimately trying → wait longer
-                # - If MM in error/failed: APN was rejected → move to next APN
-                # - If MM unresponsive: escalate recovery
-
-                # If MM explicitly rejected the APN, move to next one immediately
-                if reason == "apn_rejected":
-                    logger.info(f"MM rejected APN, moving to next candidate",
-                               extra={'interface_number': self.interface_number,
-                                      'apn_name': apn_config.get('name', 'unknown'),
-                                      'failure_reason': reason})
-                    # Clean up any bearers before next attempt
-                    try:
-                        if self.proxy:
-                            simple_iface = self.proxy.get_interface(SIMPLE_INTERFACE)
-                            await asyncio.wait_for(
-                                simple_iface.call_disconnect('/'),
-                                timeout=5.0
-                            )
-                            await asyncio.sleep(1)
-                    except Exception as cleanup_err:
-                        logger.debug(f"Cleanup after rejection (non-fatal): {cleanup_err}",
-                                   extra={'interface_number': self.interface_number})
-                    continue
-
-                # Non-APN failure from MM: restart the whole connection process.
-                if reason == "connection_failed":
-                    logger.warning(
-                        "Non-APN ModemManager failure while testing APN; requesting full restart",
-                        extra={'interface_number': self.interface_number,
-                               'apn_name': apn_config.get('name', 'unknown'),
-                               'failure_reason': reason})
-                    try:
-                        if self.proxy:
-                            simple_iface = self.proxy.get_interface(SIMPLE_INTERFACE)
-                            await asyncio.wait_for(
-                                simple_iface.call_disconnect('/'),
-                                timeout=5.0
-                            )
-                            await asyncio.sleep(1)
-                    except Exception as cleanup_err:
-                        logger.debug(f"Cleanup before restart (non-fatal): {cleanup_err}",
-                                   extra={'interface_number': self.interface_number})
-                    return (False, 'restart_required')
-
-                # If non-timeout failure, clean up and move to next APN
-                if reason != "timeout":
-                    # verification_failed, error, or other non-timeout failure
-                    logger.info(f"APN attempt failed: {reason}, moving to next candidate",
-                               extra={'interface_number': self.interface_number,
-                                      'apn_name': apn_config.get('name', 'unknown')})
-                    try:
-                        if self.proxy:
-                            simple_iface = self.proxy.get_interface(SIMPLE_INTERFACE)
-                            await asyncio.wait_for(
-                                simple_iface.call_disconnect('/'),
-                                timeout=5.0
-                            )
-                            await asyncio.sleep(1)
-                    except Exception as cleanup_err:
-                        logger.debug(f"Cleanup between attempts (non-fatal): {cleanup_err}",
-                                   extra={'interface_number': self.interface_number})
-                    continue
-
-                # Timeout case: check modem state to see if MM is stuck or just slow
-                modem_state = None
-                try:
-                    if self.proxy:
-                        props = self.proxy.get_interface("org.freedesktop.DBus.Properties")
-                        state_v = await props.call_get(MODEM_INTERFACE, "State")
-                        modem_state = state_v.value if hasattr(state_v, 'value') else state_v
-                except Exception as state_err:
-                    logger.debug(f"Could not read modem state after APN failure: {state_err}",
-                               extra={'interface_number': self.interface_number})
-
-                # Map state code to name for logging
-                state_name = {-1: "FAILED", 2: "LOCKED", 3: "DISABLED", 6: "ENABLED",
-                              7: "SEARCHING", 8: "REGISTERED", 10: "CONNECTING", 11: "CONNECTED"}.get(
-                    modem_state, f"UNKNOWN({modem_state})")
-                logger.info(
-                    f"Connection timeout — modem state: {state_name}",
-                    extra={'interface_number': self.interface_number,
-                           'modem_state': modem_state,
-                           'apn_name': apn_config.get('name', 'unknown')})
-
-                # If modem is CONNECTING, MM may still be legitimately trying
-                # (PDP negotiation, auth retry, bearer setup can take >60s)
-                # Give MM more time to finish before moving to next APN
-                if modem_state == 10:  # CONNECTING
-                    logger.info(
-                        "Modem still CONNECTING after timeout; MM may still be trying this APN",
-                        extra={'interface_number': self.interface_number,
-                               'apn_name': apn_config.get('name', 'unknown')})
-
-                    # Poll MM state for up to 60 more seconds waiting for terminal decision
-                    poll_deadline = time.monotonic() + 60
-                    poll_interval = 5
-
-                    while time.monotonic() < poll_deadline:
-                        await asyncio.sleep(poll_interval)
-                        try:
-                            if self.proxy:
-                                props = self.proxy.get_interface("org.freedesktop.DBus.Properties")
-                                state_v = await props.call_get(MODEM_INTERFACE, "State")
-                                current_state = state_v.value if hasattr(state_v, 'value') else state_v
-
-                                # Check if MM has decided on this APN
-                                if current_state != 10:  # Left CONNECTING state
-                                    state_name_now = {-1: "FAILED", 2: "LOCKED", 3: "DISABLED", 6: "ENABLED",
-                                                      7: "SEARCHING", 8: "REGISTERED", 10: "CONNECTING", 11: "CONNECTED"}.get(
-                                        current_state, f"UNKNOWN({current_state})")
-                                    logger.info(
-                                        f"MM reached decision on APN: {state_name_now}",
-                                        extra={'interface_number': self.interface_number,
-                                               'modem_state': current_state,
-                                               'apn_name': apn_config.get('name', 'unknown')})
-                                    modem_state = current_state
-                                    break
-                        except Exception as poll_err:
-                            logger.debug(f"Poll error reading modem state (non-fatal): {poll_err}",
-                                       extra={'interface_number': self.interface_number})
-                    else:
-                        # Poll deadline exceeded while still CONNECTING
-                        # MM may be hung or network very slow
-                        logger.warning(
-                            "MM still CONNECTING after 60s wait; assuming MM is processing this APN",
-                            extra={'interface_number': self.interface_number,
-                                   'apn_name': apn_config.get('name', 'unknown')})
-
-                # Clean up bearers before moving to next APN
-                # (prevents "operation already in progress" if MM had created a bearer)
-                try:
-                    if self.proxy:
-                        simple_iface = self.proxy.get_interface(SIMPLE_INTERFACE)
-                        await asyncio.wait_for(
-                            simple_iface.call_disconnect('/'),
-                            timeout=5.0
-                        )
-                        logger.debug("Disconnected bearers before trying next APN",
-                                   extra={'interface_number': self.interface_number})
-                        await asyncio.sleep(1)  # Let MM process the disconnect
-                except Exception as cleanup_err:
-                    logger.debug(f"Cleanup disconnect (non-fatal): {cleanup_err}",
-                               extra={'interface_number': self.interface_number})
-
-            logger.warning("All discovered APNs failed",
-                          extra={'interface_number': self.interface_number})
-            return (False, 'all_apn_failed')
+            return await self._try_apn_candidates(apn_candidates, sim_config, sim_info)
 
         except Exception as e:
-            logger.error(f"APN discovery service failed: {e}",
+            logger.error(f"APN discovery phase failed: {e}",
                         extra={'interface_number': self.interface_number})
             return (False, 'discovery_error')
+
+    async def _cleanup_bearers(self):
+        """Disconnect all bearers via MM Simple interface (best-effort, non-fatal).
+
+        Called between APN attempts to prevent ModemManager returning
+        "operation already in progress" when the previous attempt left a
+        partial bearer open.
+        """
+        try:
+            if self.proxy:
+                simple_iface = self.proxy.get_interface(SIMPLE_INTERFACE)
+                await asyncio.wait_for(simple_iface.call_disconnect('/'), timeout=5.0)
+                logger.debug("Bearers disconnected between APN attempts",
+                            extra={'interface_number': self.interface_number})
+                await asyncio.sleep(1)  # Let MM process the disconnect
+        except Exception as cleanup_err:
+            logger.debug(f"Bearer cleanup (non-fatal): {cleanup_err}",
+                        extra={'interface_number': self.interface_number})
 
     def _convert_pdp_type(self, pdp_type):
         """Convert PDP type to ModemManager IP family constant"""
@@ -7439,12 +7830,16 @@ class ModemStateMachine:
             buffer_dbm = getattr(self, 'signal_strength_buffer', 5)
             effective_threshold = min_signal_dbm - buffer_dbm
 
-            signal_percent, signal_dbm, _ = await self._get_detailed_signal_quality()
+            signal_percent, signal_dbm, signal_detail = await self._get_detailed_signal_quality()
 
             if signal_percent is None or signal_dbm is None:
                 logger.warning("Cannot read signal strength - assuming adequate for reconnection",
                               extra={'interface_number': self.interface_number})
                 return True
+
+            # Update signal tracker for LED indication (rolling average + level change detection)
+            if self.signal_tracker and signal_dbm:
+                await self.signal_tracker.update(signal_dbm, signal_detail)
 
             adequate = signal_dbm >= effective_threshold
 
@@ -7756,6 +8151,99 @@ class ModemStateMachine:
             logger.error(f"Enhanced reconnection attempt failed: {e}",
                         extra={'interface_number': self.interface_number})
             return False
+
+    async def _monitor_signal_strength(self, interval_seconds: int = 5) -> None:
+        """Periodically poll signal strength while CONNECTED.
+
+        Feeds dBm samples into ``self.signal_tracker``, which is the
+        only thing that fires ``_update_signal_led``.  Without this
+        loop the LED stays dark in steady state because the only other
+        caller of ``signal_tracker.update`` is the reconnection path.
+
+        Started by ``_start_network_interface_monitoring`` on entry to
+        CONNECTED and cancelled by ``_stop_network_interface_monitoring``
+        on exit; safe to be cancelled at any await point.
+        """
+        try:
+            while True:
+                try:
+                    _percent, signal_dbm, signal_detail = \
+                        await self._get_detailed_signal_quality()
+                    if (self.signal_tracker is not None
+                            and signal_dbm is not None):
+                        await self.signal_tracker.update(
+                            signal_dbm, signal_detail or {})
+                except asyncio.CancelledError:
+                    raise
+                except Exception as poll_err:
+                    logger.debug("Signal-poll iteration failed: %s",
+                                 poll_err,
+                                 extra={'interface_number': self.interface_number})
+                await asyncio.sleep(interval_seconds)
+        except asyncio.CancelledError:
+            logger.debug("Signal-strength poll task cancelled",
+                         extra={'interface_number': self.interface_number})
+            raise
+
+    async def _update_signal_led(self, level: int, avg_dbm: float, signal_detail: dict) -> None:
+        """Update modem STAT LEDs using hardware API signal-level mapping.
+
+        Args:
+            level: Signal level 0-7 (0=no-signal, 7=maximum).
+            avg_dbm: Rolling average signal in dBm.
+            signal_detail: Dict with {rssi, rsrp, rsrq, snr, technology}.
+        """
+        level_names = ['no-signal', 'very-poor', 'poor', 'fair', 'good', 'very-good', 'excellent', 'maximum']
+        level_name = level_names[level] if 0 <= level <= 7 else 'unknown'
+
+        # Map wwanN interface to MODEMN naming expected by hw API.
+        modem_name = f"MODEM{self.interface_number}"
+
+        # Keep logging explicit for operational visibility.
+        logger.info(
+            f"[LED UPDATE] Signal: {level_name} [{level}/7] (avg={avg_dbm} dBm, tech={signal_detail.get('technology', 'Unknown')})",
+            extra={'interface_number': self.interface_number,
+                   'level': level, 'avg_dbm': avg_dbm, 'level_name': level_name}
+        )
+
+        try:
+            # Lazy import keeps FSM unit tests and non-hardware images tolerant.
+            import vyos.hardware.api as hw_api
+
+            hw_api.modem_signal_level(level=level, modem=modem_name)
+        except Exception as e:
+            # Non-fatal: signal logic should continue even if LED hardware is absent.
+            logger.debug("Signal LED update skipped (non-fatal): %s",
+                         e,
+                         extra={'interface_number': self.interface_number,
+                                'level': level,
+                                'modem_name': modem_name})
+
+    async def _clear_signal_led(self, reason: str = "") -> None:
+        """Clear modem STAT LED to OFF (level 0) and reset rolling signal history.
+
+        Called when there is no active bearer / interface is down so the UI
+        doesn't display stale signal bars from a previous connected session.
+        """
+        modem_name = f"MODEM{self.interface_number}"
+        try:
+            if self.signal_tracker:
+                self.signal_tracker.reset()
+
+            import vyos.hardware.api as hw_api
+            hw_api.modem_signal_level(level=0, modem=modem_name)
+
+            logger.info("[LED UPDATE] Signal cleared (OFF)",
+                       extra={'interface_number': self.interface_number,
+                              'level': 0,
+                              'modem_name': modem_name,
+                              'reason': reason or 'unspecified'})
+        except Exception as e:
+            logger.debug("Signal LED clear skipped (non-fatal): %s",
+                        e,
+                        extra={'interface_number': self.interface_number,
+                               'modem_name': modem_name,
+                               'reason': reason or 'unspecified'})
 
     def get_sim_status_summary(self):
         """Get quick SIM status summary"""
@@ -8468,8 +8956,8 @@ class ModemStateMachine:
     def _band_to_string(self, band_id) -> str:
         """Convert MM MMModemBand enum to human-readable string.
 
-        ModemManager band enums changed over time; this renderer accepts both
-        legacy and modern values and prefers canonical names.
+        ModemManager band enums have varied across releases; this renderer
+        accepts both numeric and canonical values and prefers canonical names.
         """
         if hasattr(band_id, 'value'):
             band_id = band_id.value
@@ -8586,8 +9074,17 @@ class ModemStateMachine:
         self.modem_path = None
         self.bearer_path = None
 
-        # Reset to scanning state
-        self.machine.current_state = ModemState.INITIAL.value
+        # Reset to initial state. ``FiniteMachine.current_state`` is a
+        # read-only property — assigning to it raises
+        # ``AttributeError: property 'current_state' of 'FiniteMachine'
+        # object has no setter``. The supported reset path is to call
+        # ``initialize()`` again, which re-seeds the machine to
+        # ``default_start_state`` (ModemState.INITIAL — see __init__).
+        try:
+            self.machine.initialize()
+        except Exception as e:
+            logger.warning(f"FSM machine re-initialize failed: {e}",
+                          extra={'interface_number': self.interface_number})
         await self.initialize()
 
     async def shutdown(self):
@@ -8881,8 +9378,8 @@ class ModemStateMachine:
                 logger.debug(f"Could not read Modem.State (continuing): {e}",
                             extra={'interface_number': self.interface_number})
 
-            # Step 2: power state LOW (2).  Telit/Quectel/Sierra all
-            # support this on QMI; if not, log and leave modem disabled.
+            # Step 2: power state LOW (2).  Most modern QMI modems
+            # support this; if not, log and leave the modem disabled.
             try:
                 await modem_iface.call_set_power_state(2)
                 logger.info("Modem RF disabled (PowerState=LOW) — airplane mode active",
@@ -10056,6 +10553,18 @@ class ModemStateMachine:
         if self.monitor_ip_changes and (not self._ip_monitoring_task or self._ip_monitoring_task.done()):
             self._ip_monitoring_task = self._safe_create_task(self._monitor_ip_changes())
 
+        # Start periodic signal-strength polling so the STAT LED tracks
+        # real-time conditions.  The MM Signal interface is set up to
+        # refresh every 5s by _enable_signal_monitoring(); we poll the
+        # cached values at the same cadence and feed them into the
+        # SignalStrengthTracker, which fires _update_signal_led() on
+        # level changes.
+        if not self._signal_poll_task or self._signal_poll_task.done():
+            self._signal_poll_task = self._safe_create_task(
+                self._monitor_signal_strength(),
+                name=f"signal-poll-wwan{self.interface_number}",
+            )
+
     async def _stop_network_interface_monitoring(self):
         """Stop network interface monitoring tasks when leaving CONNECTED state"""
         logger.info("Stopping network interface monitoring",
@@ -10073,6 +10582,11 @@ class ModemStateMachine:
         if self._ip_monitoring_task and not self._ip_monitoring_task.done():
             self._ip_monitoring_task.cancel()
             self._ip_monitoring_task = None
+
+        # Cancel signal-strength poll task
+        if self._signal_poll_task and not self._signal_poll_task.done():
+            self._signal_poll_task.cancel()
+            self._signal_poll_task = None
 
         # Remove IPv6 egress prefix filter (interface is going down)
         interface_name = f"wwan{self.interface_number}"
@@ -10587,6 +11101,9 @@ class ModemStateMachine:
         except Exception as e:
             logger.error(f"Error setting interface DOWN: {e}",
                         extra={'interface_number': self.interface_number})
+
+        # Clear LED when interface is down so stale signal strength is not shown.
+        await self._clear_signal_led(reason='interface_down')
 
         # Remove carrier DNS from VyOS hostsd so resolv.conf is not left with stale entries
         interface_name = f"wwan{self.interface_number}"
@@ -11837,11 +12354,11 @@ class ModemStateMachine:
     # ── radvd reload + LAN address deprecation on prefix change ────────
 
     async def _bridging_signal_radvd(self):
-        """Deprecated — no-op shim kept so older call sites do not crash.
+        """No-op compatibility shim.
 
-        Replaced by self._bridging_radvd.apply() which manages the FSM's
-        own radvd instance.  Left in place because external code paths
-        (e.g. status reporters) may still reference it.
+        Real radvd lifecycle is owned by ``self._bridging_radvd.apply()``;
+        this method exists so external introspection / status reporters
+        that look up the name on the FSM object do not raise.
         """
         return
 
@@ -12239,6 +12756,76 @@ class ModemStateMachine:
                     iface_name,
                     extra={'interface_number': self.interface_number})
 
+    async def _install_default_route(self, family, gateway, interface_name):
+        """Install the bearer default route for a point-to-point cellular link.
+
+        Both families apply the bearer address as a host route (/32 for IPv4,
+        /128 for IPv6), so there is never a connected subnet that makes the
+        carrier gateway on-link.  A plain ``via <gw>`` route therefore fails
+        with "No route to host"; ``onlink`` is the correct-by-construction
+        form for this PtP addressing, so we use it directly.  When the carrier
+        supplies no gateway we fall back to a device-scope default route
+        (valid because the link is point-to-point).
+
+        ``ip route replace`` is used for idempotency: it succeeds whether or
+        not a default route already exists, so reconfiguration on every IP
+        change is clean and produces no spurious warnings.
+
+        Args:
+            family: 4 or 6 (IP version).
+            gateway: carrier gateway address, or a falsy value if none.
+            interface_name: e.g. ``wwan0``.
+        """
+        base = ['ip', '-6'] if family == 6 else ['ip']
+        label = f"IPv{family}"
+
+        if gateway:
+            # onlink: nexthop is directly reachable on this PtP device even
+            # though the host-route addressing leaves no on-link subnet.
+            cmd = base + ['route', 'replace', 'default', 'via', gateway,
+                          'dev', interface_name, 'onlink']
+            success_msg = (f"{label} default route via {gateway} "
+                           f"dev {interface_name} (onlink)")
+        else:
+            cmd = base + ['route', 'replace', 'default', 'dev', interface_name]
+            success_msg = f"{label} default route via device {interface_name}"
+
+        result = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        _, stderr = await result.communicate()
+
+        if result.returncode == 0:
+            logger.info(success_msg,
+                       extra={'interface_number': self.interface_number})
+            return True
+
+        # gateway present but unreachable: last-resort device-scope route.
+        if gateway:
+            logger.warning(
+                f"{label} default route via {gateway} failed "
+                f"({stderr.decode().strip()}); falling back to device route",
+                extra={'interface_number': self.interface_number})
+            fallback = base + ['route', 'replace', 'default',
+                               'dev', interface_name]
+            result = await asyncio.create_subprocess_exec(
+                *fallback,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            _, stderr = await result.communicate()
+            if result.returncode == 0:
+                logger.info(f"{label} default route via device {interface_name} "
+                            f"(device-only fallback)",
+                           extra={'interface_number': self.interface_number})
+                return True
+
+        logger.error(f"All {label} route attempts failed: {stderr.decode().strip()}",
+                    extra={'interface_number': self.interface_number})
+        return False
+
     async def _apply_bearer_ip_configuration(self):
         """Apply bearer IP configuration to the interface (VyOS responsibility)"""
         try:
@@ -12303,20 +12890,24 @@ class ModemStateMachine:
             # Apply IPv4 configuration
             if bearer_ips.get('ipv4'):
                 ipv4_addr = bearer_ips['ipv4']
-                ipv4_prefix = bearer_ips.get('ipv4_prefix', '30')  # Default /30 for PtP
+                ipv4_prefix = bearer_ips.get('ipv4_prefix', '30')  # Carrier prefix (used for passthrough / logging)
                 ipv4_gateway = bearer_ips.get('ipv4_gateway')
                 ipv4_dns = bearer_ips.get('ipv4_dns', [])
                 ipv4_mtu = bearer_ips.get('ipv4_mtu')
 
-                logger.info(f"Applying IPv4 configuration: {ipv4_addr}/{ipv4_prefix}",
+                logger.info(f"Applying IPv4 configuration: {ipv4_addr}/32 (carrier prefix /{ipv4_prefix})",
                            extra={'interface_number': self.interface_number,
                                   'gateway': ipv4_gateway,
                                   'dns_servers': ipv4_dns,
                                   'mtu': ipv4_mtu})
 
-                # Add IPv4 address
+                # Add IPv4 address with /32 — point-to-point link to carrier.
+                # The carrier-reported prefix is often synthetic; a host route
+                # avoids installing a bogus connected subnet and mirrors the
+                # IPv6 /128 model.  The default route is installed as 'onlink'
+                # (see _install_default_route) so the gateway is still usable.
                 result = await asyncio.create_subprocess_exec(
-                    'ip', 'addr', 'add', f"{ipv4_addr}/{ipv4_prefix}", 'dev', interface_name,
+                    'ip', 'addr', 'add', f"{ipv4_addr}/32", 'dev', interface_name,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
                 )
@@ -12365,66 +12956,11 @@ class ModemStateMachine:
                                           'mtu_source': mtu_source,
                                           'network_mtu': ipv4_mtu or 'not provided'})
 
-                # Add IPv4 default route if gateway provided
-                if ipv4_gateway:
-                    result = await asyncio.create_subprocess_exec(
-                        'ip', 'route', 'add', 'default', 'via', ipv4_gateway, 'dev', interface_name,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE
-                    )
-                    stdout, stderr = await result.communicate()
-
-                    if result.returncode != 0 and b'exists' not in stderr:
-                        logger.warning(f"IPv4 default route via {ipv4_gateway} failed: {stderr.decode().strip()}",
-                                      extra={'interface_number': self.interface_number})
-                        # Retry with 'onlink' flag - tells kernel gateway is directly reachable
-                        # This is standard for cellular PtP links where nexthop validation fails
-                        logger.info("Retrying IPv4 route with onlink flag",
-                                   extra={'interface_number': self.interface_number})
-                        result = await asyncio.create_subprocess_exec(
-                            'ip', 'route', 'add', 'default', 'via', ipv4_gateway, 'dev', interface_name, 'onlink',
-                            stdout=asyncio.subprocess.PIPE,
-                            stderr=asyncio.subprocess.PIPE
-                        )
-                        stdout, stderr = await result.communicate()
-                        if result.returncode == 0 or b'exists' in stderr:
-                            logger.info(f"IPv4 default route added via {ipv4_gateway} dev {interface_name} (onlink)",
-                                       extra={'interface_number': self.interface_number})
-                        else:
-                            logger.warning(f"IPv4 onlink route also failed: {stderr.decode().strip()}",
-                                          extra={'interface_number': self.interface_number})
-                            # Final fallback: device-only default route
-                            result = await asyncio.create_subprocess_exec(
-                                'ip', 'route', 'add', 'default', 'dev', interface_name,
-                                stdout=asyncio.subprocess.PIPE,
-                                stderr=asyncio.subprocess.PIPE
-                            )
-                            stdout, stderr = await result.communicate()
-                            if result.returncode == 0 or b'exists' in stderr:
-                                logger.info(f"IPv4 default route added via device {interface_name} (device-only fallback)",
-                                           extra={'interface_number': self.interface_number})
-                            else:
-                                logger.error(f"All IPv4 route attempts failed: {stderr.decode().strip()}",
-                                            extra={'interface_number': self.interface_number})
-                    else:
-                        logger.info(f"IPv4 default route added via {ipv4_gateway} dev {interface_name}",
-                                   extra={'interface_number': self.interface_number})
-                else:
-                    # No gateway from carrier - add device-only default route
+                # Add IPv4 default route (onlink via gateway, or device route).
+                if not ipv4_gateway:
                     logger.info("No IPv4 gateway from carrier, adding device route",
                                extra={'interface_number': self.interface_number})
-                    result = await asyncio.create_subprocess_exec(
-                        'ip', 'route', 'add', 'default', 'dev', interface_name,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE
-                    )
-                    stdout, stderr = await result.communicate()
-                    if result.returncode == 0 or b'exists' in stderr:
-                        logger.info(f"IPv4 default route added via device {interface_name}",
-                                   extra={'interface_number': self.interface_number})
-                    else:
-                        logger.warning(f"IPv4 device route failed: {stderr.decode().strip()}",
-                                      extra={'interface_number': self.interface_number})
+                await self._install_default_route(4, ipv4_gateway, interface_name)
 
             # ── IPv4 source enforcement: unblock egress now that new IP + route are live ──
             if ipv4_changed:
@@ -12466,65 +13002,11 @@ class ModemStateMachine:
                     logger.warning(f"Failed to add IPv6 address: {stderr.decode()}",
                                  extra={'interface_number': self.interface_number})
 
-                # Add IPv6 default route if gateway provided
-                if ipv6_gateway:
-                    result = await asyncio.create_subprocess_exec(
-                        'ip', '-6', 'route', 'add', 'default', 'via', ipv6_gateway, 'dev', interface_name,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE
-                    )
-                    stdout, stderr = await result.communicate()
-
-                    if result.returncode != 0 and b'exists' not in stderr:
-                        logger.warning(f"IPv6 default route via {ipv6_gateway} failed: {stderr.decode().strip()}",
-                                      extra={'interface_number': self.interface_number})
-                        # Retry with 'onlink' flag
-                        logger.info("Retrying IPv6 route with onlink flag",
-                                   extra={'interface_number': self.interface_number})
-                        result = await asyncio.create_subprocess_exec(
-                            'ip', '-6', 'route', 'add', 'default', 'via', ipv6_gateway, 'dev', interface_name, 'onlink',
-                            stdout=asyncio.subprocess.PIPE,
-                            stderr=asyncio.subprocess.PIPE
-                        )
-                        stdout, stderr = await result.communicate()
-                        if result.returncode == 0 or b'exists' in stderr:
-                            logger.info(f"IPv6 default route added via {ipv6_gateway} dev {interface_name} (onlink)",
-                                       extra={'interface_number': self.interface_number})
-                        else:
-                            logger.warning(f"IPv6 onlink route also failed: {stderr.decode().strip()}",
-                                          extra={'interface_number': self.interface_number})
-                            # Final fallback: device-only default route
-                            result = await asyncio.create_subprocess_exec(
-                                'ip', '-6', 'route', 'add', 'default', 'dev', interface_name,
-                                stdout=asyncio.subprocess.PIPE,
-                                stderr=asyncio.subprocess.PIPE
-                            )
-                            stdout, stderr = await result.communicate()
-                            if result.returncode == 0 or b'exists' in stderr:
-                                logger.info(f"IPv6 default route added via device {interface_name} (device-only fallback)",
-                                           extra={'interface_number': self.interface_number})
-                            else:
-                                logger.error(f"All IPv6 route attempts failed: {stderr.decode().strip()}",
-                                            extra={'interface_number': self.interface_number})
-                    else:
-                        logger.info(f"IPv6 default route added via {ipv6_gateway} dev {interface_name}",
-                                   extra={'interface_number': self.interface_number})
-                else:
-                    # No gateway from carrier - add device-only default route
+                # Add IPv6 default route (onlink via gateway, or device route).
+                if not ipv6_gateway:
                     logger.info("No IPv6 gateway from carrier, adding device route",
                                extra={'interface_number': self.interface_number})
-                    result = await asyncio.create_subprocess_exec(
-                        'ip', '-6', 'route', 'add', 'default', 'dev', interface_name,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE
-                    )
-                    stdout, stderr = await result.communicate()
-                    if result.returncode == 0 or b'exists' in stderr:
-                        logger.info(f"IPv6 default route added via device {interface_name}",
-                                   extra={'interface_number': self.interface_number})
-                    else:
-                        logger.warning(f"IPv6 device route failed: {stderr.decode().strip()}",
-                                      extra={'interface_number': self.interface_number})
+                await self._install_default_route(6, ipv6_gateway, interface_name)
 
             # ── IPv6 source enforcement: persistent egress prefix whitelist ──
             if new_ipv6:

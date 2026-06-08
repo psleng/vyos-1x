@@ -1,3 +1,18 @@
+# Copyright (C) 2024-2026 Perle Systems Limited
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License version 2 or later as
+# published by the Free Software Foundation.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
 """
 WWAN Connection Management Module
 
@@ -37,8 +52,17 @@ class ConnectionManager:
         """Set the D-Bus proxy for modem operations"""
         self.proxy = proxy
 
-    async def try_apn_candidates(self, candidates: List[Dict[str, Any]], sim_config: Dict[str, Any], sim_info: Dict[str, Any]) -> bool:
-        """Try APN candidates in priority order"""
+    async def try_apn_candidates(self, candidates: List[Dict[str, Any]], sim_config: Dict[str, Any], sim_info: Dict[str, Any]) -> tuple[bool, str]:
+        """Try APN candidates in priority order.
+
+        Returns:
+            (success: bool, reason: str) — reason is 'success', 'all_apn_failed',
+            'restart_required' (non-APN modem failure), or 'connection_failed'.
+
+        Note: The state machine drives APN iteration via its own canonical loop
+        (_try_apn_candidates).  This method is retained for external / test callers
+        that still invoke ConnectionManager directly.
+        """
         self.logger.info("Trying APN candidates in priority order",
                        extra={'interface_number': self.interface_number,
                               'candidate_count': len(candidates)})
@@ -67,14 +91,21 @@ class ConnectionManager:
                                           'successful_apn': candidate['name'],
                                           'attempt_number': i+1,
                                           'total_attempts': len(candidates)})
+                    return (True, 'success')
 
-                    return True
+                # Non-APN modem/network failure: stop immediately and ask caller
+                # to restart the connection workflow rather than burning remaining APNs.
+                if reason == 'connection_failed':
+                    self.logger.warning("Non-APN failure while testing candidate; aborting cascade",
+                                       extra={'interface_number': self.interface_number,
+                                              'failed_apn': candidate['name'],
+                                              'failure_reason': reason})
+                    return (False, 'restart_required')
 
-                else:
-                    self.logger.info(f"APN candidate {i+1} failed, trying next",
-                                   extra={'interface_number': self.interface_number,
-                                          'failed_apn': candidate['name'],
-                                          'remaining_candidates': len(candidates) - i - 1})
+                self.logger.info(f"APN candidate {i+1} failed ({reason}), trying next",
+                               extra={'interface_number': self.interface_number,
+                                      'failed_apn': candidate['name'],
+                                      'remaining_candidates': len(candidates) - i - 1})
 
             except Exception as e:
                 self.logger.warning(f"Error trying APN candidate: {e}",
@@ -82,11 +113,11 @@ class ConnectionManager:
                                          'apn_name': candidate['name']})
                 continue
 
-        # All candidates failed
+        # All candidates exhausted without a terminal modem failure.
         self.logger.warning("All APN candidates failed",
                           extra={'interface_number': self.interface_number,
                                  'total_candidates_tried': len(candidates)})
-        return False
+        return (False, 'all_apn_failed')
 
     async def try_connection_with_apn(self, apn_config: Dict[str, Any], sim_config: Dict[str, Any]) -> tuple[bool, str]:
         """Try to establish connection with specific APN configuration.
@@ -247,7 +278,7 @@ class ConnectionManager:
         return 'connection_failed'
 
     def _normalize_apn_config(self, apn_config: Dict[str, Any]) -> Dict[str, Any]:
-        """Normalize APN config and flatten legacy/nested config structures."""
+        """Normalize APN config and flatten nested config structures."""
         if not isinstance(apn_config, dict):
             return {
                 'name': str(apn_config or ''),
