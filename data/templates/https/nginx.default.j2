@@ -73,7 +73,7 @@ server {
 {% endif %}
     }
 
-    location /saml/ {
+    location /sso/saml/v2/ {
         proxy_pass http://unix:/run/saml-sp/saml.sock;
         proxy_http_version 1.1;
         proxy_buffering off;
