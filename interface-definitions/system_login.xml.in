@@ -336,6 +336,22 @@
                   <constraintErrorMessage>Invalid SAML entity ID. Must be a valid HTTP or HTTPS URI matching the SAML provider configuration.</constraintErrorMessage>
                 </properties>
               </leafNode>
+              <leafNode name="interface">
+                <properties>
+                  <help>Interface used for SAML service-provider endpoints</help>
+                  <completionHelp>
+                    <script>${vyos_completion_dir}/list_interfaces</script>
+                  </completionHelp>
+                  <valueHelp>
+                    <format>txt</format>
+                    <description>Interface name (e.g. eth0, wwan0)</description>
+                  </valueHelp>
+                  <constraint>
+                    #include <include/constraint/interface-name.xml.i>
+                  </constraint>
+                  <constraintErrorMessage>Invalid interface name</constraintErrorMessage>
+                </properties>
+              </leafNode>
               <node name="jit">
                 <properties>
                   <help>SAML JIT (Just-In-Time) provisioning configuration</help>

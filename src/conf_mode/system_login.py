@@ -187,13 +187,13 @@ def verify(login):
     # Verify root SAML block: if defined, provider/metadata-url/entity-id must
     # all be present together (jit is optional).
     if 'saml' in login:
-        saml_required = ('provider', 'metadata_url', 'entity_id')
+        saml_required = ('provider', 'metadata_url', 'entity_id', 'interface')
         missing = [k for k in saml_required if k not in login['saml']]
         if missing:
             pretty = ', '.join(m.replace('_', '-') for m in missing)
             raise ConfigError(
-                f'system login saml: provider, metadata-url and entity-id '
-                f'must all be defined together (missing: {pretty})'
+                f'system login saml: provider, metadata-url, entity-id and '
+                f'interface must all be defined together (missing: {pretty})'
             )
 
         # Verify JIT role mappings have at least one attribute with values
@@ -223,6 +223,20 @@ def verify(login):
             for u, c in login['user'].items()
             if dict_search('authentication.saml', c)
         }
+        # A SAML email maps a single identity to a single local user. Reject
+        # configurations where the same SAML email is assigned to more than one
+        # user, as the mapping would be ambiguous. Emails are case-insensitive.
+        seen_emails = {}
+        for user in sorted(saml_users):
+            email = dict_search('authentication.saml', saml_users[user])
+            key = email.lower()
+            if key in seen_emails:
+                raise ConfigError(
+                    f'system login: SAML identifier "{email}" is assigned to '
+                    f'multiple users ("{seen_emails[key]}" and "{user}"); each '
+                    f'SAML identifier must be unique'
+                )
+            seen_emails[key] = user
         # If users use SAML emails but the global SAML block is not defined,
         # warn the operator that those accounts will not be accessible.
         if saml_users and 'saml' not in login:
@@ -597,6 +611,7 @@ def generate(login):
             'provider': login['saml']['provider'],
             'metadata-url': login['saml']['metadata_url'],
             'entity-id': login['saml']['entity_id'],
+            'interface': login['saml']['interface'],
         }
         if 'jit' in login['saml']:
             jit_conf = {}
