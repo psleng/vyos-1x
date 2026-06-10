@@ -23,40 +23,47 @@
     </node>
     <node name="nfs">
       <properties>
-        <help>Enable nfs port buffering</help>
+        <help>Enable NFS port buffering</help>
       </properties>
       <children>
-        <leafNode name="hostname">
+        <node name="server">
           <properties>
-            <help>NFS host name</help>
-            <valueHelp>
-              <format>ipv4</format>
-              <description>IP address of NFS host</description>
-            </valueHelp>
-            <valueHelp>
-              <format>ipv6</format>
-              <description>IPv6 address of NFS host</description>
-            </valueHelp>
-            <valueHelp>
-              <format>hostname</format>
-              <description>Fully qualified host name of NFS host</description>
-            </valueHelp>
-            <constraint>
-              <validator name="ip-address"/>
-              <validator name="fqdn"/>
-            </constraint>
+            <help>NFS server</help>
           </properties>
-        </leafNode>
-        <leafNode name="directory">
-          <properties>
-            <help>Path to file</help>
-            <constraint>
-              <regex>.{0,40}</regex>
-            </constraint>
-            <constraintErrorMessage>Path string too long (limit 40 characters)</constraintErrorMessage>
-          </properties>
-          <defaultValue>/device_server/portlogs</defaultValue>
-        </leafNode>
+          <children>
+            <leafNode name="address">
+              <properties>
+                <help>NFS server address</help>
+                <valueHelp>
+                  <format>ipv4</format>
+                  <description>IP address of NFS server</description>
+                </valueHelp>
+                <valueHelp>
+                  <format>ipv6</format>
+                  <description>IPv6 address of NFS server</description>
+                </valueHelp>
+                <valueHelp>
+                  <format>hostname</format>
+                  <description>Fully qualified host name of NFS server</description>
+                </valueHelp>
+                <constraint>
+                  <validator name="ip-address"/>
+                  <validator name="fqdn"/>
+                </constraint>
+              </properties>
+            </leafNode>
+            <leafNode name="directory">
+              <properties>
+                <help>Path to NFS server directory</help>
+                <constraint>
+                  <regex>.{0,40}</regex>
+                </constraint>
+                <constraintErrorMessage>Path string too long (limit 40 characters)</constraintErrorMessage>
+              </properties>
+              <defaultValue>/device_server/portlogs</defaultValue>
+            </leafNode>
+          </children>
+        </node>
       </children>
     </node>
     <node name="syslog">
@@ -78,7 +85,7 @@
         </leafNode>
       </children>
     </node>
-    <leafNode name="add-timestamp">
+    <leafNode name="timestamp">
       <properties>
         <help>Enable add timestamp to buffering log</help>
         <valueless/>
