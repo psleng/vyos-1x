@@ -1,7 +1,7 @@
 <!-- include start from serial/service/utils/idle-timeout.xml.i -->
 <leafNode name="idle-timeout">
   <properties>
-    <help>Close a connection because of inactivity when the Idle Timeout expires (in s)</help>
+    <help>Close a connection because of inactivity when the idle timeout expires (in s)</help>
     <valueHelp>
       <format>u32:0-4294967</format>
       <description>Decimal integer (0 - 4294967)</description>

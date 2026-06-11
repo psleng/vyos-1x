@@ -43,7 +43,7 @@
       <children>
         <leafNode name="forwarding-rule">
           <properties>
-            <help>Forwarding Rule</help>
+            <help>Forwarding rule</help>
             <completionHelp>
               <list>strip trigger trigger+1 trigger+2</list>
             </completionHelp>

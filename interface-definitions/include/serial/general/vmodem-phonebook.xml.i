@@ -39,7 +39,7 @@
         </leafNode>
         <leafNode name="port">
           <properties>
-            <help>Mapped tcp port</help>
+            <help>Mapped TCP port</help>
             <valueHelp>
               <format>u32:1-65535</format>
               <description>Port number</description>

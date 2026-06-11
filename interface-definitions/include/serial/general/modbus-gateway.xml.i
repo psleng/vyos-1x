@@ -6,7 +6,7 @@
   <children>
     <leafNode name="allow-broadcast">
       <properties>
-        <help>Enable Serial Modbus Broadcasts</help>
+        <help>Enable serial Modbus broadcasts</help>
         <valueless/>
       </properties>
     </leafNode>
@@ -25,7 +25,7 @@
     </leafNode>
     <leafNode name="disable-exceptions">
       <properties>
-        <help>Disable Modbus Exceptions</help>
+        <help>Disable Modbus exceptions</help>
         <valueless/>
       </properties>
     </leafNode>
@@ -70,7 +70,7 @@
     </leafNode>
     <leafNode name="port">
       <properties>
-        <help>Network port number that the Slave Gateway will listen on for both TCP and UDP messages </help>
+        <help>Network port number that the slave gateway will listen on for both TCP and UDP messages</help>
         <valueHelp>
           <format>u32:1-65535</format>
           <description>Port number</description>
