@@ -17,9 +17,9 @@
       </properties>
       <defaultValue>180</defaultValue>
     </leafNode>
-    <leafNode name="retries">
+    <leafNode name="retry">
       <properties>
-        <help>Monitor connection number of retries</help>
+        <help>Monitor connection number of retry</help>
         <valueHelp>
           <format>u32:1-32767</format>
           <description>Decimal integer (1-32767)</description>
