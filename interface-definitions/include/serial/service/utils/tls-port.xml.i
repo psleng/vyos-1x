@@ -1,11 +1,21 @@
 <!-- include start from serial/service/utils/tls-port.xml.i -->
 <node name="tls">
   <properties>
-    <help>TLS setting</help>
+    <help>Enable TLS for TCP connections</help>
   </properties>
   <children>
-    #include <include/serial/service/utils/tls-common.xml.i>
-    #include <include/serial/service/utils/tls-use-global.xml.i>
+    <leafNode name="template">
+      <properties>
+        <help>TLS template name</help>
+        <valueHelp>
+          <format>txt</format>
+          <description>Name of TLS template defined in global-parameters</description>
+        </valueHelp>
+        <completionHelp>
+          <path>serial global tls template</path>
+        </completionHelp>
+      </properties>
+    </leafNode>
   </children>
 </node>
 <!-- include end -->
