@@ -614,6 +614,8 @@ def generate(login):
         }
         if 'acs_hostname' in login['saml']:
             saml_conf['acs-hostname'] = login['saml']['acs_hostname']
+        if 'serial_address' in login['saml']:
+            saml_conf['serial-address'] = login['saml']['serial_address']
         if 'jit' in login['saml']:
             jit_conf = {}
             for role in ('admin', 'operator'):

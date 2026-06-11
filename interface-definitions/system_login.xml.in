@@ -358,6 +358,28 @@
                   <constraintErrorMessage>Must be a valid IPv4/IPv6 address or hostname (no scheme or path)</constraintErrorMessage>
                 </properties>
               </leafNode>
+              <leafNode name="serial-address">
+                <properties>
+                  <help>Address used to construct the SAML login URL for serial console logins</help>
+                  <valueHelp>
+                    <format>ipv4</format>
+                    <description>IPv4 address (e.g. 192.0.2.1)</description>
+                  </valueHelp>
+                  <valueHelp>
+                    <format>ipv6</format>
+                    <description>IPv6 address</description>
+                  </valueHelp>
+                  <valueHelp>
+                    <format>hostname</format>
+                    <description>Hostname or FQDN (e.g. router.local)</description>
+                  </valueHelp>
+                  <constraint>
+                    <validator name="ip-address"/>
+                    <validator name="fqdn"/>
+                  </constraint>
+                  <constraintErrorMessage>Must be a valid IPv4/IPv6 address or hostname (no scheme or path)</constraintErrorMessage>
+                </properties>
+              </leafNode>
               <node name="jit">
                 <properties>
                   <help>SAML JIT (Just-In-Time) provisioning configuration</help>
