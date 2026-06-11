@@ -6,7 +6,7 @@
   <children>
     <leafNode name="interval">
       <properties>
-        <help>Monitor connection interval (in s)</help>
+        <help>Specify how often, in seconds, the device will send a TCP keep-alive to services that support TCP keep-alive</help>
         <valueHelp>
           <format>u32:1-32767</format>
           <description>Decimal integer (1-32767)</description>
@@ -19,7 +19,7 @@
     </leafNode>
     <leafNode name="retry">
       <properties>
-        <help>Monitor connection number of retry</help>
+        <help>The number of TCP keepalive retries before the connection is closed</help>
         <valueHelp>
           <format>u32:1-32767</format>
           <description>Decimal integer (1-32767)</description>
@@ -32,7 +32,7 @@
     </leafNode>
     <leafNode name="retry-timeout">
       <properties>
-        <help>Monitor connection retry timeout (in s)</help>
+        <help>Sets the maximum time, in seconds, to wait for a response after sending a TCP keep-alive message</help>
         <valueHelp>
           <format>u32:1-32767</format>
           <description>Decimal integer (1-32767)</description>

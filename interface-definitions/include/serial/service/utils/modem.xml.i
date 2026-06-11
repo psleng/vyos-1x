@@ -22,7 +22,7 @@
       <children>
         <leafNode name="phone-number">
           <properties>
-            <help>Phone number</help>
+            <help>The phone number to use when dial out is enabled</help>
             <constraint>
               <regex>.{0,31}</regex>
             </constraint>
@@ -44,7 +44,7 @@
         </leafNode>
         <leafNode name="timeout">
           <properties>
-            <help>The number of seconds the device will wait to establish a connection to a remote modem (in s)</help>
+            <help>The number of seconds the device will wait to establish a connection to a remote modem</help>
             <valueHelp>
               <format>u32:1-99</format>
               <description>Decimal integer (1-99)</description>
@@ -53,7 +53,7 @@
               <validator name="numeric" argument="--range 1-99"/>
             </constraint>
           </properties>
-          <defaultValue>5</defaultValue>
+          <defaultValue>45</defaultValue>
         </leafNode>
       </children>
     </node>
