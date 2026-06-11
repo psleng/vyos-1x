@@ -1,17 +1,18 @@
-<!-- include start from serial/general/port-buffering.xml.i -->
-<node name="port-buffering">
+<!-- Used to be port-buffering -->
+<!-- include start from serial/general/ssh-telnet-server-logging.xml.i -->
+<node name="ssh-telnet-server-logging">
   <properties>
-    <help>Port buffering setting</help>
+    <help>SSH and Telnet server logging settings</help>
   </properties>
   <children>
     <node name="local">
       <properties>
-        <help>Enable local port buffering</help>
+        <help>Enable local logging</help>
       </properties>
       <children>
         <leafNode name="view-string">
           <properties>
-            <help>Local port buffering escape view string</help>
+            <help>Local logging escape view string</help>
             <constraint>
               <regex>.{0,8}</regex>
             </constraint>
@@ -23,7 +24,7 @@
     </node>
     <node name="nfs">
       <properties>
-        <help>Enable NFS port buffering</help>
+        <help>Enable NFS logging</help>
       </properties>
       <children>
         <node name="server">
@@ -85,15 +86,15 @@
         </leafNode>
       </children>
     </node>
-    <leafNode name="timestamp">
+    <leafNode name="timestamping">
       <properties>
-        <help>Enable add timestamp to buffering log</help>
+        <help>Enable adding timestamp to log</help>
         <valueless/>
       </properties>
     </leafNode>
-    <leafNode name="keystroke-buffering">
+    <leafNode name="keystroke-logging">
       <properties>
-        <help>Enable log transfer data, default is to log receive data only</help>
+        <help>Enable logging transfer data, default is to log receive data only</help>
         <valueless/>
       </properties>
     </leafNode>
