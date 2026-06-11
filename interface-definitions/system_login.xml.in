@@ -336,20 +336,26 @@
                   <constraintErrorMessage>Invalid SAML entity ID. Must be a valid HTTP or HTTPS URI matching the SAML provider configuration.</constraintErrorMessage>
                 </properties>
               </leafNode>
-              <leafNode name="interface">
+              <leafNode name="acs-hostname">
                 <properties>
-                  <help>Interface used for SAML service-provider endpoints</help>
-                  <completionHelp>
-                    <script>${vyos_completion_dir}/list_interfaces</script>
-                  </completionHelp>
+                  <help>Hostname or IP used to construct the SAML ACS URL</help>
                   <valueHelp>
-                    <format>txt</format>
-                    <description>Interface name (e.g. eth0, wwan0)</description>
+                    <format>ipv4</format>
+                    <description>IPv4 address (e.g. 192.0.2.1)</description>
+                  </valueHelp>
+                  <valueHelp>
+                    <format>ipv6</format>
+                    <description>IPv6 address</description>
+                  </valueHelp>
+                  <valueHelp>
+                    <format>hostname</format>
+                    <description>Hostname or FQDN (e.g. router.local)</description>
                   </valueHelp>
                   <constraint>
-                    #include <include/constraint/interface-name.xml.i>
+                    <validator name="ip-address"/>
+                    <validator name="fqdn"/>
                   </constraint>
-                  <constraintErrorMessage>Invalid interface name</constraintErrorMessage>
+                  <constraintErrorMessage>Must be a valid IPv4/IPv6 address or hostname (no scheme or path)</constraintErrorMessage>
                 </properties>
               </leafNode>
               <node name="jit">

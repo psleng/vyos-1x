@@ -187,13 +187,13 @@ def verify(login):
     # Verify root SAML block: if defined, provider/metadata-url/entity-id must
     # all be present together (jit is optional).
     if 'saml' in login:
-        saml_required = ('provider', 'metadata_url', 'entity_id', 'interface')
+        saml_required = ('provider', 'metadata_url', 'entity_id')
         missing = [k for k in saml_required if k not in login['saml']]
         if missing:
             pretty = ', '.join(m.replace('_', '-') for m in missing)
             raise ConfigError(
-                f'system login saml: provider, metadata-url, entity-id and '
-                f'interface must all be defined together (missing: {pretty})'
+                f'system login saml: provider, metadata-url and entity-id '
+                f'must all be defined together (missing: {pretty})'
             )
 
         # Verify JIT role mappings have at least one attribute with values
@@ -611,8 +611,9 @@ def generate(login):
             'provider': login['saml']['provider'],
             'metadata-url': login['saml']['metadata_url'],
             'entity-id': login['saml']['entity_id'],
-            'interface': login['saml']['interface'],
         }
+        if 'acs_hostname' in login['saml']:
+            saml_conf['acs-hostname'] = login['saml']['acs_hostname']
         if 'jit' in login['saml']:
             jit_conf = {}
             for role in ('admin', 'operator'):
