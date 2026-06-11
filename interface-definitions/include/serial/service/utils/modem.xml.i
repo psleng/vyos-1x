@@ -15,6 +15,15 @@
         </constraint>
       </properties>
     </leafNode>
+    <leafNode name="initialization-string">
+      <properties>
+        <help>A series of commands sent to the modem by a communications program at start up</help>
+        <constraint>
+          <regex>.{0,61}</regex>
+        </constraint>
+        <constraintErrorMessage>Initialization string too long (limit 61 characters)</constraintErrorMessage>
+      </properties>
+    </leafNode>
     <node name="dial">
       <properties>
         <help>Dial setting</help>
