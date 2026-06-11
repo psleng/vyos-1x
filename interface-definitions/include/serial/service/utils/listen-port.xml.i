@@ -1,7 +1,7 @@
 <!-- include start from serial/service/utils/listen-port.xml.i -->
-<leafNode name="listen-port">
+<leafNode name="port">
   <properties>
-    <help>Start listening on port</help>
+    <help>TCP port to listen for incoming connections</help>
     <valueHelp>
       <format>u32:1-65535</format>
       <description>Port number</description>
