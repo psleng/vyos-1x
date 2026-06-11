@@ -1,5 +1,5 @@
 <!-- include start from serial/general/trueport-remap.xml.i -->
-<node name="trueport-remap">
+<node name="trueport">
   <properties>
     <help>Trueport baud rate remapping setting</help>
   </properties>
