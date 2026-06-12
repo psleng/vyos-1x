@@ -18,7 +18,7 @@
     </leafNode>
     <leafNode name="address">
       <properties>
-        <help>Remote address used for connection</help>
+        <help>Remote address</help>
         <valueHelp>
           <format>ipv4</format>
           <description>IP address of remote host</description>
