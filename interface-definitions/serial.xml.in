@@ -11,12 +11,22 @@
           <help>Global setting for serial ports</help>
         </properties>
         <children>
-          <leafNode name="process-break">
+          <node name="process-break">
             <properties>
-              <help>Enable process Break Signals</help>
-              <valueless/>
+              <help>Enable process Break signals</help>
             </properties>
-          </leafNode>
+            <children>
+              <leafNode name="ssh-string">
+                <properties>
+                  <help>The break string used for inband SSH break signal processing</help>
+                  <constraint>
+                    <regex>.{0,8}</regex>
+                  </constraint>
+                  <constraintErrorMessage>Break string too long (limit 8 characters)</constraintErrorMessage>
+                </properties>
+              </leafNode>
+            </children>
+          </node>
           <leafNode name="flush-on-close">
             <properties>
               <help>Enable flush on Close</help>
