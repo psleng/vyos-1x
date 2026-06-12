@@ -1,4 +1,4 @@
-<!-- include start from serial/service/utils/sess-string-init.xml.i -->
+<!-- include start from serial/service/utils/transmit-string-start.xml.i -->
 <node name="transmit-string">
   <properties>
     <help>Transmit string settings</help>
