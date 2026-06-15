@@ -1,63 +1,45 @@
 <!-- include start from serial/service/trueport.xml.i -->
 <node name="trueport">
   <properties>
-    <help>Trueport profile</help>
+    <help>Trueport service settings</help>
   </properties>
   <children>
+    #include <include/serial/service/utils/serial-buffering.xml.i>
+    #include <include/serial/service/utils/idle-timeout.xml.i>
+    #include <include/serial/service/utils/keepalive.xml.i>
+    #include <include/serial/service/utils/session-timeout.xml.i>
+    #include <include/serial/service/utils/tls-port.xml.i>
+    #include <include/serial/service/utils/transmit-string-all.xml.i>
     <leafNode name="signal-active">
       <properties>
         <help>Enable raise signals when not under trueport client control</help>
         <valueless/>
       </properties>
     </leafNode>
-    <leafNode name="allow-multiple-connection">
+    <node name="client">
       <properties>
-        <help>Allow multiple connections [client init only] [trueport lite only]</help>
-        <valueless/>
-      </properties>
-    </leafNode>
-    <leafNode name="main-hostport">
-      <properties>
-        <help>Connect to main host port [server init only]</help>
-        <valueHelp>
-          <format>u32:1-65535</format>
-          <description>Port number</description>
-        </valueHelp>
-        <constraint>
-          <validator name="numeric" argument="--range 1-65535"/>
-        </constraint>
-      </properties>
-    </leafNode>
-    <leafNode name="main-hostname">
-      <properties>
-        <help>Connect to main host [server init only]</help>
-        <valueHelp>
-          <format>ipv4</format>
-          <description>IP address of main host</description>
-        </valueHelp>
-        <valueHelp>
-          <format>ipv6</format>
-          <description>IPv6 address of main host</description>
-        </valueHelp>
-        <valueHelp>
-          <format>hostname</format>
-          <description>Fully qualified host name of main host</description>
-        </valueHelp>
-        <constraint>
-          <validator name="ip-address"/>
-          <validator name="fqdn"/>
-        </constraint>
-      </properties>
-    </leafNode>
-    <node name="multihost">
-      <properties>
-        <help>Connect to multiple hosts [server init only] [trueport lite only]</help>
+          <help>TCP client settings</help>
       </properties>
       <children>
+        #include <include/serial/service/utils/initiate.xml.i>
         #include <include/serial/service/utils/multihost.xml.i>
+        #include <include/serial/service/utils/send-description.xml.i>
       </children>
     </node>
-
+    <node name="server">
+       <properties>
+          <help>TCP server settings</help>
+      </properties>
+      <children>
+        #include <include/serial/service/utils/listen-port.xml.i>
+        <leafNode name="allow-multiple-connections">
+          <properties>
+            <help>Enable allow multiple connections [trueport lite only]</help>
+            <valueless/>
+          </properties>
+        </leafNode>
+      </children>
+    </node>
   </children>
 </node>
 <!-- include end -->
