@@ -6,7 +6,7 @@
       <priority>1280</priority> <!-- after service ssh which has <priority>1000</priority> -->
     </properties>
     <children>
-      <node name="global">
+      <node name="global-parameters">
         <properties>
           <help>Global setting for serial ports</help>
         </properties>
