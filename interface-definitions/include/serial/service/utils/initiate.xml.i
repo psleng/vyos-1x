@@ -1,4 +1,4 @@
-<!-- include start from serial/service/utils/aliasing-address.xml.i -->
+<!-- include start from serial/service/utils/initiate.xml.i -->
 <node name="initiate">
   <properties>
     <help>Initiate connection settings</help>
