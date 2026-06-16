@@ -29,8 +29,9 @@ from vyos.base import DeprecationWarning
 from vyos.config import Config
 from vyos.configdep import set_dependents
 from vyos.configdep import call_dependents
-from vyos.configverify import verify_vrf
+from vyos.configverify import verify_pki_certificate, verify_vrf
 from vyos.defaults import SSH_DSA_DEPRECATION_WARNING
+from vyos.pki import wrap_certificate, wrap_private_key
 from vyos.template import render
 from vyos.template import is_ipv4
 from vyos.utils.auth import DEFAULT_PASSWORD
@@ -45,7 +46,7 @@ from vyos.utils.auth import SYSTEM_USER_SKIP_LIST
 from vyos.utils.configfs import delete_cli_node
 from vyos.utils.configfs import add_cli_node
 from vyos.utils.dict import dict_search
-from vyos.utils.file import move_recursive
+from vyos.utils.file import move_recursive, write_file
 from vyos.utils.network import is_addr_assigned
 from vyos.utils.permission import chown
 from vyos.utils.process import cmd
@@ -68,6 +69,8 @@ login_motd_dsa_warning = r'/run/motd.d/92-vyos-user-dsa-deprecation-warning'
 saml_sp_dir = '/etc/saml-sp'
 saml_config_file = f'{saml_sp_dir}/saml.conf'
 saml_user_map_file = f'{saml_sp_dir}/saml-user.map'
+saml_cert_dir = f'{saml_sp_dir}/certs'
+
 
 # Default value of the encrypted-password leafNode (no password set).
 SAML_ALLOWED_ENCRYPTED_PASSWORD = '!'
@@ -97,6 +100,16 @@ def get_shadow_password(username):
     return None
 
 
+def cleanup_saml_certs():
+    """Remove any SAML service-provider PEM certificate/key material on disk"""
+    if not os.path.isdir(saml_cert_dir):
+        return
+    for filename in os.listdir(saml_cert_dir):
+        full_path = os.path.join(saml_cert_dir, filename)
+        if os.path.isfile(full_path):
+            os.unlink(full_path)
+
+
 def get_config(config=None):
     if config:
         conf = config
@@ -109,6 +122,7 @@ def get_config(config=None):
         no_tag_node_value_mangle=True,
         get_first_key=True,
         with_recursive_defaults=True,
+        with_pki=True,
     )
 
     D = get_config_diff(conf)
@@ -195,6 +209,8 @@ def verify(login):
                 f'system login saml: provider, metadata-url and entity-id '
                 f'must all be defined together (missing: {pretty})'
             )
+        if 'certificate' in login['saml']:
+            verify_pki_certificate(login, login['saml']['certificate'])
 
         # Verify JIT role mappings have at least one attribute with values
         if 'jit' in login['saml']:
@@ -612,6 +628,28 @@ def generate(login):
             'metadata-url': login['saml']['metadata_url'],
             'entity-id': login['saml']['entity_id'],
         }
+        if 'certificate' in login['saml']:
+            cert_name = login['saml']['certificate']
+
+            pki_cert = login['pki']['certificate'][cert_name]
+            cert = wrap_certificate(pki_cert['certificate'])
+            key = wrap_private_key(pki_cert['private']['key'])
+
+            # Remove any stale certificate material (e.g. a previously
+            # referenced certificate that was renamed or replaced) before
+            # writing the currently configured one
+            cleanup_saml_certs()
+
+            cert_path = os.path.join(saml_cert_dir, f'{cert_name}_cert.pem')
+            key_path = os.path.join(saml_cert_dir, f'{cert_name}_key.pem')
+            write_file(cert_path, cert, user="saml-sp", group="saml-sp", mode=0o644)
+            write_file(key_path, key, user="saml-sp", group="saml-sp", mode=0o600)
+
+            saml_conf['cert'] = cert_name
+        else:
+            # No certificate configured - remove any previously written material
+            cleanup_saml_certs()
+
         if 'acs_hostname' in login['saml']:
             saml_conf['acs-hostname'] = login['saml']['acs_hostname']
         if 'serial_address' in login['saml']:
@@ -642,9 +680,12 @@ def generate(login):
             if saml_user_lines:
                 f.write('\n'.join(sorted(saml_user_lines)) + '\n')
     else:
+        cleanup_saml_certs()
         for path in (saml_config_file, saml_user_map_file):
             if os.path.isfile(path):
                 os.unlink(path)
+        if os.path.isdir(saml_cert_dir) and not os.listdir(saml_cert_dir):
+            os.rmdir(saml_cert_dir)
         if os.path.isdir(saml_sp_dir) and not os.listdir(saml_sp_dir):
             os.rmdir(saml_sp_dir)
 

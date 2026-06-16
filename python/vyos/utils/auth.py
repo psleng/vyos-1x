@@ -32,7 +32,7 @@ MIN_USER_UID: int = 1000
 MAX_USER_UID: int = 59999
 # List of local user accounts that must be preserved
 SYSTEM_USER_SKIP_LIST: frozenset = {
-    'nobody', 'sso_user', # PERLE 7c8683c5ee in vyos-1x
+    'nobody',  # PERLE 7c8683c5ee in vyos-1x
     'radius_user',
     'radius_priv_user',
     'tacacs0',
@@ -56,9 +56,12 @@ SYSTEM_USER_SKIP_LIST: frozenset = {
 DEFAULT_PASSWORD: str = 'igos'
 LOW_ENTROPY_MSG: str = 'should be at least 8 characters long;'
 WEAK_PASSWORD_MSG: str = 'The password complexity is too low - @MSG@'
-CRACKLIB_ERROR_MSG: str = 'A following error occurred: @MSG@\n' \
-    'Possibly the cracklib database is corrupted or is missing. ' \
+CRACKLIB_ERROR_MSG: str = (
+    'A following error occurred: @MSG@\n'
+    'Possibly the cracklib database is corrupted or is missing. '
     'Try reinstalling the python3-cracklib package.'
+)
+
 
 class EPasswdStrength(StrEnum):
     WEAK = 'Weak'
@@ -76,10 +79,15 @@ def calculate_entropy(charset: str, passwd: str) -> float:
     """
     return math.log(math.pow(len(charset), len(passwd)), 2)
 
+
 def evaluate_strength(passwd: str) -> dict[str, str]:
-    """ Evaluates password strength and returns a check result dict """
-    charset = (cracklib.ASCII_UPPERCASE + cracklib.ASCII_LOWERCASE +
-        string.punctuation + string.digits)
+    """Evaluates password strength and returns a check result dict"""
+    charset = (
+        cracklib.ASCII_UPPERCASE
+        + cracklib.ASCII_LOWERCASE
+        + string.punctuation
+        + string.digits
+    )
 
     result = {
         'strength': '',
@@ -107,9 +115,7 @@ def evaluate_strength(passwd: str) -> dict[str, str]:
         match round(entropy):
             case e if e in range(0, 59):
                 result.update(strength=EPasswdStrength.WEAK)
-                result.update(
-                    error=WEAK_PASSWORD_MSG.replace('@MSG@', LOW_ENTROPY_MSG)
-                )
+                result.update(error=WEAK_PASSWORD_MSG.replace('@MSG@', LOW_ENTROPY_MSG))
             case e if e in range(60, 119):
                 result.update(strength=EPasswdStrength.DECENT)
             case e if e >= 120:
@@ -117,14 +123,16 @@ def evaluate_strength(passwd: str) -> dict[str, str]:
 
     return result
 
+
 def make_password_hash(password):
-    """ Makes a password hash for /etc/shadow using mkpasswd """
+    """Makes a password hash for /etc/shadow using mkpasswd"""
 
     mkpassword = 'mkpasswd --method=yescrypt --stdin'
     return cmd(mkpassword, input=password, timeout=5)
 
+
 def split_ssh_public_key(key_string, defaultname=""):
-    """ Splits an SSH public key into its components """
+    """Splits an SSH public key into its components"""
 
     key_string = key_string.strip()
     parts = re.split(r'\s+', key_string)
@@ -134,13 +142,26 @@ def split_ssh_public_key(key_string, defaultname=""):
     else:
         key_type, key_data, key_name = parts[0], parts[1], defaultname
 
-    if key_type not in ['ssh-rsa', 'ssh-dss', 'ecdsa-sha2-nistp256', 'ecdsa-sha2-nistp384', 'ecdsa-sha2-nistp521', 'ssh-ed25519']:
-        raise ValueError("Bad key type \'{0}\', must be one of must be one of ssh-rsa, ssh-dss, ecdsa-sha2-nistp<256|384|521> or ssh-ed25519".format(key_type))
+    if key_type not in [
+        'ssh-rsa',
+        'ssh-dss',
+        'ecdsa-sha2-nistp256',
+        'ecdsa-sha2-nistp384',
+        'ecdsa-sha2-nistp521',
+        'ssh-ed25519',
+    ]:
+        raise ValueError(
+            "Bad key type \'{0}\', must be one of must be one of ssh-rsa, ssh-dss, ecdsa-sha2-nistp<256|384|521> or ssh-ed25519".format(
+                key_type
+            )
+        )
 
-    return({"type": key_type, "data": key_data, "name": key_name})
+    return {"type": key_type, "data": key_data, "name": key_name}
+
 
 def get_current_user() -> str:
     import os
+
     current_user = 'nobody'
     # During CLI "owner" script execution we use SUDO_USER
     if 'SUDO_USER' in os.environ:
@@ -149,6 +170,7 @@ def get_current_user() -> str:
     elif 'USER' in os.environ:
         current_user = os.environ['USER']
     return current_user
+
 
 @dataclass
 class PasswdEntry:
@@ -160,7 +182,10 @@ class PasswdEntry:
     pw_dir: str
     pw_shell: str
 
-def get_local_passwd_entries(uid: Optional[int] = None) -> PasswdEntry | List[PasswdEntry] | None:
+
+def get_local_passwd_entries(
+    uid: Optional[int] = None,
+) -> PasswdEntry | List[PasswdEntry] | None:
     """
     If uid is None: return a list of all passwd entries.
     If uid is given: return the matching entry or None.
@@ -201,6 +226,7 @@ def get_local_passwd_entries(uid: Optional[int] = None) -> PasswdEntry | List[Pa
 
     return entries
 
+
 def get_local_users(min_uid=MIN_USER_UID, max_uid=MAX_USER_UID) -> list:
     """Return list of dynamically allocated users (see Debian Policy Manual)"""
     local_users = []
@@ -215,6 +241,7 @@ def get_local_users(min_uid=MIN_USER_UID, max_uid=MAX_USER_UID) -> list:
         local_users.append(s_user.pw_name)
 
     return local_users
+
 
 def get_user_home_dir(user: str) -> str:
     """Return user's home directory"""

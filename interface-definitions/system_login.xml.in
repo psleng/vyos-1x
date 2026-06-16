@@ -336,6 +336,7 @@
                   <constraintErrorMessage>Invalid SAML entity ID. Must be a valid HTTP or HTTPS URI matching the SAML provider configuration.</constraintErrorMessage>
                 </properties>
               </leafNode>
+              #include <include/pki/certificate.xml.i>
               <leafNode name="acs-hostname">
                 <properties>
                   <help>Hostname or IP used to construct the SAML ACS URL</help>
