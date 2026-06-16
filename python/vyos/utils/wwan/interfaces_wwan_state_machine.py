@@ -107,15 +107,19 @@ class SignalStrengthTracker:
 
     Maintains a FIFO history of signal samples (in dBm) and detects when the
     signal "level bin" changes to trigger periodic LED indicator updates.
-    Uses 8 levels (0-7) like smartphone signal bars for fine-grained indication:
-      - 0: No signal (< -110 dBm)
-      - 1: Very poor (-110 to -100 dBm)
-      - 2: Poor (-100 to -90 dBm)
-      - 3: Fair (-90 to -80 dBm)
-      - 4: Good (-80 to -70 dBm)
-      - 5: Very good (-70 to -60 dBm)
-      - 6: Excellent (-60 to -50 dBm)
-      - 7: Maximum (>= -50 dBm)
+    Uses 8 levels (0-7) like smartphone signal bars for fine-grained
+    indication.  All thresholds are on the 3GPP RSRP coverage scale; every
+    reading is normalized to RSRP by ``_to_rsrp_scale`` (RSRP used as-is, RSSI
+    shifted ~20 dB) before classification, so one consistent ruler applies no
+    matter which metric the modem reported:
+      - 0: No signal     (< -125 dBm or no reading)
+      - 1: Barely usable (-125 to -116 dBm)
+      - 2: Very poor     (-115 to -109 dBm)
+      - 3: Weak          (-108 to -103 dBm)
+      - 4: Fair          (-102 to -96 dBm)
+      - 5: Good          (-95 to -86 dBm)
+      - 6: Very good     (-85 to -76 dBm)
+      - 7: Excellent     (>= -75 dBm)
     """
 
     def __init__(self, window_size: int = 12, led_callback=None):
@@ -133,30 +137,80 @@ class SignalStrengthTracker:
         self.current_level = None  # Current level: 0-7
         self.last_update_time = 0
 
+    @staticmethod
+    def _to_rsrp_scale(signal_dbm, signal_detail) -> float:
+        """Normalize a reading to the RSRP scale so one ruler fits every RAT.
+
+        RSRP is the 3GPP per-resource-element coverage metric and is used as
+        the canonical scale.  RSSI (wideband, reported by 2G/3G and as the LTE
+        fallback) sits roughly 20 dB ABOVE RSRP for the same conditions, so an
+        RSSI reading is shifted down ~20 dB to land on the RSRP ruler.  Returns
+        None when nothing usable is available.
+        """
+        RSSI_TO_RSRP_OFFSET = 20  # RSSI is ~20 dB higher than RSRP
+
+        def _num(value):
+            try:
+                if value is None or value == '':
+                    return None
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        detail = signal_detail or {}
+        technology = (detail.get('technology') or '').upper()
+        rsrp = _num(detail.get('rsrp'))
+        rssi = _num(detail.get('rssi'))
+
+        # Prefer a real RSRP reading (LTE / 5G-NR) verbatim.
+        if rsrp is not None:
+            return rsrp
+        # Only RSSI exposed (2G/3G, or LTE without RSRP) -> shift onto RSRP.
+        if rssi is not None:
+            return rssi - RSSI_TO_RSRP_OFFSET
+        # No per-metric detail: treat the collapsed value as RSSI-like for
+        # LTE/5G (the extractor is RSSI-first there); leave others as-is.
+        if signal_dbm is None:
+            return None
+        if technology in ('LTE', '5G NR', 'NR5G', '5G'):
+            return signal_dbm - RSSI_TO_RSRP_OFFSET
+        return signal_dbm
+
     def _classify_level(self, avg_dbm: float) -> int:
-        """Classify signal dBm into an 8-level band (0=no signal, 7=maximum)."""
-        if avg_dbm is None or avg_dbm < -110:
+        """Classify a normalized RSRP-scale dBm into an 8-level band.
+
+        The input MUST already be normalized by ``_to_rsrp_scale`` so a single
+        set of thresholds is valid regardless of the reported metric.  Bands
+        follow the 3GPP RSRP coverage convention (see class docstring).
+        """
+        if avg_dbm is None or avg_dbm < -125:
             return 0  # No signal
-        if avg_dbm < -100:
-            return 1  # Very poor
-        if avg_dbm < -90:
-            return 2  # Poor
-        if avg_dbm < -80:
-            return 3  # Fair
-        if avg_dbm < -70:
-            return 4  # Good
-        if avg_dbm < -60:
-            return 5  # Very good
-        if avg_dbm < -50:
-            return 6  # Excellent
-        return 7  # Maximum
+        if avg_dbm < -115:
+            return 1  # Barely usable
+        if avg_dbm < -108:
+            return 2  # Very poor
+        if avg_dbm < -102:
+            return 3  # Weak
+        if avg_dbm < -95:
+            return 4  # Fair
+        if avg_dbm < -85:
+            return 5  # Good
+        if avg_dbm < -75:
+            return 6  # Very good
+        return 7  # Excellent / maximum
 
     async def update(self, signal_dbm: float, signal_detail: dict = None) -> None:
-        """Add a new signal sample and check for level change; trigger LED if changed."""
-        if signal_dbm is None:
+        """Add a new signal sample and check for level change; trigger LED if changed.
+
+        The incoming reading is first normalized to the RSRP scale (RSRP as-is,
+        RSSI shifted ~20 dB) so the rolling average and level bands are computed
+        on one consistent ruler regardless of which metric the modem reported.
+        """
+        norm_dbm = self._to_rsrp_scale(signal_dbm, signal_detail)
+        if norm_dbm is None:
             return
 
-        self.samples.append(signal_dbm)
+        self.samples.append(norm_dbm)
         avg_dbm = sum(self.samples) / len(self.samples)
         new_level = self._classify_level(avg_dbm)
 
@@ -165,7 +219,7 @@ class SignalStrengthTracker:
             self.current_level = new_level
             self.last_update_time = time.monotonic()
 
-            level_names = ['no-signal', 'very-poor', 'poor', 'fair', 'good', 'very-good', 'excellent', 'maximum']
+            level_names = ['no-signal', 'barely-usable', 'very-poor', 'weak', 'fair', 'good', 'very-good', 'excellent']
             level_name = level_names[new_level] if 0 <= new_level < len(level_names) else 'unknown'
 
             logger.info(
@@ -267,6 +321,15 @@ class ModemStateMachine:
         # once per service lifetime. None = not yet attempted; [] = attempted
         # but unavailable (no QMI port / qmicli missing / query failed).
         self._cached_qmi_band_capability = None
+        # In-process dedupe for the 5G NR band preference write.  The NR
+        # selection is written with POWER_CYCLE duration, so the modem forgets
+        # it on every power cycle and the FSM MUST re-assert it on each startup.
+        # This cache therefore lives only for the process lifetime (NOT
+        # persisted): it suppresses redundant helper spawns during a runtime
+        # reconfigure where the NR bands did not change, while a crash/reboot/
+        # modem reset clears it so the startup write always fires.  None = not
+        # yet written this process; a list = the band numbers last written.
+        self._last_nr_bands_written = None
         self.modem_path = None
         self.bearer_path = None
         self.user_disconnected = False
@@ -4146,6 +4209,38 @@ class ModemStateMachine:
             return True
         return False
 
+    async def _present_eligible_alternate_exists(self) -> bool:
+        """Presence-aware companion to ``_signal_failover_possible()``.
+
+        ``_signal_failover_possible()`` is a cheap *config-only* gate: it is
+        satisfied as soon as a configured, enabled, non-active slot exists —
+        it does NOT confirm a SIM is physically in that slot.  That is correct
+        for the cooldown-guarded switch path (presence is verified at switch
+        time), but it means weak-signal failover keeps ARMING its timer and
+        emitting attempts even when the only alternate slot is physically
+        empty (e.g. right after a hot-eject failover, where the just-vacated
+        slot is still configured+enabled but now holds no SIM).
+
+        This probes ModemManager ``SimSlots`` for each eligible slot and
+        returns True only when at least one actually has a SIM present, so the
+        signal-loss path can stay quiet when there is nowhere to switch.
+        Slightly more expensive (one D-Bus read per eligible slot), so callers
+        invoke it only at decision points (arming / firing), never per poll.
+        """
+        if not self._signal_failover_possible():
+            return False
+        active = self.current_active_sim or self.config.get('primary_sim_slot', 1)
+        primary = self.config.get('primary_sim_slot', 1)
+        for slot in self.config.get('sim_slots', []):
+            slot_num = slot.get('slot')
+            if slot_num == active or not slot.get('enabled', True):
+                continue
+            if slot_num == primary and self.failback_suppressed_by_data_limit:
+                continue
+            if await self._check_primary_sim_available(slot_num):
+                return True
+        return False
+
     def _record_failover(self):
         """Record that a SIM failover was performed"""
         self.last_failover_time = time.time()
@@ -6328,46 +6423,48 @@ class ModemStateMachine:
                     target_bands = modem_bands_list
                     target_band_names = modem_band_names
 
-                    # Check if target bands are already enabled
-                    if set(current_bands_list) == set(target_bands):
-                        logger.info("Requested bands already configured correctly",
-                                   extra={'interface_number': self.interface_number,
-                                          'enabled_bands': current_band_names})
-                        return
-
-                # Apply band configuration using MM numeric constants
-                logger.info("Setting new band configuration",
-                           extra={'interface_number': self.interface_number,
-                                  'from_bands': current_band_names,
-                                  'to_bands': target_band_names,
-                                  'from_constants': current_bands_list,
-                                  'to_constants': target_bands})
-
-                # Use ModemManager API to set bands (uint32 array)
-                band_variants = [Variant('u', band) for band in target_bands]
-                await props.call_set(MODEM_INTERFACE, "CurrentBands", Variant('au', band_variants))
-
-                # Brief wait for band configuration to take effect
-                await asyncio.sleep(3)
-
-                # Verify band configuration
-                new_bands_variant = await props.call_get(MODEM_INTERFACE, "CurrentBands")
-                new_bands = new_bands_variant.value if new_bands_variant else []
-                new_bands_list = [band.value for band in new_bands] if new_bands else []
-                new_band_names = [self._mm_constant_to_band_name(band) for band in new_bands_list]
-
-                if set(new_bands_list) == set(target_bands):
-                    logger.info("Band configuration successful",
+                # Apply band configuration using MM numeric constants — but only
+                # when the modem is not already on exactly this set.  Writing
+                # CurrentBands can trigger a brief deregister/reattach on some
+                # modems, so a redundant write is disruptive, not free.  Skip it
+                # when it would be a no-op; NR enforcement below still runs.
+                if set(current_bands_list) == set(target_bands):
+                    logger.info("Bands already configured correctly — skipping CurrentBands write",
                                extra={'interface_number': self.interface_number,
-                                      'applied_bands': new_band_names,
-                                      'applied_constants': new_bands_list})
+                                      'enabled_bands': current_band_names})
                 else:
-                    logger.warning("Band configuration verification failed",
-                                  extra={'interface_number': self.interface_number,
-                                         'target_bands': target_band_names,
-                                         'actual_bands': new_band_names,
-                                         'target_constants': target_bands,
-                                         'actual_constants': new_bands_list})
+                    logger.info("Setting new band configuration",
+                               extra={'interface_number': self.interface_number,
+                                      'from_bands': current_band_names,
+                                      'to_bands': target_band_names,
+                                      'from_constants': current_bands_list,
+                                      'to_constants': target_bands})
+
+                    # Use ModemManager API to set bands (uint32 array)
+                    band_variants = [Variant('u', band) for band in target_bands]
+                    await props.call_set(MODEM_INTERFACE, "CurrentBands", Variant('au', band_variants))
+
+                    # Brief wait for band configuration to take effect
+                    await asyncio.sleep(3)
+
+                    # Verify band configuration
+                    new_bands_variant = await props.call_get(MODEM_INTERFACE, "CurrentBands")
+                    new_bands = new_bands_variant.value if new_bands_variant else []
+                    new_bands_list = [band.value for band in new_bands] if new_bands else []
+                    new_band_names = [self._mm_constant_to_band_name(band) for band in new_bands_list]
+
+                    if set(new_bands_list) == set(target_bands):
+                        logger.info("Band configuration successful",
+                                   extra={'interface_number': self.interface_number,
+                                          'applied_bands': new_band_names,
+                                          'applied_constants': new_bands_list})
+                    else:
+                        logger.warning("Band configuration verification failed",
+                                      extra={'interface_number': self.interface_number,
+                                             'target_bands': target_band_names,
+                                             'actual_bands': new_band_names,
+                                             'target_constants': target_bands,
+                                             'actual_constants': new_bands_list})
 
             except Exception as band_e:
                 # Many modems don't support runtime band configuration
@@ -6466,6 +6563,19 @@ class ModemStateMachine:
                     desired_nr = supported_nr
 
             nr_csv = ','.join(str(b) for b in desired_nr)
+
+            # In-process dedupe: skip the helper when this exact NR set was
+            # already written earlier in *this* process (a runtime reconfigure
+            # that didn't change the NR bands).  The cache is wiped on any
+            # restart, so the POWER_CYCLE-duration write is still re-asserted on
+            # every fresh start / reboot / modem reset.
+            if self._last_nr_bands_written == desired_nr:
+                logger.info("5G NR band preference unchanged this session — "
+                            "skipping QMI write",
+                            extra={'interface_number': self.interface_number,
+                                   'nr_bands': desired_nr})
+                return
+
             logger.info("Enforcing 5G NR band preference over QMI",
                         extra={'interface_number': self.interface_number,
                                'device': device,
@@ -6480,6 +6590,8 @@ class ModemStateMachine:
             out, err = await asyncio.wait_for(proc.communicate(), timeout=30)
             detail = (err or out or b'').decode(errors='replace').strip()
             if proc.returncode == 0:
+                # Record only on success so a failed write is retried next time.
+                self._last_nr_bands_written = list(desired_nr)
                 logger.info("5G NR band preference applied",
                             extra={'interface_number': self.interface_number,
                                    'nr_bands': desired_nr, 'detail': detail})
@@ -6499,91 +6611,172 @@ class ModemStateMachine:
     async def _configure_network_mode(self):
         """Configure network mode (access technology) on the modem.
 
-        Maps config values to ModemManager MMModemMode bitmask constants and
-        applies them via SetCurrentModes(allowed, preferred).  Runs while the
-        modem is still disabled so that mode changes take effect before the
-        modem begins scanning for networks.
+        Capability-driven: ModemManager's ``SetCurrentModes`` only accepts an
+        ``(allowed, preferred)`` tuple that appears verbatim in the modem's
+        ``SupportedModes`` list, and that list differs on every modem.  So we
+        never fabricate a bitmask.  Instead the CLI value expresses *intent*
+        (which radio technologies the operator wants) and we pick the
+        supported tuple that best matches:
+
+          * ``auto``     → the widest supported tuple (all RATs the modem can do)
+          * ``2g/3g``    → the tuple restricted to that RAT
+          * ``lte``/``4g`` → the tuple restricted to 4G
+          * ``5g``       → the tuple covering 5G (+4G anchor for NSA), preferring 5G
+
+        Runs while the modem is disabled so the change takes effect before it
+        scans.  Never raises — on any problem the modem keeps its prior mode.
         """
         try:
             if not self.config:
                 return
 
             network_mode = self.config.get('network_mode', 'auto')
-
-            # MMModemMode bitmask constants
-            MM_MODEM_MODE_NONE = 0
-            MM_MODEM_MODE_2G   = 1 << 1   # 2
-            MM_MODEM_MODE_3G   = 1 << 2   # 4
-            MM_MODEM_MODE_4G   = 1 << 3   # 8
-            MM_MODEM_MODE_5G   = 1 << 4   # 16
-            MM_MODEM_MODE_ANY  = 0xFFFFFFFF
-
-            # Map config strings to (allowed_mask, preferred_mask)
-            mode_mapping = {
-                'auto': (MM_MODEM_MODE_ANY, MM_MODEM_MODE_NONE),
-                '2g':   (MM_MODEM_MODE_2G, MM_MODEM_MODE_NONE),
-                '3g':   (MM_MODEM_MODE_3G | MM_MODEM_MODE_2G, MM_MODEM_MODE_NONE),
-                'lte':  (MM_MODEM_MODE_4G, MM_MODEM_MODE_NONE),
-                '4g':   (MM_MODEM_MODE_4G, MM_MODEM_MODE_NONE),
-                '5g':   (MM_MODEM_MODE_5G | MM_MODEM_MODE_4G, MM_MODEM_MODE_5G),
-            }
-
             mode_key = network_mode.lower().strip()
-            if mode_key not in mode_mapping:
+
+            # MMModemMode bits
+            MODE_NONE = 0
+            MODE_2G = 1 << 1
+            MODE_3G = 1 << 2
+            MODE_4G = 1 << 3
+            MODE_5G = 1 << 4
+
+            # CLI value → (desired RAT bitset, preferred bit).
+            # desired=None means "auto" (use everything the modem supports).
+            wanted_map = {
+                'auto':    (None,              MODE_NONE),
+                '2g':      (MODE_2G,           MODE_NONE),
+                '3g':      (MODE_3G,           MODE_NONE),
+                'lte':     (MODE_4G,           MODE_NONE),
+                '4g':      (MODE_4G,           MODE_NONE),
+                # 5G NR preferred, with the LTE anchor kept for NSA operation.
+                '5g':      (MODE_5G | MODE_4G, MODE_5G),
+                # True 5G standalone — NR only, no LTE anchor.  The
+                # capability scorer picks a pure-NR supported tuple when the
+                # modem advertises one; if it only supports NSA (NR+LTE) the
+                # scorer falls back to the closest tuple and logs it.
+                '5g-only': (MODE_5G,           MODE_5G),
+            }
+            if mode_key not in wanted_map:
                 logger.warning("Unrecognised network_mode value, falling back to 'auto'",
                               extra={'interface_number': self.interface_number,
                                      'configured_mode': network_mode,
-                                     'valid_modes': list(mode_mapping.keys())})
+                                     'valid_modes': list(wanted_map.keys())})
                 mode_key = 'auto'
-
-            allowed, preferred = mode_mapping[mode_key]
-
-            logger.info("Configuring network mode",
-                       extra={'interface_number': self.interface_number,
-                              'network_mode': network_mode,
-                              'allowed_mask': allowed,
-                              'preferred_mask': preferred})
+            desired_bits, desired_pref = wanted_map[mode_key]
 
             props = self.proxy.get_interface("org.freedesktop.DBus.Properties")
 
+            # Read the modem's advertised SupportedModes — array of (uu).
             try:
-                # Read current modes — MM returns a struct (uu)
+                sm_variant = await props.call_get(MODEM_INTERFACE, "SupportedModes")
+                sm_raw = sm_variant.value if sm_variant else []
+            except Exception as e:
+                logger.info("Modem does not expose SupportedModes — skipping network-mode",
+                           extra={'interface_number': self.interface_number, 'error': str(e)})
+                return
+
+            supported = []
+            for entry in sm_raw or []:
+                try:
+                    a, p = entry[0], entry[1]
+                    a = a.value if hasattr(a, 'value') else a
+                    p = p.value if hasattr(p, 'value') else p
+                    supported.append((int(a), int(p)))
+                except (TypeError, IndexError, ValueError):
+                    continue
+
+            if not supported:
+                logger.info("Modem advertised no usable SupportedModes — leaving mode unchanged",
+                           extra={'interface_number': self.interface_number})
+                return
+
+            # Union of every RAT the modem can do.
+            all_bits = 0
+            for a, _ in supported:
+                all_bits |= a
+
+            # `auto` = "the operator did not pick a technology, so enable them
+            # all and let the modem/network decide".  Capture that intent
+            # before we resolve the concrete bitset so the scorer can prefer a
+            # genuine no-preference tuple.
+            is_auto = desired_bits is None
+            if is_auto:
+                desired_bits = all_bits           # auto → all RATs
+            desired_bits &= all_bits              # never ask for a RAT the modem lacks
+            if desired_bits == 0:
+                logger.warning("Requested network-mode RAT not supported by this modem — "
+                              "leaving mode unchanged",
+                              extra={'interface_number': self.interface_number,
+                                     'configured_mode': network_mode,
+                                     'modem_modes': [self._mode_mask_to_names(a) for a, _ in supported]})
+                return
+
+            def _popcount(x):
+                return bin(x & 0xFFFFFFFF).count('1')
+
+            # Score every supported tuple; lowest score wins.
+            #   extra      : unwanted RATs the tuple enables (defeats a restriction)
+            #   missing    : wanted RATs the tuple omits
+            #   pref_ok    : 0 if it matches the desired preferred RAT, else 1
+            #   auto_pref  : for `auto` only — prefer a *no-preference* tuple so
+            #                "all technologies" really means "let the modem
+            #                decide"; 0 if p==none, else 1.  Always 0 for an
+            #                explicit value (its own pref_ok already governs).
+            #   -width     : among ties, the widest (most RATs) tuple wins.
+            #   -p         : final deterministic tie-break — when only
+            #                preference-bearing tuples exist (e.g. a RedCap
+            #                modem that always carries a preference), pick the
+            #                one preferring the *highest* RAT (5G > 4G > …)
+            #                rather than whatever the modem happened to list
+            #                first.
+            best = None
+            best_score = None
+            for a, p in supported:
+                extra = _popcount(a & ~desired_bits)
+                missing = _popcount(desired_bits & ~a)
+                pref_ok = 0 if (desired_pref == MODE_NONE or (p & desired_pref)) else 1
+                auto_pref = 1 if (is_auto and p != MODE_NONE) else 0
+                score = (extra, missing, pref_ok, auto_pref, -_popcount(a), -int(p))
+                if best_score is None or score < best_score:
+                    best_score, best = score, (a, p)
+
+            allowed, preferred = best
+
+            logger.info("Selected network mode from modem-supported tuples",
+                       extra={'interface_number': self.interface_number,
+                              'network_mode': network_mode,
+                              'chosen_allowed': self._mode_mask_to_names(allowed),
+                              'chosen_preferred': self._mode_mask_to_names(preferred),
+                              'supported': [
+                                  (self._mode_mask_to_names(a), self._mode_mask_to_names(p))
+                                  for a, p in supported]})
+
+            try:
+                # Skip the write if the modem is already in the chosen mode.
                 current_modes_variant = await props.call_get(MODEM_INTERFACE, "CurrentModes")
                 current_struct = current_modes_variant.value if current_modes_variant else None
-
                 if current_struct and len(current_struct) >= 2:
                     cur_allowed = current_struct[0]
                     cur_preferred = current_struct[1]
-                    # Unwrap Variant wrappers if present
                     if hasattr(cur_allowed, 'value'):
                         cur_allowed = cur_allowed.value
                     if hasattr(cur_preferred, 'value'):
                         cur_preferred = cur_preferred.value
-
-                    logger.info("Current modem modes",
-                               extra={'interface_number': self.interface_number,
-                                      'current_allowed': cur_allowed,
-                                      'current_preferred': cur_preferred,
-                                      'target_allowed': allowed,
-                                      'target_preferred': preferred})
-
-                    if cur_allowed == allowed and cur_preferred == preferred:
+                    if int(cur_allowed) == allowed and int(cur_preferred) == preferred:
                         logger.info("Network mode already configured correctly",
                                    extra={'interface_number': self.interface_number,
                                           'mode': network_mode})
                         return
 
-                # Apply via SetCurrentModes(uu)
                 modem_iface = self.proxy.get_interface(MODEM_INTERFACE)
                 await modem_iface.call_set_current_modes((allowed, preferred))
-
                 await asyncio.sleep(2)
 
                 logger.info("Network mode configured successfully",
                            extra={'interface_number': self.interface_number,
                                   'mode': network_mode,
-                                  'allowed_mask': allowed,
-                                  'preferred_mask': preferred})
+                                  'allowed': self._mode_mask_to_names(allowed),
+                                  'preferred': self._mode_mask_to_names(preferred)})
 
             except Exception as mode_e:
                 logger.info("Network mode configuration not supported by this modem or driver",
@@ -6597,6 +6790,23 @@ class ModemStateMachine:
             # Don't fail the entire configuration for mode issues
             logger.warning("Continuing configuration without network mode changes",
                           extra={'interface_number': self.interface_number})
+
+    @staticmethod
+    def _mode_mask_to_names(mask) -> str:
+        """Render an MMModemMode bitmask as a readable RAT list (e.g. '4g|5g')."""
+        try:
+            mask = int(mask)
+        except (TypeError, ValueError):
+            return ''
+        if mask == 0:
+            return 'none'
+        names = []
+        for bit, name in ((1 << 1, '2g'), (1 << 2, '3g'),
+                          (1 << 3, '4g'), (1 << 4, '5g')):
+            if mask & bit:
+                names.append(name)
+        return '|'.join(names) if names else f'0x{mask:x}'
+
 
     def _get_band_name_to_constant_mapping(self):
         """Map human-readable band names to ModemManager uint32 constants"""
@@ -6898,14 +7108,22 @@ class ModemStateMachine:
         Fallback for status reporting when ModemManager's
         ``Modem.CellInfo.GetCellInfo()`` returns no serving cell — a common
         gap on QMI modems / older MM where the CellInfo interface is present
-        but unpopulated.  Reads NAS Get Cell Location Info, whose
-        ``Intrafrequency LTE Info`` block exposes the serving cell's EARFCN
-        (→ band via :meth:`_lte_earfcn_to_band`), the global / serving cell
-        IDs and the tracking area code.
+        but unpopulated.
 
-        Runs over the shared ModemManager ``qmi-proxy`` (``-p``) read-only so
-        it does not disturb MM's QMI session.  Never raises — returns ``{}``
-        when QMI is unavailable or nothing could be parsed.
+        Two QMI sources are consulted over the shared ModemManager
+        ``qmi-proxy`` (``-p``, read-only):
+
+        1. ``--nas-get-rf-band-info`` — reports the *active* radio interface,
+           band and channel.  This is reliable while the modem is RRC
+           **connected** (active bearer), where the cell-location serving
+           block can be empty.  Primary source for band/channel/RAT.
+        2. ``--nas-get-cell-location-info`` — its ``Intrafrequency LTE Info``
+           block carries the serving cell ID, global cell ID and TAC (and
+           EARFCN, used as a band fallback).  Best populated when the modem
+           is idle, so used to enrich the cell-identity fields.
+
+        Never raises — returns ``{}`` when QMI is unavailable or nothing
+        could be parsed.
 
         :returns: dict with any of ``serving_cell_type``, ``serving_band``,
             ``serving_earfcn``, ``serving_cell_id``, ``serving_tac``,
@@ -6914,69 +7132,126 @@ class ModemStateMachine:
         info = {}
         try:
             device = self._qmi_control_device(modem_props)
-            if not device or not shutil.which('qmicli'):
+            if not device:
+                logger.info("No QMI control device — cannot read serving cell",
+                            extra={'interface_number': self.interface_number})
+                return {}
+            if not shutil.which('qmicli'):
+                logger.info("qmicli not installed — cannot read serving cell",
+                            extra={'interface_number': self.interface_number})
                 return {}
 
-            proc = await asyncio.create_subprocess_exec(
-                'qmicli', '-d', device, '-p', '--nas-get-cell-location-info',
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            out, _err = await asyncio.wait_for(proc.communicate(), timeout=10)
-            if proc.returncode != 0:
-                return {}
-            text = out.decode(errors='replace')
+            async def _qmicli(*args):
+                """Run a read-only qmicli command over MM's qmi-proxy.
+                Returns stdout text, or ``None`` on failure/timeout."""
+                try:
+                    proc = await asyncio.create_subprocess_exec(
+                        'qmicli', '-d', device, '-p', *args,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    out, err = await asyncio.wait_for(
+                        proc.communicate(), timeout=8)
+                except asyncio.TimeoutError:
+                    logger.info("qmicli serving-cell query timed out",
+                                extra={'interface_number': self.interface_number,
+                                       'args': ' '.join(args)})
+                    return None
+                if proc.returncode != 0:
+                    logger.info("qmicli serving-cell query failed",
+                                extra={'interface_number': self.interface_number,
+                                       'args': ' '.join(args),
+                                       'error': err.decode(errors='replace').strip()})
+                    return None
+                return out.decode(errors='replace')
 
-            # --- LTE serving cell (Intrafrequency LTE Info block) ---
-            # The fields immediately under the "Intrafrequency LTE Info"
-            # header describe the serving cell, e.g.:
-            #   Tracking Area Code: '30175'
-            #   Global Cell ID: '9109320'
-            #   EUTRA Absolute RF Channel Number: '3050' (E-UTRA band 7: 2600)
-            #   Serving Cell ID: '146'
-            lte_idx = text.find('Intrafrequency LTE Info')
-            if lte_idx != -1:
-                seg = text[lte_idx:]
-                m_earfcn = re.search(
-                    r"EUTRA Absolute RF Channel Number:\s*'(\d+)'", seg)
-                if m_earfcn:
-                    earfcn = m_earfcn.group(1)
-                    info['serving_cell_type'] = 'lte'
-                    info['serving_earfcn'] = earfcn
-                    band = self._lte_earfcn_to_band(earfcn)
-                    if band:
-                        info['serving_band'] = band
-                m_tac = re.search(r"Tracking Area Code:\s*'(\d+)'", seg)
-                if m_tac:
-                    info['serving_tac'] = m_tac.group(1)
-                m_gcid = re.search(r"Global Cell ID:\s*'(\d+)'", seg)
-                if m_gcid:
-                    info['serving_cell_id'] = m_gcid.group(1)
-                m_scid = re.search(r"Serving Cell ID:\s*'(\d+)'", seg)
-                if m_scid:
-                    info['serving_physical_ci'] = m_scid.group(1)
+            # --- PRIMARY: NAS Get RF Band Info (works while connected) ---
+            # Output varies slightly by libqmi version but reliably contains,
+            # per active radio interface:
+            #   Radio interface: 'lte'
+            #   Active band class: 'eutran-7'   (or "Active band:")
+            #   Active channel: '3050'
+            # Parse the first LTE interface as the serving RAT; fall back to
+            # the first 5G NR interface when LTE is absent (pure-NR camp).
+            rf = await _qmicli('--nas-get-rf-band-info')
+            if rf:
+                # Split into per-interface chunks on the "Radio interface:" key.
+                # NOTE: qmicli emits "Radio Interface:" (capitalised) on this
+                # firmware, so the split MUST be case-insensitive or no chunk
+                # is produced and nothing parses.
+                chunks = re.split(r"Radio interface:", rf, flags=re.IGNORECASE)
+                lte_chunk = nr_chunk = None
+                for ch in chunks[1:]:
+                    low = ch.lower()
+                    if lte_chunk is None and "'lte'" in low.split('\n', 1)[0]:
+                        lte_chunk = ch
+                    elif nr_chunk is None and (
+                            "'5gnr'" in low.split('\n', 1)[0]
+                            or "'nr5g'" in low.split('\n', 1)[0]):
+                        nr_chunk = ch
+                chosen = lte_chunk or nr_chunk
+                if chosen is not None:
+                    info['serving_cell_type'] = 'lte' if lte_chunk else 'nr5g'
+                    m_band = re.search(
+                        r"Active band(?:\s*class)?:\s*'?((?:eutran|ngran|utran|gsm)-\d+)'?",
+                        chosen, re.IGNORECASE)
+                    if m_band:
+                        info['serving_band'] = m_band.group(1).lower()
+                    m_chan = re.search(
+                        r"Active channel:\s*'?(\d+)'?", chosen, re.IGNORECASE)
+                    if m_chan:
+                        info['serving_earfcn'] = m_chan.group(1)
+                        # Derive band from EARFCN if the band name was absent.
+                        if not info.get('serving_band') and info['serving_cell_type'] == 'lte':
+                            band = self._lte_earfcn_to_band(m_chan.group(1))
+                            if band:
+                                info['serving_band'] = band.lower()
 
-            # --- NR5G fallback ---
-            # Only when no LTE serving cell was found.  NR-ARFCN → band
-            # derivation is firmware-specific, so only the channel is
-            # reported.  (An "5GNR ARFCN" line can also appear next to an LTE
-            # serving cell under EN-DC — in that case LTE is the serving RAT
-            # and the block above already won.)
-            if 'serving_cell_type' not in info:
-                m_nr = re.search(r"5GNR ARFCN:\s*'(\d+)'", text)
-                if m_nr:
-                    info['serving_cell_type'] = 'nr5g'
-                    info['serving_earfcn'] = m_nr.group(1)
+            # --- SECONDARY: NAS Get Cell Location Info (cell-identity) ---
+            # Enriches with serving / global cell ID + TAC, and supplies band
+            # via EARFCN when rf-band-info did not yield one.
+            cell = await _qmicli('--nas-get-cell-location-info')
+            if cell:
+                lte_idx = cell.lower().find('intrafrequency lte info')
+                if lte_idx != -1:
+                    seg = cell[lte_idx:]
+                    m_earfcn = re.search(
+                        r"EUTRA Absolute RF Channel Number:\s*'(\d+)'", seg, re.IGNORECASE)
+                    if m_earfcn and not info.get('serving_earfcn'):
+                        info.setdefault('serving_cell_type', 'lte')
+                        info['serving_earfcn'] = m_earfcn.group(1)
+                        if not info.get('serving_band'):
+                            band = self._lte_earfcn_to_band(m_earfcn.group(1))
+                            if band:
+                                info['serving_band'] = band.lower()
+                    m_tac = re.search(r"Tracking Area Code:\s*'(\d+)'", seg, re.IGNORECASE)
+                    if m_tac:
+                        info['serving_tac'] = m_tac.group(1)
+                    m_gcid = re.search(r"Global Cell ID:\s*'(\d+)'", seg, re.IGNORECASE)
+                    if m_gcid:
+                        info['serving_cell_id'] = m_gcid.group(1)
+                    m_scid = re.search(r"Serving Cell ID:\s*'(\d+)'", seg, re.IGNORECASE)
+                    if m_scid:
+                        info['serving_physical_ci'] = m_scid.group(1)
+                # Pure-NR camp: no LTE block, grab the NR channel.
+                if 'serving_cell_type' not in info:
+                    m_nr = re.search(r"5GNR ARFCN:\s*'(\d+)'", cell, re.IGNORECASE)
+                    if m_nr:
+                        info['serving_cell_type'] = 'nr5g'
+                        info['serving_earfcn'] = m_nr.group(1)
 
             if info:
                 logger.info("Read serving-cell info over QMI",
                             extra={'interface_number': self.interface_number,
                                    'device': device,
                                    'serving_band': info.get('serving_band', ''),
-                                   'serving_earfcn': info.get('serving_earfcn', '')})
-        except asyncio.TimeoutError:
-            logger.info("qmicli serving-cell query timed out",
-                        extra={'interface_number': self.interface_number})
+                                   'serving_earfcn': info.get('serving_earfcn', ''),
+                                   'serving_cell_id': info.get('serving_cell_id', '')})
+            else:
+                logger.info("Serving cell not reported by QMI (rf-band + "
+                            "cell-location both empty)",
+                            extra={'interface_number': self.interface_number,
+                                   'device': device})
         except Exception as e:
             logger.info("Serving-cell info not readable over QMI",
                         extra={'interface_number': self.interface_number,
@@ -9089,6 +9364,20 @@ class ModemStateMachine:
         # Below threshold — start or continue the weak-signal window.
         now = time.time()
         if self._signal_failover_below_since is None:
+            # Only arm the timer if there is actually somewhere to switch to.
+            # The cheap _signal_failover_possible() gate above is config-only;
+            # confirm a SIM is physically present in an eligible slot before
+            # arming so we don't spin the timer (and emit attempts) into an
+            # empty slot — e.g. right after a hot-eject failover where the
+            # just-vacated slot is still configured+enabled but now empty.
+            if not await self._present_eligible_alternate_exists():
+                logger.debug("Weak signal but no present alternate SIM — "
+                             "not arming signal-loss failover",
+                             extra={'interface_number': self.interface_number,
+                                    'metric': metric_name,
+                                    'metric_dbm': metric_dbm,
+                                    'threshold_dbm': threshold})
+                return
             self._signal_failover_below_since = now
             logger.warning("Signal dropped below sim-failover threshold — "
                           "starting signal-loss timer",
@@ -9101,6 +9390,19 @@ class ModemStateMachine:
 
         elapsed = now - self._signal_failover_below_since
         if elapsed >= loss_timer:
+            # Re-confirm a present alternate before firing: the alternate SIM
+            # could have been removed during the loss window, in which case we
+            # silently reset rather than launch a doomed switch.
+            if not await self._present_eligible_alternate_exists():
+                logger.debug("Sustained weak signal but no present alternate "
+                             "SIM — skipping signal-loss failover",
+                             extra={'interface_number': self.interface_number,
+                                    'metric': metric_name,
+                                    'metric_dbm': metric_dbm,
+                                    'threshold_dbm': threshold,
+                                    'elapsed_seconds': round(elapsed, 1)})
+                self._signal_failover_below_since = None
+                return
             logger.warning("Sustained weak signal — triggering SIM failover",
                           extra={'interface_number': self.interface_number,
                                  'metric': metric_name,
@@ -9121,7 +9423,7 @@ class ModemStateMachine:
             avg_dbm: Rolling average signal in dBm.
             signal_detail: Dict with {rssi, rsrp, rsrq, snr, technology}.
         """
-        level_names = ['no-signal', 'very-poor', 'poor', 'fair', 'good', 'very-good', 'excellent', 'maximum']
+        level_names = ['no-signal', 'barely-usable', 'very-poor', 'weak', 'fair', 'good', 'very-good', 'excellent']
         level_name = level_names[level] if 0 <= level <= 7 else 'unknown'
 
         # Map wwanN interface to MODEMN naming expected by hw API.
