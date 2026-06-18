@@ -100,6 +100,8 @@ def _raw_status(status: dict) -> dict:
         'operator_code': status.get('operator_code', ''),
         'registration_state': status.get('registration_state', ''),
         'apn': status.get('connected_apn', ''),
+        'requested_apn': status.get('requested_apn', ''),
+        'negotiated_apn': status.get('negotiated_apn', ''),
         'ipv4_address': status.get('ipv4_address', ''),
         'ipv6_address': status.get('ipv6_address', ''),
         'ipv4_gateway': status.get('ipv4_gateway', ''),
@@ -240,6 +242,12 @@ def _format_status(status: dict, interface: str) -> str:
     lines.append(_kv('Operator:', d['operator']))
     lines.append(_kv('Operator code:', d['operator_code']))
     lines.append(_kv('APN:', d['apn']))
+    # When the carrier activated a different APN than we requested, show both
+    # so the override is obvious during troubleshooting.
+    if d['negotiated_apn'] and d['requested_apn'] \
+            and d['negotiated_apn'] != d['requested_apn']:
+        lines.append(_kv('Requested APN:', d['requested_apn']))
+        lines.append(_kv('Negotiated APN:', d['negotiated_apn']))
     if d['failure_reason']:
         lines.append(_kv('Failure reason:', d['failure_reason']))
     lines.append(_kv('Log level:', d['log_level']))
@@ -443,7 +451,7 @@ def _format_detail(status: dict, interface: str) -> str:
                 lines.append(_kv('Last updated:', last_updated))
 
     lines.append(_section('Failover History'))
-    lines.append(_kv('Failover count:', status.get('failover_count', 0)))
+    lines.append(_kv('Failover count:', status.get('lifetime_failover_count', 0)))
     lines.append(_kv('Last failover:', status.get('last_failover_time', '')))
     lines.append(_kv('Recovery attempts:', status.get('connectivity_recovery_attempts', 0)))
 
@@ -459,6 +467,12 @@ def _format_detail(status: dict, interface: str) -> str:
         lines.append(_kv('Current downtime:', f'{current_down}s'))
     lines.append(_kv('Last disconnect:', status.get('last_disconnect_time', '')))
     lines.append(_kv('Last reason:', status.get('last_disconnect_reason', '')))
+
+    lines.append(_section('Diagnostics (since power on)'))
+    lines.append(_kv('Service starts:', status.get('service_start_count', 0)))
+    lines.append(_kv('ModemManager restarts:', status.get('modemmanager_restart_count', 0)))
+    lines.append(_kv('Modem hardware resets:', status.get('hardware_reset_count', 0)))
+    lines.append(_kv('Modem nuclear resets:', status.get('modem_nuclear_reset_count', 0)))
 
     lines.append(_section('Configuration'))
     lines.append(_kv('Network mode:', status.get('network_mode', '')))
