@@ -210,7 +210,9 @@ def verify(login):
                 f'must all be defined together (missing: {pretty})'
             )
         if 'certificate' in login['saml']:
-            verify_pki_certificate(login, login['saml']['certificate'])
+            verify_pki_certificate(
+                login, login['saml']['certificate'], no_password_protected=True
+            )
 
         # Verify JIT role mappings have at least one attribute with values
         if 'jit' in login['saml']:
