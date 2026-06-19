@@ -49,7 +49,7 @@ from vyos.utils.dict import dict_search
 from vyos.utils.file import move_recursive, write_file
 from vyos.utils.network import is_addr_assigned
 from vyos.utils.permission import chown
-from vyos.utils.process import cmd
+from vyos.utils.process import cmd, is_systemd_service_running
 from vyos.utils.process import call
 from vyos.utils.process import run
 from vyos.utils.process import DEVNULL
@@ -168,6 +168,8 @@ def get_config(config=None):
             + cli_users
         )
         login['tacacs_min_uid'] = MIN_TACACS_UID
+
+    login['saml_restart_required'] = D.is_node_changed(['system', 'login', 'saml'])
 
     set_dependents('ssh', conf)
     return login
@@ -867,6 +869,18 @@ def apply(login):
         else:
             pam_profile = 'tacplus-optional'
         cmd(f'pam-auth-update --enable {pam_profile}')
+
+    # Enable/disable SAML service and SAML in PAM configuration
+    cmd('pam-auth-update --disable saml_auth')
+    if 'saml' in login:
+        if (
+            not is_systemd_service_running('saml-sp.service')
+            or login['saml_restart_required']
+        ):
+            call('systemctl reload-or-restart saml-sp.service')
+        cmd('pam-auth-update --enable saml_auth')
+    elif is_systemd_service_running('saml-sp.service'):
+        call('systemctl stop saml-sp.service')
 
     # Enable/disable Google authenticator
     cmd('pam-auth-update --disable mfa-google-authenticator')
