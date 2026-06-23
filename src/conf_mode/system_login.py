@@ -53,6 +53,7 @@ from vyos.utils.process import cmd, is_systemd_service_running
 from vyos.utils.process import call
 from vyos.utils.process import run
 from vyos.utils.process import DEVNULL
+from vyos.utils.boot import boot_configuration_complete
 from vyos.configdiff import get_config_diff
 from vyos import ConfigError
 from vyos import airbag
@@ -870,24 +871,14 @@ def apply(login):
             pam_profile = 'tacplus-optional'
         cmd(f'pam-auth-update --enable {pam_profile}')
 
-    # Enable/disable SAML service and SAML in PAM configuration.
-    #
-    # pam-auth-update rewrites the system PAM stack and its result is written to
-    # /etc/pam.d/, which persists across reboots. It therefore only needs to run
-    # when the saml node actually changes; re-running the disable+enable pair on
-    # every commit and on every boot-time config replay regenerates the whole
-    # PAM stack for no reason and is a measurable cost on slow targets. Gate it
-    # on saml_restart_required so an unchanged saml config is a no-op here.
     if login['saml_restart_required']:
         cmd('pam-auth-update --disable saml_auth')
         if 'saml' in login:
             cmd('pam-auth-update --enable saml_auth')
 
     if 'saml' in login:
-        # Enable the unit so the SAML SP also comes up automatically on boot,
-        # not just for the lifetime of this config session.
         call('systemctl enable saml-sp.service')
-        if (
+        if boot_configuration_complete() and (
             not is_systemd_service_running('saml-sp.service')
             or login['saml_restart_required']
         ):
