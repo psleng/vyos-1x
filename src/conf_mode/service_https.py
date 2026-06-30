@@ -42,6 +42,7 @@ from vyos.utils.network import is_listen_port_bind_service
 from vyos.utils.file import write_file
 from vyos import ConfigError
 from vyos import airbag
+
 airbag.enable()
 
 config_file = '/etc/nginx/sites-enabled/default'
@@ -53,6 +54,7 @@ group = 'www-data'
 
 systemd_service_api = '/run/systemd/system/vyos-http-api.service'
 
+
 def get_config(config=None):
     if config:
         conf = config
@@ -63,9 +65,9 @@ def get_config(config=None):
     if not conf.exists(base):
         return None
 
-    https = conf.get_config_dict(base, get_first_key=True,
-                                 key_mangling=('-', '_'),
-                                 with_pki=True)
+    https = conf.get_config_dict(
+        base, get_first_key=True, key_mangling=('-', '_'), with_pki=True
+    )
 
     # store path to API config file for later use in templates
     https['api_config_state'] = api_config_state
@@ -90,6 +92,7 @@ def get_config(config=None):
 
     return https
 
+
 def verify(https):
     if https is None:
         return None
@@ -98,17 +101,24 @@ def verify(https):
         verify_pki_certificate(https, https['certificates']['certificate'])
 
         tmp = dict_search('certificates.ca_certificate', https)
-        if tmp != None: verify_pki_ca_certificate(https, tmp)
+        if tmp != None:
+            verify_pki_ca_certificate(https, tmp)
 
         tmp = dict_search('certificates.dh_params', https)
-        if tmp != None: verify_pki_dh_parameters(https, tmp, 2048)
+        if tmp != None:
+            verify_pki_dh_parameters(https, tmp, 2048)
 
     else:
-        Warning('No certificate specified, using build-in self-signed certificates. '\
-                'Do not use them in a production environment!')
+        Warning(
+            'No certificate specified, using build-in self-signed certificates. '
+            'Do not use them in a production environment!'
+        )
 
     # check if /etc/nginx/flask.conf exists
     https['flask_conf_exist'] = os.path.exists('/etc/nginx/flask.conf')
+
+    # check if /etc/nginx/saml.conf exists
+    https['saml_conf_exist'] = os.path.exists('/etc/nginx/saml.conf')
 
     # Check if server port is already in use by a different application
     listen_address = ['0.0.0.0']
@@ -117,7 +127,9 @@ def verify(https):
         listen_address = https['listen_address']
 
     for address in listen_address:
-        if not check_port_availability(address, port, 'tcp') and not is_listen_port_bind_service(port, 'nginx'):
+        if not check_port_availability(
+            address, port, 'tcp'
+        ) and not is_listen_port_bind_service(port, 'nginx'):
             raise ConfigError(f'TCP port "{port}" is used by another service!')
 
     verify_vrf(https)
@@ -129,7 +141,7 @@ def verify(https):
 
         # If "api graphql" is not defined and `gql_auth_type` is None,
         # there's certainly no JWT auth option, and keys are required
-        jwt_auth = (gql_auth_type == "token")
+        jwt_auth = gql_auth_type == "token"
 
         # Check for incomplete key configurations in every case
         valid_keys_exist = False
@@ -143,12 +155,17 @@ def verify(https):
         # If only key-based methods are enabled,
         # fail the commit if no valid key configurations are found
         if (not valid_keys_exist) and (not jwt_auth):
-            raise ConfigError('At least one HTTPS API key is required unless GraphQL token authentication is enabled!')
+            raise ConfigError(
+                'At least one HTTPS API key is required unless GraphQL token authentication is enabled!'
+            )
 
         if (not valid_keys_exist) and jwt_auth:
-            Warning(f'API keys are not configured: classic (non-GraphQL) API will be unavailable!')
+            Warning(
+                f'API keys are not configured: classic (non-GraphQL) API will be unavailable!'
+            )
 
     return None
+
 
 def generate(https):
     if https is None:
@@ -178,11 +195,18 @@ def generate(https):
         # Append CA certificate if specified to form a full chain
         if 'ca_certificate' in https['certificates']:
             ca_cert = https['certificates']['ca_certificate']
-            server_cert += '\n' + str(wrap_certificate(https['pki']['ca'][ca_cert]['certificate']))
+            server_cert += '\n' + str(
+                wrap_certificate(https['pki']['ca'][ca_cert]['certificate'])
+            )
 
         write_file(cert_path, server_cert, user=user, group=group, mode=0o644)
-        write_file(key_path, wrap_private_key(pki_cert['private']['key']),
-                    user=user, group=group, mode=0o600)
+        write_file(
+            key_path,
+            wrap_private_key(pki_cert['private']['key']),
+            user=user,
+            group=group,
+            mode=0o600,
+        )
 
         tmp_path = {'cert_path': cert_path, 'key_path': key_path}
 
@@ -191,15 +215,21 @@ def generate(https):
             pki_dh = https['pki']['dh'][dh_name]
             if 'parameters' in pki_dh:
                 dh_path = os.path.join(cert_dir, f'{dh_name}_dh.pem')
-                write_file(dh_path, wrap_dh_parameters(pki_dh['parameters']),
-                           user=user, group=group, mode=0o600)
-                tmp_path.update({'dh_file' : dh_path})
+                write_file(
+                    dh_path,
+                    wrap_dh_parameters(pki_dh['parameters']),
+                    user=user,
+                    group=group,
+                    mode=0o600,
+                )
+                tmp_path.update({'dh_file': dh_path})
 
         https['certificates'].update(tmp_path)
 
     render(config_file, 'https/nginx.default.j2', https)
     render(systemd_override, 'https/override.conf.j2', https)
     return None
+
 
 def apply(https):
     # Reload systemd manager configuration
@@ -224,6 +254,7 @@ def apply(https):
         call(f'systemctl restart {https_service_name}')
     else:
         call(f'systemctl reload-or-restart {https_service_name}')
+
 
 if __name__ == '__main__':
     try:
