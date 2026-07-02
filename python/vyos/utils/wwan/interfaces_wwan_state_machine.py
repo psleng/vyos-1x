@@ -11235,9 +11235,17 @@ class ModemStateMachine:
         legacy wideband metric for 2G/3G. The two scales differ by ~20 dB, so
         each is compared against its own configured threshold.
 
+        On 5G NSA the modem serves an NR carrier PLUS an LTE anchor
+        (``anchor_rsrp`` in the detail).  Either carrier alone keeps the link
+        up and LTE throughput is comparable, so the effective coverage is the
+        BETTER of the two RSRPs -- this prevents a SIM failover being triggered
+        just because the NR SCell faded while the LTE anchor is still strong
+        (the network would simply drop you back to LTE anyway).
+
         Args:
             signal_detail: dict from _get_detailed_signal_quality with keys
-                'technology', 'rssi', 'rsrp' (values may be '' when absent).
+                'technology', 'rssi', 'rsrp' (values may be '' when absent),
+                plus optional 'anchor_rsrp' (LTE anchor RSRP on 5G NSA).
             signal_dbm: the collapsed dBm value (fallback when the preferred
                 metric field is unavailable).
             rssi_threshold: configured RSSI threshold (dBm).
@@ -11259,17 +11267,23 @@ class ModemStateMachine:
         rsrp = _num(detail.get('rsrp'))
         rssi = _num(detail.get('rssi'))
 
+        # 5G NSA: fold in the LTE anchor and use the stronger RSRP.
+        anchor_rsrp = _num(detail.get('anchor_rsrp'))
+        best_rsrp = rsrp
+        if anchor_rsrp is not None:
+            best_rsrp = anchor_rsrp if best_rsrp is None else max(best_rsrp, anchor_rsrp)
+
         # LTE / 5G-NR: prefer RSRP (3GPP coverage metric) when available.
-        if technology in ('LTE', '5G NR', 'NR5G', '5G') and rsrp is not None:
-            return 'rsrp', rsrp, rsrp_threshold
+        if technology in ('LTE', '5G NR', 'NR5G', '5G') and best_rsrp is not None:
+            return 'rsrp', best_rsrp, rsrp_threshold
 
         # 2G/3G or any RAT that only exposes RSSI.
         if rssi is not None:
             return 'rssi', rssi, rssi_threshold
 
         # No technology hint but an RSRP value is present (e.g. LTE-only modem).
-        if rsrp is not None:
-            return 'rsrp', rsrp, rsrp_threshold
+        if best_rsrp is not None:
+            return 'rsrp', best_rsrp, rsrp_threshold
 
         # Last resort: compare the collapsed value against the RSSI threshold
         # (matches legacy behaviour and the documented default scale).
@@ -11397,22 +11411,80 @@ class ModemStateMachine:
                         return v.value if hasattr(v, 'value') else v
                     return None
 
-                # Get LTE signal metrics from Signal interface
-                lte_signal_variant = await props.call_get("org.freedesktop.ModemManager1.Modem.Signal", "Lte")
-                if lte_signal_variant and lte_signal_variant.value:
-                    lte_signals = lte_signal_variant.value
+                def _first_num(signals, *keys):
+                    """First of *keys* present with a real numeric value.
 
-                    # Try RSSI first (most common)
-                    if 'rssi' in lte_signals:
-                        signal_dbm = _extract_val(lte_signals, 'rssi')
-                        logger.debug(f"Got RSSI signal: {signal_dbm} dBm",
-                                   extra={'interface_number': self.interface_number})
-                    # Fall back to RSRP for LTE
-                    elif 'rsrp' in lte_signals:
-                        signal_dbm = _extract_val(lte_signals, 'rsrp')
-                        logger.debug(f"Got RSRP signal: {signal_dbm} dBm",
-                                   extra={'interface_number': self.interface_number})
+                    Lets us prefer RSRP over RSSI and reject empty/'' fields so
+                    an empty per-RAT dict never masks a populated one.
+                    """
+                    for k in keys:
+                        v = _extract_val(signals, k)
+                        if v is None or v == '':
+                            continue
+                        try:
+                            float(v)
+                        except (TypeError, ValueError):
+                            continue
+                        return v
+                    return None
 
+                # Read BOTH the NR (SCell) and LTE (anchor / PCell) signal
+                # dicts up front so we can detect 5G NSA (both populated).
+                nr5g_signals = None
+                lte_signals = None
+                try:
+                    v = await props.call_get("org.freedesktop.ModemManager1.Modem.Signal", "Nr5g")
+                    if v and v.value:
+                        nr5g_signals = v.value
+                except Exception:
+                    pass
+                try:
+                    v = await props.call_get("org.freedesktop.ModemManager1.Modem.Signal", "Lte")
+                    if v and v.value:
+                        lte_signals = v.value
+                except Exception:
+                    pass
+
+                # 5G is measured by SS-RSRP; LTE by RSRP.  Prefer RSRP, fall
+                # back to RSSI, and reject empty fields (via _first_num).
+                nr_dbm = _first_num(nr5g_signals, 'rsrp', 'rssi') if nr5g_signals else None
+                lte_dbm = _first_num(lte_signals, 'rsrp', 'rssi') if lte_signals else None
+
+                if nr_dbm is not None:
+                    # NR present -> report 5G NR as the primary metric (this is
+                    # what the LED / display track).  Guarding on a real number
+                    # means an empty Nr5g dict never masks a live LTE anchor.
+                    signal_dbm = nr_dbm
+                    logger.debug(f"Got 5G NR signal: {signal_dbm} dBm",
+                               extra={'interface_number': self.interface_number})
+                    signal_detail = {
+                        'technology': '5G NR',
+                        'rssi': _extract_val(nr5g_signals, 'rssi') or '',
+                        'rsrp': _extract_val(nr5g_signals, 'rsrp') or '',
+                        'rsrq': _extract_val(nr5g_signals, 'rsrq') or '',
+                        'snr': _extract_val(nr5g_signals, 'snr') or '',
+                    }
+                    # 5G NSA: the LTE anchor is also serving.  Record its RSRP
+                    # as an anchor so the failover / reconnection threshold can
+                    # use the BETTER of the two carriers -- either one alone
+                    # keeps the link up (and LTE throughput is comparable), so
+                    # we must NOT fail the SIM over just because the NR SCell
+                    # faded while the anchor is still strong.  Display stays
+                    # NR-only; the anchor influences the decision, not the UI.
+                    if lte_dbm is not None:
+                        signal_detail['anchor_technology'] = 'LTE'
+                        signal_detail['anchor_rsrp'] = _extract_val(lte_signals, 'rsrp') or ''
+                        signal_detail['anchor_rssi'] = _extract_val(lte_signals, 'rssi') or ''
+                        logger.debug(f"5G NSA: NR {nr_dbm} dBm + LTE anchor {lte_dbm} dBm",
+                                   extra={'interface_number': self.interface_number})
+                elif lte_dbm is not None:
+                    # LTE-only (or NSA anchor without a usable NR reading).
+                    # Prefer RSRP so the collapsed dBm matches the RSRP shown in
+                    # status/op-mode and used by the thresholds (RSSI sits
+                    # ~20 dB higher and would misread as "stronger").
+                    signal_dbm = lte_dbm
+                    logger.debug(f"Got LTE signal: {signal_dbm} dBm",
+                               extra={'interface_number': self.interface_number})
                     signal_detail = {
                         'technology': 'LTE',
                         'rssi': _extract_val(lte_signals, 'rssi') or '',
@@ -11421,33 +11493,9 @@ class ModemStateMachine:
                         'snr': _extract_val(lte_signals, 'snr') or '',
                     }
 
-                # Try other technologies if LTE not available
+                # Other RATs (3G/2G) -- only if neither NR nor LTE produced a
+                # usable reading above.
                 if signal_dbm is None:
-                    # Try 5G NR signals first (most modern)
-                    try:
-                        nr5g_signal_variant = await props.call_get("org.freedesktop.ModemManager1.Modem.Signal", "Nr5g")
-                        if nr5g_signal_variant and nr5g_signal_variant.value:
-                            nr5g_signals = nr5g_signal_variant.value
-                            # 5G typically uses RSRP as primary metric
-                            if 'rsrp' in nr5g_signals:
-                                signal_dbm = _extract_val(nr5g_signals, 'rsrp')
-                                logger.debug(f"Got 5G NR RSRP signal: {signal_dbm} dBm",
-                                           extra={'interface_number': self.interface_number})
-                            elif 'rssi' in nr5g_signals:
-                                signal_dbm = _extract_val(nr5g_signals, 'rssi')
-                                logger.debug(f"Got 5G NR RSSI signal: {signal_dbm} dBm",
-                                           extra={'interface_number': self.interface_number})
-
-                            signal_detail = {
-                                'technology': '5G NR',
-                                'rssi': _extract_val(nr5g_signals, 'rssi') or '',
-                                'rsrp': _extract_val(nr5g_signals, 'rsrp') or '',
-                                'rsrq': _extract_val(nr5g_signals, 'rsrq') or '',
-                                'snr': _extract_val(nr5g_signals, 'snr') or '',
-                            }
-                    except Exception:
-                        pass
-
                     # Try UMTS signals (3G)
                     if signal_dbm is None:
                         try:
@@ -11749,6 +11797,7 @@ class ModemStateMachine:
                                   'metric': metric_name,
                                   'metric_dbm': metric_dbm,
                                   'threshold_dbm': threshold,
+                                  'anchor_rsrp': (signal_detail or {}).get('anchor_rsrp', ''),
                                   'recovery_threshold_dbm': recovery_threshold})
                 self._signal_failover_below_since = None
                 self._signal_failover_below_count = 0
@@ -11782,6 +11831,7 @@ class ModemStateMachine:
                                  'metric': metric_name,
                                  'metric_dbm': metric_dbm,
                                  'threshold_dbm': threshold,
+                                 'anchor_rsrp': (signal_detail or {}).get('anchor_rsrp', ''),
                                  'signal_loss_timer': loss_timer})
             return
 
@@ -12228,31 +12278,55 @@ class ModemStateMachine:
                                 out[sk] = sv.value if hasattr(sv, 'value') else sv
                         return out
 
-                    # Try LTE first
-                    lte = _unwrap_sig_dict(sig_all.get('Lte'))
-                    if lte:
-                        signal_dbm = lte.get('rssi') or lte.get('rsrp')
-                        signal_detail = {
-                            'technology': 'LTE',
-                            'rssi': lte.get('rssi', ''),
-                            'rsrp': lte.get('rsrp', ''),
-                            'rsrq': lte.get('rsrq', ''),
-                            'snr': lte.get('snr', ''),
-                            'ecio': '',
-                            'rscp': '',
-                        }
+                    def _num_or_none(d, *keys):
+                        """First of *keys* with a real numeric value (in order).
 
-                    # 5G NR
-                    if signal_dbm is None:
-                        nr5g = _unwrap_sig_dict(sig_all.get('Nr5g'))
-                        if nr5g:
-                            signal_dbm = nr5g.get('rsrp') or nr5g.get('rssi')
+                        Prefers RSRP over RSSI and rejects empty/'' so an empty
+                        per-RAT dict never masks a populated one.
+                        """
+                        for k in keys:
+                            v = d.get(k)
+                            if v is None or v == '':
+                                continue
+                            try:
+                                float(v)
+                            except (TypeError, ValueError):
+                                continue
+                            return v
+                        return None
+
+                    # 5G NR first.  On 5G NSA both Lte (anchor) and Nr5g (SCell)
+                    # are populated; the NR carrier is the meaningful one, so
+                    # prefer it.  The numeric guard means an empty Nr5g dict can
+                    # never mask LTE, and SA / LTE-only fall through to LTE.
+                    nr5g = _unwrap_sig_dict(sig_all.get('Nr5g'))
+                    if nr5g:
+                        nr_dbm = _num_or_none(nr5g, 'rsrp', 'rssi')  # SS-RSRP first
+                        if nr_dbm is not None:
+                            signal_dbm = nr_dbm
                             signal_detail = {
                                 'technology': '5G NR',
                                 'rssi': nr5g.get('rssi', ''),
                                 'rsrp': nr5g.get('rsrp', ''),
                                 'rsrq': nr5g.get('rsrq', ''),
                                 'snr': nr5g.get('snr', ''),
+                                'ecio': '',
+                                'rscp': '',
+                            }
+
+                    # LTE (also the NSA anchor).  Prefer RSRP over RSSI so the
+                    # reported strength is the coverage metric, consistent with
+                    # the failover/reconnection path.
+                    if signal_dbm is None:
+                        lte = _unwrap_sig_dict(sig_all.get('Lte'))
+                        if lte:
+                            signal_dbm = _num_or_none(lte, 'rsrp', 'rssi')
+                            signal_detail = {
+                                'technology': 'LTE',
+                                'rssi': lte.get('rssi', ''),
+                                'rsrp': lte.get('rsrp', ''),
+                                'rsrq': lte.get('rsrq', ''),
+                                'snr': lte.get('snr', ''),
                                 'ecio': '',
                                 'rscp': '',
                             }
