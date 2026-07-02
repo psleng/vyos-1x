@@ -79,9 +79,6 @@ from .models import PoweroffModel
 from .models import TracerouteModel
 from .models import AuthModel
 
-
-from pydantic import ValidationError
-
 if TYPE_CHECKING:
     from fastapi import FastAPI
 
