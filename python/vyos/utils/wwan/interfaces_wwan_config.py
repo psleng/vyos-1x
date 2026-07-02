@@ -2140,3 +2140,37 @@ class InterfaceConfig(ServiceInterface):
             logger.error(f"SMS delete-all failed: {e}",
                         extra={'interface_number': self.interface_number})
             raise DBusError("com.igos.IgosModemManager.SmsError", str(e))
+
+    @method()
+    async def change_sim_pin(self, new_pin: 's') -> 'a{sv}':  # type: ignore[name-defined]  # noqa: F821, F722
+        """Create or change the SIM PIN on the active, registered SIM.
+
+        Auto-detects create vs change from the SIM's current lock state.
+        Returns a dict with 'action' ('created'|'changed'|'unchanged') and
+        'slot' (the active slot number the change was applied to).
+        """
+        try:
+            logger.info("SIM PIN change requested",
+                       extra={'interface_number': self.interface_number})
+            result = await self.fsm.change_sim_pin(str(new_pin))
+            return {k: Variant('s', str(v)) for k, v in result.items()}
+        except Exception as e:
+            logger.error(f"SIM PIN change failed: {e}",
+                        extra={'interface_number': self.interface_number})
+            raise DBusError("com.igos.IgosModemManager.SimPinError", str(e))
+
+    @method()
+    async def remove_sim_pin(self) -> 'a{sv}':  # type: ignore[name-defined]  # noqa: F821, F722
+        """Disable the SIM PIN lock on the active, registered SIM.
+
+        Returns a dict with 'action' ('removed'|'already-disabled') and 'slot'.
+        """
+        try:
+            logger.info("SIM PIN removal requested",
+                       extra={'interface_number': self.interface_number})
+            result = await self.fsm.remove_sim_pin()
+            return {k: Variant('s', str(v)) for k, v in result.items()}
+        except Exception as e:
+            logger.error(f"SIM PIN removal failed: {e}",
+                        extra={'interface_number': self.interface_number})
+            raise DBusError("com.igos.IgosModemManager.SimPinError", str(e))
