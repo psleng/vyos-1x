@@ -97,6 +97,12 @@
                       <constraintErrorMessage>Invalid email identifier</constraintErrorMessage>
                     </properties>
                   </leafNode>
+                  <leafNode name="saml-jit">
+                    <properties>
+                      <help>Marks this user as SAML JIT provisioned (re-evaluated on each login)</help>
+                      <valueless/>
+                    </properties>
+                  </leafNode>
                   <leafNode name="encrypted-password">
                     <properties>
                       <help>Encrypted password</help>
