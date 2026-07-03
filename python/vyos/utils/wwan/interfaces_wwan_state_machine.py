@@ -12026,6 +12026,79 @@ class ModemStateMachine:
             'auto_failover_active': self.current_active_sim != self.config_active_sim
         }
 
+    async def _ensure_modem_proxy_for_status(self):
+        """Make sure ``self.proxy`` points at a live modem before a status read.
+
+        In FAILED / post-reset states ``self.proxy`` can be ``None`` or stale
+        (it was cleared by a reset, SIM switch or bus swap) even though
+        ModemManager still exposes the modem and therefore still knows its
+        hardware, SIM, band and signal details.  Without this, every
+        ``if self.proxy:`` guarded section of :meth:`get_comprehensive_status`
+        is skipped and the operator sees an almost-empty report even though the
+        data is right there in ModemManager.
+
+        Rather than cache and replay stale values, re-resolve the modem
+        straight from ModemManager via ``GetManagedObjects`` — exactly how the
+        initial scan matches it (``Device == "modemN"``) — and adopt it so this
+        and every downstream read (including the helper methods that read
+        ``self.proxy`` internally) return live data.
+
+        Read-only and fully defensive: on any error it leaves ``self.proxy``
+        untouched, so a genuinely absent modem still yields the empty report.
+        """
+        # Fast path — a current proxy that still answers is kept as-is.
+        if self.proxy is not None:
+            try:
+                props = self.proxy.get_interface("org.freedesktop.DBus.Properties")
+                await props.call_get(MODEM_INTERFACE, "Device")
+                return
+            except Exception:
+                pass  # Stale handle — fall through and re-resolve from MM.
+
+        if self.bus is None:
+            return
+
+        target_modem_id = f"modem{self.interface_number}"
+        try:
+            msg = Message(
+                destination=MODEM_MANAGER_SERVICE,
+                path=MODEM_MANAGER_PATH,
+                interface=OBJECT_MANAGER_INTERFACE,
+                member="GetManagedObjects",
+            )
+            reply = await self.bus.call(msg)
+            if reply.message_type.name != "METHOD_RETURN":
+                return
+            managed_objects = reply.body[0]
+        except Exception:
+            return
+
+        for path, interfaces in managed_objects.items():
+            if MODEM_INTERFACE not in interfaces:
+                continue
+            try:
+                introspect = await self.bus.introspect(MODEM_MANAGER_SERVICE, path)
+                proxy = self.bus.get_proxy_object(MODEM_MANAGER_SERVICE, path, introspect)
+                props = proxy.get_interface("org.freedesktop.DBus.Properties")
+                device_variant = await props.call_get(MODEM_INTERFACE, "Device")
+                if device_variant.value != target_modem_id:
+                    continue
+
+                # Adopt the freshly-resolved modem for this and subsequent reads.
+                self.proxy = proxy
+                self.modem_path = path
+                try:
+                    self.connection_manager.set_proxy(proxy)
+                except Exception:
+                    pass
+                logger.info(
+                    "Re-resolved modem from ModemManager for status read",
+                    extra={'interface_number': self.interface_number,
+                           'modem_path': path})
+                return
+            except Exception:
+                continue
+
     # ------------------------------------------------------------------
     # Comprehensive status report (used by D-Bus get_status)
     # ------------------------------------------------------------------
@@ -12043,6 +12116,12 @@ class ModemStateMachine:
         # serving-cell fallback) can safely read the QMI control port even if
         # that GetAll never ran or failed.
         modem_props = {}
+
+        # Self-heal the modem handle first: in FAILED / post-reset states
+        # self.proxy may be None or stale even though ModemManager still knows
+        # the modem.  Re-resolving it live here means the hardware, SIM, band
+        # and signal sections below report real data instead of blanks.
+        await self._ensure_modem_proxy_for_status()
 
         # ── 1. FSM / interface identity ──────────────────────────────────
         current_state = (
