@@ -493,6 +493,13 @@ class ModemStateMachine:
         # counting against what monitor_data_usage() already persisted.
         self._usage_baseline_bytes = None   # Cumulative bytes at start of current session
         self._usage_baseline_slot = None    # Slot the baseline was captured for
+        # Session-byte offset applied after an operator "clear data-usage" that
+        # lands mid-session.  The bearer's rx+tx counter is owned by
+        # ModemManager and cannot be zeroed on demand, so we record the raw
+        # session bytes counted up to the clear and discount them from every
+        # subsequent total.  Slot-keyed so it only affects the cleared slot.
+        self._usage_session_offset = 0
+        self._usage_session_offset_slot = None
         # Last-known live session byte count, refreshed on every successful
         # bearer Stats read (monitor loop + status builder).  Lets the flush
         # salvage usage even when the modem is already gone (e.g. modem_removed
@@ -5453,6 +5460,10 @@ class ModemStateMachine:
         # by the caller (e.g. on_modem_removed) before this point.
         self._last_session_bytes = 0
         self._last_session_slot = None
+        # Drop any mid-session clear offset — it belongs to the session that
+        # just ended and must not suppress usage on the next one.
+        self._usage_session_offset = 0
+        self._usage_session_offset_slot = None
 
         logger.info("Recorded bearer disconnect",
                    extra={'interface_number': self.interface_number,
@@ -5553,6 +5564,25 @@ class ModemStateMachine:
         counter when a replacement SIM is issued on the same plan.
         """
         return self.current_active_sim or self.config.get('primary_sim_slot', 1)
+
+    def _effective_session_bytes(self, raw_session_bytes: int, slot: int) -> int:
+        """Live session bytes after discounting a mid-session usage clear.
+
+        The bearer's rx+tx counter is owned by ModemManager and keeps counting
+        from bearer connect; it cannot be zeroed on demand.  When an operator
+        clears data usage for the active slot mid-session, the raw session byte
+        count at that instant is recorded as an offset so every consumer (the
+        monitor loop, the flush path and the status report) measures session
+        usage from the clear point instead of from bearer connect.  The offset
+        is slot-keyed, so it never suppresses usage on a different slot.
+        """
+        try:
+            raw = int(raw_session_bytes or 0)
+        except (TypeError, ValueError):
+            raw = 0
+        if self._usage_session_offset_slot == slot and self._usage_session_offset:
+            return max(0, raw - self._usage_session_offset)
+        return max(0, raw)
 
     def _ensure_usage_monitoring_started(self, source: str):
         """Start usage monitoring whenever a bearer is connected."""
@@ -10739,6 +10769,10 @@ class ModemStateMachine:
         # cumulative + session formula, without double counting.
         self._usage_baseline_bytes = cumulative_bytes
         self._usage_baseline_slot = self._current_usage_slot()
+        # New session — drop any stale mid-session clear offset from a prior
+        # session so it cannot suppress this session's usage.
+        self._usage_session_offset = 0
+        self._usage_session_offset_slot = None
         warnings_logged = set()   # tracks which pct thresholds have been logged
         limit_logged = False
 
@@ -10757,14 +10791,28 @@ class ModemStateMachine:
                             stats = stats_variant.value
                             rx_bytes = stats.get('rx-bytes', 0)
                             tx_bytes = stats.get('tx-bytes', 0)
-                            session_bytes = rx_bytes + tx_bytes
-                            total_bytes = cumulative_bytes + session_bytes
+                            raw_session_bytes = rx_bytes + tx_bytes
+                            active_slot = self._current_usage_slot()
 
-                            # Cache the live session so an unplanned drop (e.g.
-                            # modem removal) can still salvage usage even after
-                            # the bearer becomes unreadable.
-                            self._last_session_bytes = session_bytes
-                            self._last_session_slot = self._current_usage_slot()
+                            # Cache the RAW live session so an unplanned drop
+                            # (e.g. modem removal) can still salvage usage even
+                            # after the bearer becomes unreadable.  The clear
+                            # offset is applied to totals only, never to this
+                            # salvage value.
+                            self._last_session_bytes = raw_session_bytes
+                            self._last_session_slot = active_slot
+
+                            # Honor an operator "clear data-usage" that may have
+                            # landed since this task started: the baseline attr
+                            # and session offset are the live source of truth,
+                            # so a clear converges this loop to zero on its next
+                            # poll instead of re-inflating the on-disk value.
+                            if (self._usage_baseline_slot == active_slot
+                                    and self._usage_baseline_bytes is not None):
+                                cumulative_bytes = self._usage_baseline_bytes
+                            session_bytes = self._effective_session_bytes(
+                                raw_session_bytes, active_slot)
+                            total_bytes = cumulative_bytes + session_bytes
 
                             logger.info("Data usage check",
                                        extra={'interface_number': self.interface_number,
@@ -11076,7 +11124,7 @@ class ModemStateMachine:
                                    'usage_tracking_slot': slot})
                 return
 
-        total_bytes = baseline + session_bytes
+        total_bytes = baseline + self._effective_session_bytes(session_bytes, slot)
         # Never regress a larger value already persisted (e.g. by a monitor
         # poll that ran after the cache was captured).
         existing = self._load_all_persisted_usage().get(str(slot), {})
@@ -11091,6 +11139,109 @@ class ModemStateMachine:
                           'usage_tracking_slot': slot,
                           'session_bytes': session_bytes,
                           'total_bytes': total_bytes})
+
+    async def clear_data_usage(self, slot: int) -> dict:
+        """Zero the persisted data-usage counters for one SIM slot.
+
+        Resets a slot's cumulative usage (and any in-flight session for the
+        active slot) to zero — for a new billing cycle or for diagnostics.  The
+        prior values are logged before they are cleared so the reset stays
+        auditable.
+
+        Concurrency: this coroutine takes its snapshot and performs the reset
+        with **no await points**, so on the single FSM event loop it runs
+        atomically with respect to the usage monitor, the SIM-switchover flush
+        and every other handler — it cannot interleave part-way through a
+        switchover.  For the active slot it also zeroes the in-memory baseline
+        and records a session offset, so a running monitor converges the
+        on-disk value to zero on its next poll instead of re-inflating it.
+
+        Returns a dict describing what was cleared and the previous values.
+        """
+        try:
+            slot = int(slot)
+        except (TypeError, ValueError):
+            raise ValueError(f'Invalid SIM slot: {slot!r}')
+
+        if slot < 1:
+            raise ValueError(f'SIM slot must be >= 1, got {slot}')
+
+        # Validate against configured slots when config is available so a typo
+        # does not silently create a bogus slot entry on disk.
+        configured_slots = sorted(
+            s.get('slot') for s in (self.config.get('sim_slots', []) if self.config else [])
+            if isinstance(s.get('slot'), int)
+        )
+        if configured_slots and slot not in configured_slots:
+            raise ValueError(
+                f'SIM slot {slot} is not configured (configured slots: '
+                f'{", ".join(str(s) for s in configured_slots)})')
+
+        active_slot = self._current_usage_slot()
+        is_active = (slot == active_slot)
+
+        # ── Snapshot prior values (same accounting as the status report) ──
+        persisted_entry = self._load_all_persisted_usage().get(str(slot), {}) or {}
+        prior_disk_bytes = (
+            int(persisted_entry.get('bytes', 0))
+            if isinstance(persisted_entry, dict) else 0
+        )
+        if (is_active and self._usage_baseline_slot == slot
+                and self._usage_baseline_bytes is not None):
+            prior_cumulative = int(self._usage_baseline_bytes)
+        else:
+            prior_cumulative = prior_disk_bytes
+
+        prior_session = 0
+        if is_active and self._last_session_slot == slot:
+            prior_session = self._effective_session_bytes(self._last_session_bytes, slot)
+        prior_total = prior_cumulative + prior_session
+
+        # ── Reset — synchronous critical section, DO NOT await below ──────
+        if is_active:
+            # Zero the baseline and discount the in-flight session so the
+            # running monitor / flush / status all report from zero without
+            # waiting for a bearer reconnect.
+            self._usage_baseline_bytes = 0
+            self._usage_baseline_slot = slot
+            raw_session_now = (
+                self._last_session_bytes if self._last_session_slot == slot else 0
+            )
+            self._usage_session_offset = int(raw_session_now or 0)
+            self._usage_session_offset_slot = slot
+
+        # Persist zero for this slot only (leaves other slots untouched).
+        self._persist_usage(0, slot=slot)
+        # ── End critical section ──────────────────────────────────────────
+
+        logger.warning(
+            "Cleared data-usage counters for SIM slot",
+            extra={'interface_number': self.interface_number,
+                   'sim_slot': slot,
+                   'was_active': is_active,
+                   'previous_cumulative_bytes': prior_cumulative,
+                   'previous_session_bytes': prior_session,
+                   'previous_total_bytes': prior_total})
+
+        self._emit_alert(
+            alert_type='data_usage_cleared',
+            severity='info',
+            message=f'Data usage counters cleared for SIM slot {slot}',
+            sim_slot=slot,
+            was_active=is_active,
+            previous_total_bytes=int(prior_total),
+            previous_cumulative_bytes=int(prior_cumulative),
+            previous_session_bytes=int(prior_session),
+        )
+
+        return {
+            'status': 'cleared',
+            'slot': slot,
+            'was_active': is_active,
+            'previous_cumulative_bytes': prior_cumulative,
+            'previous_session_bytes': prior_session,
+            'previous_total_bytes': prior_total,
+        }
 
     @staticmethod
     def _billing_cycle_crossed(last_dt, now_dt, billing_day: int) -> bool:
@@ -12704,6 +12855,10 @@ class ModemStateMachine:
                 # cumulative and there is no separate live session to add.
                 active_prior = persisted_active
                 session_total = 0
+
+            # Discount any mid-session clear so the reported total reflects
+            # usage since the clear, not since bearer connect.
+            session_total = self._effective_session_bytes(session_total, active_slot)
 
             status['cumulative_bytes'] = active_prior
             status['cumulative_plus_session'] = active_prior + session_total

@@ -1084,6 +1084,34 @@ class WWANClient:
         except DBusError as exc:
             raise WWANError(f"DeleteAllSms failed: {exc}") from exc
 
+    # ── Data usage methods ───────────────────────────────────────
+
+    async def clear_data_usage(
+        self, interface_number: int, slot: int
+    ) -> Dict[str, Any]:
+        """Zero the persisted data-usage counters for a SIM slot.
+
+        Parameters
+        ----------
+        interface_number : int
+            Interface index.
+        slot : int
+            SIM slot number whose counters to clear.
+
+        Returns
+        -------
+        dict
+            ``{'status': 'cleared', 'slot': N, 'was_active': bool,
+            'previous_cumulative_bytes': int, 'previous_session_bytes': int,
+            'previous_total_bytes': int}``
+        """
+        iface = await self._get_iface(interface_number)
+        try:
+            raw = await iface.call_clear_data_usage(int(slot))
+            return _variant_to_python(raw)
+        except DBusError as exc:
+            raise WWANError(f"ClearDataUsage failed: {exc}") from exc
+
     # ── SIM PIN methods ──────────────────────────────────────────────────
 
     async def change_sim_pin(
@@ -1445,6 +1473,10 @@ class WWANClientSync:
     def get_status(self, interface_number: int) -> Dict[str, Any]:
         """Full status dict.  See :meth:`WWANClient.get_status`."""
         return self._run(self._call("get_status", interface_number))
+
+    def clear_data_usage(self, interface_number: int, slot: int) -> Dict[str, Any]:
+        """Clear per-SIM data usage.  See :meth:`WWANClient.clear_data_usage`."""
+        return self._run(self._call("clear_data_usage", interface_number, slot=slot))
 
     def get_recent_alerts(self, limit: int = 50, interface_number: int = -1) -> list:
         """Fetch recent alerts.  See :meth:`WWANClient.get_recent_alerts`."""

@@ -2174,3 +2174,32 @@ class InterfaceConfig(ServiceInterface):
             logger.error(f"SIM PIN removal failed: {e}",
                         extra={'interface_number': self.interface_number})
             raise DBusError("com.igos.IgosModemManager.SimPinError", str(e))
+
+    @method()
+    async def clear_data_usage(self, slot: 'i') -> 'a{sv}':  # type: ignore[name-defined]  # noqa: F821, F722
+        """Zero the persisted data-usage counters for a SIM slot.
+
+        Returns a dict with 'status', 'slot', 'was_active' and the previous
+        cumulative / session / total byte counts.
+        """
+        try:
+            logger.info("Data usage clear requested",
+                       extra={'interface_number': self.interface_number,
+                              'sim_slot': int(slot)})
+            result = await self.fsm.clear_data_usage(int(slot))
+            out = {}
+            for k, v in result.items():
+                # bool must be tested before int (bool is an int subclass).
+                if isinstance(v, bool):
+                    out[k] = Variant('b', v)
+                elif isinstance(v, int):
+                    out[k] = Variant('x', v)
+                else:
+                    out[k] = Variant('s', str(v))
+            return out
+        except ValueError as e:
+            raise DBusError("com.igos.IgosModemManager.InvalidSimSlot", str(e))
+        except Exception as e:
+            logger.error(f"Data usage clear failed: {e}",
+                        extra={'interface_number': self.interface_number})
+            raise DBusError("com.igos.IgosModemManager.DataUsageError", str(e))
