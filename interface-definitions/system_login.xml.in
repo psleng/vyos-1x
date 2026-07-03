@@ -448,7 +448,7 @@
                       </tagNode>
                     </children>
                   </node>
-                  <node name="operator+">
+                  <node name="super-operator">
                     <properties>
                       <help>Attributes that grant operator role</help>
                     </properties>

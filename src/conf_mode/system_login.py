@@ -219,7 +219,7 @@ def verify(login):
 
         # Verify JIT role mappings have at least one attribute with values
         if 'jit' in login['saml']:
-            for role in ('admin', 'operator'):
+            for role in ('admin', 'operator', 'super-operator'):
                 if role in login['saml']['jit']:
                     role_config = login['saml']['jit'][role]
                     if 'attribute' not in role_config:
@@ -645,7 +645,7 @@ def generate(login):
             saml_conf['serial-address'] = login['saml']['serial_address']
         if 'jit' in login['saml']:
             jit_conf = {}
-            for role in ('admin', 'operator'):
+            for role in ('admin', 'operator', 'super-operator'):
                 if role in login['saml']['jit']:
                     keys = {}
                     for attr_name, attr_config in (
