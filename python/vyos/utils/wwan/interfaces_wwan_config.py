@@ -104,6 +104,9 @@ class InterfaceConfig(ServiceInterface):
         "network_scan_timeout": 60,
         "network_mode": "auto",
 
+        # Network time (NITZ) — opt-in system-clock set at registration
+        "network_time_enabled": False,
+
         # Monitoring intervals
         "normal_monitoring_interval": 30,
 
@@ -1458,6 +1461,12 @@ class InterfaceConfig(ServiceInterface):
                           extra={'interface_number': self.interface_number,
                                  'validation_field': 'log_sink'})
             raise ValueError("log_sink must be 'both', 'journal', or 'syslog'")
+
+        if 'network_time_enabled' in config and not isinstance(config['network_time_enabled'], bool):
+            logger.warning("Invalid network_time_enabled",
+                          extra={'interface_number': self.interface_number,
+                                 'validation_field': 'network_time_enabled'})
+            raise ValueError("network_time_enabled must be true or false")
 
     def _normalize_connectivity_monitoring(self, config_data):
         """Normalize connectivity monitoring configuration"""

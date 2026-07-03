@@ -522,6 +522,20 @@ class ModemStateMachine:
         # ICCID lock state — set by _validate_sim_iccid()
         self.iccid_mismatch = False         # True when inserted SIM doesn't match configured ICCID
 
+        # Network-time (NITZ) opt-in: True once the system clock has been set
+        # from cellular network time this service run, so it is done at most
+        # once and never repeatedly writes the RTC on every reconfigure.
+        self._network_time_applied = False
+        # Bounded background loop that keeps retrying network-time acquisition
+        # after registration (NITZ can arrive seconds-to-minutes late).
+        self._network_time_task = None
+        # The Modem.Time interface the NetworkTimeChanged handler is bound to,
+        # tracked so the signal can be explicitly unbound in lockstep with the
+        # PropertiesChanged handler (dbus_next does not drop a handler when the
+        # proxy is released — see _unbind_modem_properties_handler).
+        self._modem_time_iface = None
+        self._modem_time_bound_path = None
+
         # Reset cooldown tracking to prevent cascading failures
         self.last_reset_time = 0            # Timestamp of last hardware reset
         self.reset_cooldown_seconds = 300   # 5 minute cooldown between resets
@@ -1425,6 +1439,13 @@ class ModemStateMachine:
                     logger.info("Cancelled IP monitoring due to modem removal",
                                extra={'interface_number': self.interface_number})
 
+                # Cancel the network-time retry loop (no modem to read NITZ from)
+                if getattr(self, '_network_time_task', None) and not self._network_time_task.done():
+                    self._network_time_task.cancel()
+                    self._network_time_task = None
+                    logger.info("Cancelled network-time retry loop due to modem removal",
+                               extra={'interface_number': self.interface_number})
+
                 # Set interface DOWN immediately (modem is gone, don't wait)
                 try:
                     await self._set_interface_down()
@@ -1802,6 +1823,10 @@ class ModemStateMachine:
                             extra={'interface_number': self.interface_number})
         self._modem_properties_iface = None
         self._signal_handlers_bound_modem_path = None
+        # The NetworkTimeChanged handler is scoped to the same modem proxy, so
+        # tear it down in lockstep to avoid leaking a handler + match rule on
+        # the bus across SIM switches / modem re-enumeration / bus swaps.
+        self._unbind_modem_time_handler()
 
     def _bind_modem_properties_handler(self, props_iface, modem_path, force=False):
         """Bind the modem-level PropertiesChanged dispatcher without stacking.
@@ -2402,6 +2427,19 @@ class ModemStateMachine:
                         extra={'interface_number': self.interface_number,
                                'modem_state': mm_state})
             return
+
+        # ── Network-time (NITZ) acquisition — armed on ANY registration ──
+        # Independent of the data cascade.  This is the critical path for a box
+        # whose data plan has expired: the SIM still REGISTERS (states 8/10/11),
+        # so NITZ is available over NAS signaling, but no bearer can come up and
+        # NTP therefore can never reach a server — modem network time is then
+        # the ONLY way to correct a wrong RTC and "recover".  Placed here (not
+        # only in the initial-config cascade) so it also fires on failed-retry
+        # re-registration, recovery, on-demand and out-of-band re-attach.
+        # Idempotent + fully guarded, so calling it on every registration event
+        # is cheap and safe.
+        if mm_state in (8, 10, 11):
+            self._ensure_network_time_started()
 
         # Enhanced SIM hot-swap detection
         if mm_state == 2:  # LOCKED (SIM missing or PIN required)
@@ -3454,6 +3492,18 @@ class ModemStateMachine:
                 # alternate SIM exists.
                 await self._handle_sim_missing_failover()
                 return
+
+            # Registration is confirmed and no data bearer is up yet — the
+            # earliest safe point to set the system clock from cellular network
+            # time.  NITZ rides the registration/NAS signaling, not the data
+            # bearer, so this works in every connection mode (incl.
+            # connect-on-demand parked at REGISTERED_IDLE).  Opt-in and guarded
+            # so it never overrides an NTP-synchronized clock.
+            await self._maybe_set_system_time_from_network('initial')
+            # NITZ can arrive later than this instant (or not at all yet) — arm
+            # the bounded background poll + NetworkTimeChanged signal so a late
+            # update still sets the clock without blocking the cascade.
+            self._ensure_network_time_started()
 
             # Get SIM config for connection parameters.  Anchor on the slot
             # actually active.  Normally _configure_sim_slot (Step 2) has just
@@ -4868,6 +4918,302 @@ class ModemStateMachine:
                       extra={'interface_number': self.interface_number,
                              'timeout_seconds': timeout})
         return False
+
+    # ── Network time (NITZ) → system clock (opt-in) ──────────────────────────
+
+    @staticmethod
+    def _parse_network_time(value: str):
+        """Parse a ModemManager network-time string into a datetime.
+
+        MM returns ISO-8601 (e.g. ``2026-07-03T12:34:56+02:00``); some modems
+        omit the zone.  A value carrying an offset is used as-is; a naive value
+        is treated as UTC so the resulting epoch is deterministic regardless of
+        the box's current (possibly wrong) local timezone.  Returns ``None`` if
+        the string cannot be parsed.
+        """
+        if not value:
+            return None
+        text = str(value).strip()
+        # Python's fromisoformat handles 'Z' from 3.11+, but normalise anyway.
+        if text.endswith('Z'):
+            text = text[:-1] + '+00:00'
+        try:
+            dt = datetime.datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return dt
+
+    async def _is_ntp_synchronized(self) -> bool:
+        """Return True if systemd reports the clock as NTP-synchronized.
+
+        Used to guarantee modem network time never overrides a real NTP fix —
+        NITZ is only a cold-boot bootstrap for units with no RTC / no upstream
+        NTP reachability.  Any error is treated as "not synchronized" so the
+        bootstrap still runs when the state cannot be determined.
+        """
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                'timedatectl', 'show', '-p', 'NTPSynchronized', '--value',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await proc.communicate()
+            return stdout.decode(errors='replace').strip() == 'yes'
+        except Exception:
+            return False
+
+    async def _maybe_set_system_time_from_network(self, source: str = 'initial') -> bool:
+        """Set the system clock from cellular network time (NITZ) — opt-in.
+
+        Runs only when ``network-time`` is configured on the interface.  Reads
+        ``Modem.Time.GetNetworkTime()`` (delivered over the registration/NAS
+        signaling — no data bearer required) and sets the clock, but ONLY when
+        NTP has not already synchronized it, so it never fights chrony.  Applied
+        at most once per service run and persisted to the RTC.  Fully guarded:
+        every failure is logged and left non-fatal so the connection cascade is
+        never disrupted.
+
+        ``source`` identifies the trigger (``initial`` / ``retry`` / ``signal``)
+        for logging.  Returns ``True`` when the clock has been set OR the set is
+        no longer needed (NTP already owns it) — i.e. when the retry loop can
+        stop — and ``False`` when a later attempt should still be made.
+        """
+        try:
+            if not (self.config and self.config.get('network_time_enabled')):
+                return True
+            if self._network_time_applied:
+                return True
+            if not self.proxy:
+                return False
+
+            # Never override a real NTP fix — modem time is a bootstrap only.
+            if await self._is_ntp_synchronized():
+                logger.info(
+                    "Skipping modem network-time set — clock already "
+                    "NTP-synchronized",
+                    extra={'interface_number': self.interface_number,
+                           'source': source})
+                self._network_time_applied = True
+                return True
+
+            # Read network time over the control plane (no bearer needed).
+            try:
+                time_iface = self.proxy.get_interface(
+                    "org.freedesktop.ModemManager1.Modem.Time")
+                net_time_str = await time_iface.call_get_network_time()
+            except Exception as e:
+                logger.debug(
+                    f"Modem network time unavailable (no NITZ / interface "
+                    f"absent): {e}",
+                    extra={'interface_number': self.interface_number,
+                           'source': source})
+                return False
+
+            dt = self._parse_network_time(net_time_str)
+            if dt is None:
+                logger.warning(
+                    f"Could not parse modem network time: {net_time_str!r}",
+                    extra={'interface_number': self.interface_number,
+                           'source': source})
+                return False
+
+            epoch = int(dt.timestamp())
+            previous_epoch = int(time.time())
+
+            # Set via `date` (works even when chrony runs but has not synced;
+            # `timedatectl set-time` refuses while NTP is enabled).
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    'date', '-s', f'@{epoch}',
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                _, stderr = await proc.communicate()
+                if proc.returncode != 0:
+                    logger.warning(
+                        "Failed to set system clock from network time",
+                        extra={'interface_number': self.interface_number,
+                               'source': source,
+                               'error': stderr.decode(errors='replace').strip()})
+                    return False
+            except Exception as e:
+                logger.warning(
+                    f"Failed to set system clock from network time: {e}",
+                    extra={'interface_number': self.interface_number,
+                           'source': source})
+                return False
+
+            # Persist to the hardware clock so it survives reboot on boards
+            # that have an RTC.  Best-effort: RTC-less boards fail here
+            # harmlessly.
+            try:
+                hw = await asyncio.create_subprocess_exec(
+                    'hwclock', '--systohc',
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await hw.communicate()
+            except Exception:
+                pass
+
+            self._network_time_applied = True
+            logger.warning(
+                "System clock set from cellular network time (NITZ)",
+                extra={'interface_number': self.interface_number,
+                       'source': source,
+                       'network_time': dt.isoformat(),
+                       'previous_time': datetime.datetime.fromtimestamp(
+                           previous_epoch,
+                           datetime.timezone.utc).isoformat(),
+                       'delta_seconds': epoch - previous_epoch})
+            self._emit_alert(
+                alert_type='system_time_set',
+                severity='info',
+                message='System clock set from cellular network time (NITZ)',
+                network_time=dt.isoformat(),
+                delta_seconds=epoch - previous_epoch,
+                source=source,
+            )
+            return True
+        except Exception as e:
+            # Absolute backstop — this feature must never break the cascade.
+            logger.debug(
+                f"network-time set skipped due to unexpected error: {e}",
+                extra={'interface_number': self.interface_number,
+                       'source': source})
+            return False
+
+    def _network_time_config_enabled(self) -> bool:
+        """True when the opt-in ``network-time`` feature is configured."""
+        return bool(self.config and self.config.get('network_time_enabled'))
+
+    def _ensure_network_time_started(self):
+        """Arm background NITZ acquisition (signal + bounded poll) if needed.
+
+        Idempotent and cheap: does nothing when the feature is off, the clock
+        has already been set this run, or the loop is already running.  Called
+        from the registration gate on every (re)configuration, so a run that
+        started with no NITZ available gets a fresh acquisition window on the
+        next attach / SIM switch / recovery.
+        """
+        if not self._network_time_config_enabled():
+            return
+        if self._network_time_applied:
+            return
+        # Subscribe to NITZ push notifications so a late update is captured even
+        # after the bounded poll window closes.
+        self._bind_modem_time_handler()
+        if self._network_time_task and not self._network_time_task.done():
+            return
+        self._network_time_task = self._safe_create_task(
+            self._network_time_retry_loop())
+
+    async def _network_time_retry_loop(self):
+        """Poll for network time until the clock is set (or no longer needed).
+
+        NITZ can arrive seconds-to-minutes after registration, and some carriers
+        send it late or only sporadically.  This is the CRITICAL acquisition
+        path for a unit whose data plan has expired: the SIM still REGISTERS (so
+        NITZ is obtainable over NAS signaling) but no data bearer can come up, so
+        NTP can never reach a server — modem network time is then the ONLY way to
+        correct a wrong RTC.  We therefore never simply give up: poll fast at
+        first (NITZ usually lands within seconds), then fall back to a slow
+        steady cadence indefinitely so the clock still recovers whenever the
+        network eventually provides the time.
+
+        The loop exits only when the clock has been set, NTP has taken over, or
+        the feature is disabled.  It is cancelled with all other tasks on modem
+        removal / bus swap, and re-armed on the next registration.
+        """
+        fast_interval = 15
+        fast_deadline = time.time() + 900   # 15 min of tight polling
+        slow_interval = 300                 # then every 5 min, indefinitely
+        announced_slow = False
+        try:
+            while True:
+                if not self._network_time_config_enabled() or self._network_time_applied:
+                    return
+                if await self._maybe_set_system_time_from_network('retry'):
+                    return
+                if time.time() < fast_deadline:
+                    interval = fast_interval
+                else:
+                    if not announced_slow:
+                        announced_slow = True
+                        logger.info(
+                            "network-time still unset after 15 min — continuing "
+                            "to poll slowly (this box may depend on NITZ for its "
+                            "clock; will keep trying until the network provides it)",
+                            extra={'interface_number': self.interface_number})
+                    interval = slow_interval
+                await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.debug(f"network-time retry loop error (non-fatal): {e}",
+                        extra={'interface_number': self.interface_number})
+
+    def _dispatch_network_time_changed(self, network_time):
+        """dbus_next callback for Modem.Time ``NetworkTimeChanged``.
+
+        Signals arrive as synchronous callbacks, so schedule the guarded async
+        setter (which re-reads and applies under the NTP / applied guards).
+        Captures a NITZ push that lands after the poll window has closed.
+        """
+        try:
+            if self._network_time_applied or not self._network_time_config_enabled():
+                return
+            self._safe_create_task(
+                self._maybe_set_system_time_from_network('signal'))
+        except Exception as e:
+            logger.debug(f"NetworkTimeChanged dispatch error (non-fatal): {e}",
+                        extra={'interface_number': self.interface_number})
+
+    def _bind_modem_time_handler(self):
+        """Subscribe to Modem.Time ``NetworkTimeChanged`` (idempotent, no stacking).
+
+        Mirrors the PropertiesChanged handler discipline: track the interface +
+        path and unbind any prior registration before adding a new one so
+        handlers never accumulate on the bus across SIM switches / modem
+        re-enumeration.
+        """
+        if not self.proxy:
+            return
+        if (self._modem_time_iface is not None
+                and self._modem_time_bound_path == self.modem_path):
+            return
+        self._unbind_modem_time_handler()
+        try:
+            time_iface = self.proxy.get_interface(
+                "org.freedesktop.ModemManager1.Modem.Time")
+            time_iface.on_network_time_changed(self._dispatch_network_time_changed)
+            self._modem_time_iface = time_iface
+            self._modem_time_bound_path = self.modem_path
+            logger.info("NetworkTimeChanged signal monitoring enabled",
+                       extra={'interface_number': self.interface_number,
+                              'modem_path': self.modem_path})
+        except Exception as e:
+            # Time interface may be absent on this modem/MM build — the poll
+            # loop still covers acquisition, so this is non-fatal.
+            logger.debug(f"Could not bind NetworkTimeChanged handler: {e}",
+                        extra={'interface_number': self.interface_number})
+
+    def _unbind_modem_time_handler(self):
+        """Unbind the Modem.Time ``NetworkTimeChanged`` handler. Safe if unbound."""
+        iface = self._modem_time_iface
+        if iface is not None:
+            try:
+                iface.off_network_time_changed(self._dispatch_network_time_changed)
+                logger.debug("NetworkTimeChanged handler unbound",
+                            extra={'interface_number': self.interface_number,
+                                   'modem_path': self._modem_time_bound_path})
+            except Exception as off_err:
+                logger.debug(f"off_network_time_changed failed: {off_err}",
+                            extra={'interface_number': self.interface_number})
+        self._modem_time_iface = None
+        self._modem_time_bound_path = None
 
     async def _force_network_reregistration(self, reason: str = 'reregister'):
         """Nudge the modem to (re)acquire the network after a config change.
@@ -13267,7 +13613,8 @@ class ModemStateMachine:
         self._cancel_failed_retry()
         for task_attr in ('usage_monitor_task', 'connectivity_monitor_task',
                           'failback_task', '_initial_config_task',
-                          '_signal_poll_task', '_ip_monitoring_task'):
+                          '_signal_poll_task', '_ip_monitoring_task',
+                          '_network_time_task'):
             task = getattr(self, task_attr, None)
             if task and not task.done():
                 task.cancel()
