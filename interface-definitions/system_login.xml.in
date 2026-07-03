@@ -442,6 +442,34 @@
                       </tagNode>
                     </children>
                   </node>
+                  <node name="operator+">
+                    <properties>
+                      <help>Attributes that grant operator role</help>
+                    </properties>
+                    <children>
+                      <tagNode name="attribute">
+                        <properties>
+                          <help>SAML assertion attribute name from IdP</help>
+                          <valueHelp>
+                            <format>txt</format>
+                            <description>SAML attribute name (e.g. group, role, department)</description>
+                          </valueHelp>
+                        </properties>
+                        <children>
+                          <leafNode name="value">
+                            <properties>
+                              <help>Acceptable attribute values that grant this role</help>
+                              <multi/>
+                              <valueHelp>
+                                <format>txt</format>
+                                <description>Attribute value that maps to this role</description>
+                              </valueHelp>
+                            </properties>
+                          </leafNode>
+                        </children>
+                      </tagNode>
+                    </children>
+                  </node>
                 </children>
               </node>
             </children>

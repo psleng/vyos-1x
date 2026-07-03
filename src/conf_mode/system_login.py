@@ -276,29 +276,13 @@ def verify(login):
                         f'User "{user}" can not be created, conflict with local system account!'
                     )
 
-            # When a user authenticates via SAML, no other authentication method
-            # may be configured for that user.
+            # When a user authenticates via SAML, OTP and principal-based
+            # authentication are not supported alongside it.
             if user in saml_users:
                 auth = user_config.get('authentication', {})
-                if dict_search('plaintext_password', auth):
-                    raise ConfigError(
-                        f'User "{user}": plaintext-password cannot be set when '
-                        'authentication saml is configured'
-                    )
-                enc = dict_search('encrypted_password', auth)
-                if enc and enc != SAML_ALLOWED_ENCRYPTED_PASSWORD:
-                    raise ConfigError(
-                        f'User "{user}": encrypted-password cannot be set when '
-                        'authentication saml is configured'
-                    )
                 if dict_search('otp.key', auth):
                     raise ConfigError(
                         f'User "{user}": otp cannot be set when '
-                        'authentication saml is configured'
-                    )
-                if 'public_keys' in auth:
-                    raise ConfigError(
-                        f'User "{user}": public-keys cannot be set when '
                         'authentication saml is configured'
                     )
                 if 'principal' in auth:
