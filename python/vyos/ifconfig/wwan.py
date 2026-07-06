@@ -45,9 +45,33 @@ class WWANIf(Interface):
 
         super().remove()
 
-    def update(self, config):
-        '''Perform interface setup for wwan'''
-        super().update(config)
+    def set_admin_state(self, state):
+        # Honour the update()-scoped bring-up deferral: when the WWAN state
+        # machine owns link bring-up we must NOT raise wwanN from conf-mode.
+        # ModemManager sets the qmi_wwan data-format (raw_ip) during
+        # (re)connect and the kernel rejects that change while the netdev is
+        # running ("qmi_wwan ... Cannot change a running device"), so racing
+        # MM's write here just logs an error. Admin-DOWN is always honoured;
+        # an already-UP link is left as-is (suppressing a redundant 'up').
+        if state == 'up' and getattr(self, '_defer_admin_up', False):
+            return None
+        return super().set_admin_state(state)
+
+    def update(self, config, defer_admin_up=False):
+        '''Perform interface setup for wwan
+
+        When *defer_admin_up* is True the caller has determined that the WWAN
+        state machine will raise the link itself (ensure_link_up_on_connect),
+        which it does only AFTER ModemManager has negotiated the qmi_wwan
+        data-format (raw_ip) on the down device. In that case suppress the
+        admin-UP that the generic Interface.update() performs at its tail so
+        conf-mode does not race MM's raw_ip write on (re)connect.
+        '''
+        self._defer_admin_up = bool(defer_admin_up)
+        try:
+            super().update(config)
+        finally:
+            self._defer_admin_up = False
 
         # PSL: If "ipv6 address autoconf" is set switch to address mode 3,
         # else use the VyOS default of 1. This enables IPv6 since those
