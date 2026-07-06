@@ -493,6 +493,13 @@ class ModemStateMachine:
         # counting against what monitor_data_usage() already persisted.
         self._usage_baseline_bytes = None   # Cumulative bytes at start of current session
         self._usage_baseline_slot = None    # Slot the baseline was captured for
+        # Session-byte offset applied after an operator "clear data-usage" that
+        # lands mid-session.  The bearer's rx+tx counter is owned by
+        # ModemManager and cannot be zeroed on demand, so we record the raw
+        # session bytes counted up to the clear and discount them from every
+        # subsequent total.  Slot-keyed so it only affects the cleared slot.
+        self._usage_session_offset = 0
+        self._usage_session_offset_slot = None
         # Last-known live session byte count, refreshed on every successful
         # bearer Stats read (monitor loop + status builder).  Lets the flush
         # salvage usage even when the modem is already gone (e.g. modem_removed
@@ -514,6 +521,20 @@ class ModemStateMachine:
 
         # ICCID lock state — set by _validate_sim_iccid()
         self.iccid_mismatch = False         # True when inserted SIM doesn't match configured ICCID
+
+        # Network-time (NITZ) opt-in: True once the system clock has been set
+        # from cellular network time this service run, so it is done at most
+        # once and never repeatedly writes the RTC on every reconfigure.
+        self._network_time_applied = False
+        # Bounded background loop that keeps retrying network-time acquisition
+        # after registration (NITZ can arrive seconds-to-minutes late).
+        self._network_time_task = None
+        # The Modem.Time interface the NetworkTimeChanged handler is bound to,
+        # tracked so the signal can be explicitly unbound in lockstep with the
+        # PropertiesChanged handler (dbus_next does not drop a handler when the
+        # proxy is released — see _unbind_modem_properties_handler).
+        self._modem_time_iface = None
+        self._modem_time_bound_path = None
 
         # Reset cooldown tracking to prevent cascading failures
         self.last_reset_time = 0            # Timestamp of last hardware reset
@@ -1418,6 +1439,13 @@ class ModemStateMachine:
                     logger.info("Cancelled IP monitoring due to modem removal",
                                extra={'interface_number': self.interface_number})
 
+                # Cancel the network-time retry loop (no modem to read NITZ from)
+                if getattr(self, '_network_time_task', None) and not self._network_time_task.done():
+                    self._network_time_task.cancel()
+                    self._network_time_task = None
+                    logger.info("Cancelled network-time retry loop due to modem removal",
+                               extra={'interface_number': self.interface_number})
+
                 # Set interface DOWN immediately (modem is gone, don't wait)
                 try:
                     await self._set_interface_down()
@@ -1795,6 +1823,10 @@ class ModemStateMachine:
                             extra={'interface_number': self.interface_number})
         self._modem_properties_iface = None
         self._signal_handlers_bound_modem_path = None
+        # The NetworkTimeChanged handler is scoped to the same modem proxy, so
+        # tear it down in lockstep to avoid leaking a handler + match rule on
+        # the bus across SIM switches / modem re-enumeration / bus swaps.
+        self._unbind_modem_time_handler()
 
     def _bind_modem_properties_handler(self, props_iface, modem_path, force=False):
         """Bind the modem-level PropertiesChanged dispatcher without stacking.
@@ -2395,6 +2427,19 @@ class ModemStateMachine:
                         extra={'interface_number': self.interface_number,
                                'modem_state': mm_state})
             return
+
+        # ── Network-time (NITZ) acquisition — armed on ANY registration ──
+        # Independent of the data cascade.  This is the critical path for a box
+        # whose data plan has expired: the SIM still REGISTERS (states 8/10/11),
+        # so NITZ is available over NAS signaling, but no bearer can come up and
+        # NTP therefore can never reach a server — modem network time is then
+        # the ONLY way to correct a wrong RTC and "recover".  Placed here (not
+        # only in the initial-config cascade) so it also fires on failed-retry
+        # re-registration, recovery, on-demand and out-of-band re-attach.
+        # Idempotent + fully guarded, so calling it on every registration event
+        # is cheap and safe.
+        if mm_state in (8, 10, 11):
+            self._ensure_network_time_started()
 
         # Enhanced SIM hot-swap detection
         if mm_state == 2:  # LOCKED (SIM missing or PIN required)
@@ -3448,6 +3493,18 @@ class ModemStateMachine:
                 await self._handle_sim_missing_failover()
                 return
 
+            # Registration is confirmed and no data bearer is up yet — the
+            # earliest safe point to set the system clock from cellular network
+            # time.  NITZ rides the registration/NAS signaling, not the data
+            # bearer, so this works in every connection mode (incl.
+            # connect-on-demand parked at REGISTERED_IDLE).  Opt-in and guarded
+            # so it never overrides an NTP-synchronized clock.
+            await self._maybe_set_system_time_from_network('initial')
+            # NITZ can arrive later than this instant (or not at all yet) — arm
+            # the bounded background poll + NetworkTimeChanged signal so a late
+            # update still sets the clock without blocking the cascade.
+            self._ensure_network_time_started()
+
             # Get SIM config for connection parameters.  Anchor on the slot
             # actually active.  Normally _configure_sim_slot (Step 2) has just
             # forced the modem onto the primary and set current_active_sim to
@@ -3909,8 +3966,9 @@ class ModemStateMachine:
     async def _get_unlock_retries(self):
         """Read SIM unlock retry counters from ModemManager.
 
-        Returns a dict mapping lock type to remaining retries, e.g.
-        ``{1: 3, 2: 10}`` where key 1 = PIN retries, key 2 = PUK retries.
+        Returns a dict mapping MMModemLock => remaining retries, e.g.
+        ``{2: 3, 4: 10}`` where key 2 = SIM-PIN retries, key 4 = SIM-PUK
+        retries (MMModemLock: 2=SIM_PIN, 3=SIM_PIN2, 4=SIM_PUK, 5=SIM_PUK2).
         Returns empty dict on failure.
         """
         try:
@@ -3965,8 +4023,8 @@ class ModemStateMachine:
 
                 # Read retry counters from SIM EEPROM
                 retries = await self._get_unlock_retries()
-                self._pin_retries_remaining = retries.get(1, -1)  # key 1 = SIM-PIN
-                self._puk_retries_remaining = retries.get(2, -1)  # key 2 = SIM-PUK
+                self._pin_retries_remaining = retries.get(2, -1)  # key 2 = SIM-PIN
+                self._puk_retries_remaining = retries.get(4, -1)  # key 4 = SIM-PUK
 
                 logger.info("SIM is locked, checking unlock requirement",
                            extra={'interface_number': self.interface_number,
@@ -3982,9 +4040,9 @@ class ModemStateMachine:
                     (sim for sim in sim_slots if sim['slot'] == active_slot), {}
                 )
 
-                if unlock_required == 1:  # MM_MODEM_LOCK_SIM_PIN
+                if unlock_required == 2:  # MM_MODEM_LOCK_SIM_PIN
                     await self._unlock_with_pin(active_sim_config)
-                elif unlock_required == 2:  # MM_MODEM_LOCK_SIM_PUK
+                elif unlock_required == 4:  # MM_MODEM_LOCK_SIM_PUK
                     # SIM is PUK-locked (PIN retries exhausted)
                     await self._unlock_with_puk(active_sim_config)
                 else:
@@ -4031,13 +4089,105 @@ class ModemStateMachine:
             logger.warning("Continuing configuration without SIM unlock",
                           extra={'interface_number': self.interface_number})
 
+    def _puk_recovery_is_safe(self, sim_config) -> bool:
+        """True when automatic PUK-based PIN recovery may be attempted safely.
+
+        Requires all of:
+          - a PUK configured, and a PIN configured (SendPuk resets the PIN, so
+            it needs a value to reset to);
+          - the PUK retry counter positively known to be > 1, so a single wrong
+            PUK cannot reach the permanent-destruction boundary.
+
+        Unknown (-1) or <= 1 PUK retries are treated as NOT safe — the PUK is
+        never gambled.  When this is True the PIN retry guard is intentionally
+        dropped: a wrong/forgotten PIN is allowed to exhaust to the PUK-locked
+        state so PUK recovery can reset it (the operator's "recover via PUK"
+        intent).  When False, the PIN retries are preserved by the guards.
+        """
+        puk = sim_config.get('puk', '')
+        pin = sim_config.get('pin', '')
+        if not puk or not pin:
+            return False
+        return self._puk_retries_remaining > 1
+
+    async def _force_puk_lock_and_recover(self, sim_config):
+        """Deliberately exhaust PIN attempts to reach PUK-lock, then recover.
+
+        Only called after a confirmed wrong PIN AND ``_puk_recovery_is_safe()``.
+        Rather than dribbling one wrong PIN per boot (slow, and on a dual-SIM
+        box the locked SIM may lose the race to failover), we burn the PIN
+        counter to zero in a single pass so the SIM reaches the PUK-locked
+        state now, then run PUK recovery — which resets the PIN to the
+        configured value and restores the PIN retry counter.
+
+        Loops on the modem's UnlockRequired (not a local counter) so it stops
+        exactly when PUK-lock is reached, with a hard iteration cap as a
+        backstop.  Never touches the PUK counter itself; the PUK-retry guards
+        in ``_unlock_with_puk`` remain the sole authority on PUK safety.
+        """
+        pin = sim_config.get('pin', '')
+        iface = self.proxy.get_interface(MODEM_INTERFACE)
+        props = self.proxy.get_interface("org.freedesktop.DBus.Properties")
+
+        logger.critical(
+            "PIN is wrong but a valid PUK is configured — deliberately exhausting "
+            "PIN attempts to reach PUK-lock, then resetting the PIN via PUK "
+            "(PIN retries=%s, PUK retries=%s)",
+            self._pin_retries_remaining, self._puk_retries_remaining,
+            extra={'interface_number': self.interface_number})
+
+        # PIN retries are 3 on virtually every SIM; cap defensively so a
+        # misreporting modem can never spin here forever.
+        max_iter = 6
+        for _ in range(max_iter):
+            unlock_required = (await props.call_get(
+                MODEM_INTERFACE, "UnlockRequired")).value
+            if unlock_required == 4:  # MM_MODEM_LOCK_SIM_PUK — goal reached
+                break
+            state = (await props.call_get(MODEM_INTERFACE, "State")).value
+            if state != 2:  # no longer locked — nothing left to exhaust
+                logger.info("SIM no longer locked during PIN exhaustion — stopping",
+                           extra={'interface_number': self.interface_number})
+                return
+            try:
+                await iface.call_send_pin(str(pin))
+            except Exception:  # noqa: BLE001 -- wrong PIN throws; that is expected
+                pass
+            await asyncio.sleep(2)
+
+        # Refresh counters and confirm we actually reached PUK-lock.
+        unlock_required = (await props.call_get(
+            MODEM_INTERFACE, "UnlockRequired")).value
+        retries = await self._get_unlock_retries()
+        self._pin_retries_remaining = retries.get(2, -1)
+        self._puk_retries_remaining = retries.get(4, -1)
+        if unlock_required != 4:
+            logger.error("Did not reach PUK-locked state after PIN exhaustion "
+                         "(unlock_required=%s) — aborting PUK recovery",
+                         unlock_required,
+                         extra={'interface_number': self.interface_number})
+            raise Exception("PUK recovery aborted — SIM did not reach PUK-locked state")
+
+        # Genuinely PUK-locked now → PUK recovery resets the PIN to config.
+        await self._unlock_with_puk(sim_config)
+
     async def _unlock_with_pin(self, sim_config):
         """Unlock SIM with PIN — tried at most once per boot cycle.
 
         Safety logic:
         1. If already attempted this boot cycle, refuse.
-        2. If PIN retries <= 1, skip PIN and attempt PUK recovery instead.
-        3. Send PIN once.  On failure, attempt PUK recovery if PUK is configured.
+        2. If a valid PUK is configured and PUK recovery is SAFE
+           (``_puk_recovery_is_safe``), the PIN retry guards below are dropped:
+           a wrong/forgotten PIN is allowed to exhaust to PUK-lock and is then
+           recovered via PUK (which resets the PIN to the configured value).
+        3. Otherwise (no PUK, or PUK not safe to risk):
+           - if PIN retries are UNKNOWN (-1), refuse — do not send blind;
+           - if PIN retries <= 1, skip PIN and attempt PUK recovery instead.
+        4. Send PIN once.  On failure: exhaust-to-PUK-recover when safe, else
+           attempt a plain PUK recovery if a PUK is configured.
+
+        The PUK retry counter is never spent here; ``_unlock_with_puk`` remains
+        the sole guardian of PUK safety (refuses on unknown / <= 1 PUK retries).
         """
         try:
             pin = sim_config.get('pin', '')
@@ -4060,8 +4210,32 @@ class ModemStateMachine:
                            extra={'interface_number': self.interface_number})
                 return
 
+            # Is a valid PUK available as a safety net?  When it is, we WANT a
+            # wrong PIN to reach PUK-lock so recovery can reset it, so the PIN
+            # retry guards below are skipped.
+            puk_recovery_safe = self._puk_recovery_is_safe(sim_config)
+
+            # ── Guard: fail-safe when retry count is unknown ──────────────
+            # -1 means the UnlockRetries read failed. On a board that reboots
+            # frequently, blindly sending a (possibly wrong) PIN once per boot
+            # can silently burn the counter down to a PUK-lock. Refuse until we
+            # can positively confirm remaining retries. Recoverable: the
+            # in-memory attempt flags reset next boot, so a later successful
+            # counter read can retry.  Skipped when a safe PUK net exists.
+            if self._pin_retries_remaining == -1 and not puk_recovery_safe:
+                self._pin_unlock_attempted = True
+                self._pin_unlock_failed = True
+                logger.critical("PIN retries unknown (UnlockRetries read failed) — "
+                                "refusing to send PIN blind to avoid burning retries "
+                                "toward a PUK-lock. Will retry after a successful "
+                                "counter read on a later boot.",
+                               extra={'interface_number': self.interface_number})
+                raise Exception("PIN retries unknown — refusing to send PIN blind")
+
             # ── Guard: check retry counter before sending ─────────────────
-            if 0 < self._pin_retries_remaining <= 1:
+            # Preserve PIN retries only when there is no safe PUK net.  With a
+            # safe PUK, fall through and let the PIN exhaust to PUK recovery.
+            if 0 < self._pin_retries_remaining <= 1 and not puk_recovery_safe:
                 logger.critical("PIN retries dangerously low (%d) — skipping PIN, "
                                 "attempting PUK recovery to avoid permanent lock",
                                self._pin_retries_remaining,
@@ -4075,44 +4249,60 @@ class ModemStateMachine:
 
             # ── Send PIN (one attempt) ────────────────────────────────────
             self._pin_unlock_attempted = True
-            logger.info("Sending PIN to unlock SIM (one attempt, retries=%s)",
-                       self._pin_retries_remaining,
+            logger.info("Sending PIN to unlock SIM (one attempt, retries=%s, "
+                        "puk_recovery_safe=%s)",
+                       self._pin_retries_remaining, puk_recovery_safe,
                        extra={'interface_number': self.interface_number,
                               'pin_retries': self._pin_retries_remaining})
 
             iface = self.proxy.get_interface(MODEM_INTERFACE)
-            await iface.call_send_pin(str(pin))
-
-            # Wait for unlock to process
-            await asyncio.sleep(3)
-
-            # Verify unlock was successful
             props = self.proxy.get_interface("org.freedesktop.DBus.Properties")
-            state_variant = await props.call_get(MODEM_INTERFACE, "State")
-            state = state_variant.value
 
-            if state != 2:  # No longer locked
+            # A wrong PIN makes call_send_pin raise — treat that identically to
+            # "sent but still locked": both mean the PIN did not unlock the SIM.
+            pin_ok = False
+            try:
+                await iface.call_send_pin(str(pin))
+                await asyncio.sleep(3)
+                state = (await props.call_get(MODEM_INTERFACE, "State")).value
+                pin_ok = (state != 2)
+            except DBusError as send_err:
+                logger.warning("PIN send rejected by modem: %s", send_err,
+                              extra={'interface_number': self.interface_number})
+                pin_ok = False
+
+            if pin_ok:  # No longer locked
                 self._pin_unlock_failed = False
                 # Refresh retry counters after success (they reset to max)
                 retries = await self._get_unlock_retries()
-                self._pin_retries_remaining = retries.get(1, -1)
+                self._pin_retries_remaining = retries.get(2, -1)
                 logger.info("SIM unlocked with PIN successfully",
                            extra={'interface_number': self.interface_number,
                                   'pin_retries_after': self._pin_retries_remaining})
+                return
+
+            # PIN failed.
+            self._pin_unlock_failed = True
+            retries = await self._get_unlock_retries()
+            self._pin_retries_remaining = retries.get(2, -1)
+            self._puk_retries_remaining = retries.get(4, -1)
+            logger.error("PIN unlock failed — SIM still locked "
+                         "(retries remaining: PIN=%s, PUK=%s)",
+                        self._pin_retries_remaining,
+                        self._puk_retries_remaining,
+                        extra={'interface_number': self.interface_number,
+                               'pin_retries': self._pin_retries_remaining,
+                               'puk_retries': self._puk_retries_remaining})
+
+            if puk_recovery_safe:
+                # Forgot/wrong PIN + valid PUK → exhaust PIN to PUK-lock now
+                # and reset the PIN via PUK in a single pass.
+                await self._force_puk_lock_and_recover(sim_config)
             else:
-                self._pin_unlock_failed = True
-                # Re-read retries to see how many are left
-                retries = await self._get_unlock_retries()
-                self._pin_retries_remaining = retries.get(1, -1)
-                self._puk_retries_remaining = retries.get(2, -1)
-                logger.error("PIN unlock failed — SIM still locked "
-                             "(retries remaining: PIN=%s, PUK=%s)",
-                            self._pin_retries_remaining,
-                            self._puk_retries_remaining,
-                            extra={'interface_number': self.interface_number,
-                                   'pin_retries': self._pin_retries_remaining,
-                                   'puk_retries': self._puk_retries_remaining})
-                # Attempt PUK recovery if PUK is configured
+                # No safe PUK net.  Try a plain PUK recovery if a PUK is
+                # configured (it will be rejected unless the SIM is already
+                # genuinely PUK-locked); otherwise the SIM stays PIN-locked
+                # with its remaining retries intact.
                 puk = sim_config.get('puk', '')
                 if puk:
                     logger.info("PIN failed — attempting PUK recovery to reset PIN",
@@ -4145,8 +4335,11 @@ class ModemStateMachine:
 
         Safety logic:
         1. If already attempted this boot cycle, refuse.
-        2. If PUK retries <= 1, refuse — log CRITICAL (risk of permanent SIM destruction).
-        3. Send PUK + PIN once.
+        2. If PUK retries are UNKNOWN (-1, UnlockRetries read failed), refuse —
+           a blind PUK send can permanently destroy the SIM (recoverable next
+           boot; NOT marked permanently locked).
+        3. If PUK retries <= 1, refuse — log CRITICAL (risk of permanent SIM destruction).
+        4. Send PUK + PIN once.
         """
         try:
             puk = sim_config.get('puk', '')
@@ -4174,6 +4367,23 @@ class ModemStateMachine:
                 logger.info("PUK unlock already succeeded this boot cycle",
                            extra={'interface_number': self.interface_number})
                 return
+
+            # ── Guard: fail-safe when PUK retry count is unknown ──────────
+            # -1 means the UnlockRetries read failed. A PUK sent blind risks
+            # PERMANENT SIM destruction if the count is actually near zero, so
+            # refuse until we can positively confirm headroom. Recoverable: do
+            # NOT mark the SIM permanently locked — a later boot with a good
+            # read may proceed.
+            if self._puk_retries_remaining == -1:
+                self._puk_unlock_attempted = True
+                self._puk_unlock_failed = True
+                logger.critical(
+                    "PUK retries unknown (UnlockRetries read failed) — refusing to "
+                    "send PUK blind. A wrong PUK at an unknown count can permanently "
+                    "destroy the SIM. Manual intervention or a later successful "
+                    "counter read is required.",
+                    extra={'interface_number': self.interface_number})
+                raise Exception("PUK retries unknown — refusing to risk permanent SIM destruction")
 
             # ── Guard: check PUK retry counter ────────────────────────────
             if 0 < self._puk_retries_remaining <= 1:
@@ -4215,8 +4425,8 @@ class ModemStateMachine:
                 self._pin_unlock_attempted = False
                 # Refresh retry counters (they reset to max after PUK success)
                 retries = await self._get_unlock_retries()
-                self._pin_retries_remaining = retries.get(1, -1)
-                self._puk_retries_remaining = retries.get(2, -1)
+                self._pin_retries_remaining = retries.get(2, -1)
+                self._puk_retries_remaining = retries.get(4, -1)
                 logger.info("SIM unlocked with PUK — PIN reset to configured value "
                             "(PIN retries=%s, PUK retries=%s)",
                            self._pin_retries_remaining,
@@ -4228,7 +4438,7 @@ class ModemStateMachine:
                 self._puk_unlock_failed = True
                 # Re-read retries
                 retries = await self._get_unlock_retries()
-                self._puk_retries_remaining = retries.get(2, -1)
+                self._puk_retries_remaining = retries.get(4, -1)
                 if self._puk_retries_remaining == 0:
                     self._sim_permanently_locked = True
                     logger.critical(
@@ -4255,6 +4465,134 @@ class ModemStateMachine:
             logger.error(f"PUK unlock failed: {e}",
                         extra={'interface_number': self.interface_number})
             raise
+
+    # ── Operator-driven SIM PIN management (op-mode: change wwan … sim pin) ──
+    #
+    # These operate on the ACTIVE, REGISTERED SIM only.  Registration is the
+    # safety gate: a PIN-locked SIM only reaches REGISTERED after the FSM
+    # unlocked it with the configured PIN, so for change/remove the configured
+    # PIN is provably the SIM's current PIN and cannot burn retries.  The
+    # create path (EnablePin) verifies the supplied value against the SIM's
+    # stored PIN and a wrong value DOES decrement the counter, so it carries
+    # the same low-retry/unknown-retry guard used by the unlock path.
+
+    async def _read_modem_state(self) -> int:
+        """Return the ModemManager Modem.State integer."""
+        props = self.proxy.get_interface("org.freedesktop.DBus.Properties")
+        state_variant = await props.call_get(MODEM_INTERFACE, "State")
+        return state_variant.value
+
+    async def _pin_lock_enabled(self) -> bool:
+        """True if the SIM PIN (CHV1) facility lock is currently enabled.
+
+        Reads Modem3gpp.EnabledFacilityLocks; MM_MODEM_3GPP_FACILITY_SIM is
+        bit 0 (value 1).  (Fixed-dialing is bit 1 and is unrelated to PIN1.)
+        """
+        props = self.proxy.get_interface("org.freedesktop.DBus.Properties")
+        locks_variant = await props.call_get(
+            "org.freedesktop.ModemManager1.Modem.Modem3gpp", "EnabledFacilityLocks")
+        locks = locks_variant.value if hasattr(locks_variant, 'value') else locks_variant
+        return bool(int(locks) & 0x1)  # MM_MODEM_3GPP_FACILITY_SIM
+
+    async def _require_registered_active_slot(self, operation: str) -> int:
+        """Gate a PIN operation on a present, unlocked, registered modem.
+
+        Returns the active SIM slot number.  Raises with operator guidance if
+        the modem is missing, still locked, or not yet registered.
+        """
+        if not self.proxy:
+            raise RuntimeError(f"{operation}: no modem available")
+        state = await self._read_modem_state()
+        # MM Modem.State: 2=LOCKED, 8=REGISTERED, 9=DISCONNECTING,
+        # 10=CONNECTING, 11=CONNECTED.  Anything >=8 implies registered and
+        # unlocked; 2 is the explicit locked reject.
+        if state == 2:
+            raise RuntimeError(
+                f"{operation}: SIM is locked — the configured PIN did not unlock "
+                "it, so the PIN cannot be modified")
+        if state < 8:
+            raise RuntimeError(
+                f"{operation}: modem is not registered yet (state={state}). Insert "
+                "a single SIM in the active slot and wait for registration before "
+                "changing the PIN")
+        return self.current_active_sim or (self.config or {}).get('primary_sim_slot', 1)
+
+    async def change_sim_pin(self, new_pin: str) -> dict:
+        """Create or change the SIM PIN on the active, registered SIM.
+
+        Auto-detects the operation from the current facility-lock state:
+          - lock disabled -> EnablePin(new_pin, True)  (activate) -> 'created'
+          - lock enabled  -> ChangePin(old_from_config, new_pin)  -> 'changed'
+
+        Returns ``{'action': 'created'|'changed'|'unchanged', 'slot': N}``.
+        Does NOT drop the bearer — CHV writes act on the already-unlocked SIM.
+        """
+        if not new_pin or not str(new_pin).isdigit() or not (4 <= len(str(new_pin)) <= 8):
+            raise RuntimeError("PIN must be 4 to 8 digits")
+
+        slot = await self._require_registered_active_slot("change PIN")
+        sim_slots = (self.config or {}).get('sim_slots', [])
+        active_cfg = next((s for s in sim_slots if s.get('slot') == slot), {})
+        iface = self.proxy.get_interface(MODEM_INTERFACE)
+
+        if await self._pin_lock_enabled():
+            # CHANGE — old PIN from config, proven correct by registration.
+            old_pin = active_cfg.get('pin', '')
+            if not old_pin:
+                raise RuntimeError(
+                    "the SIM has a PIN enabled but no current PIN is configured for "
+                    "the active slot — cannot change it")
+            if str(old_pin) == str(new_pin):
+                return {'action': 'unchanged', 'slot': slot}
+            await iface.call_change_pin(str(old_pin), str(new_pin))
+            action = 'changed'
+        else:
+            # CREATE — EnablePin verifies new_pin against the SIM's stored PIN
+            # and a wrong value decrements the retry counter, so guard it.
+            retries = await self._get_unlock_retries()
+            pin_left = retries.get(2, -1)  # MM_MODEM_LOCK_SIM_PIN
+            if pin_left == -1:
+                raise RuntimeError(
+                    "cannot read the SIM PIN retry counter — refusing to enable the "
+                    "PIN blind (a wrong value could lock the SIM)")
+            if 0 < pin_left <= 1:
+                raise RuntimeError(
+                    f"only {pin_left} SIM PIN attempt remaining — refusing to enable "
+                    "the PIN; recover the SIM via PUK first")
+            await iface.call_enable_pin(str(new_pin), True)
+            action = 'created'
+
+        await asyncio.sleep(2)
+        logger.info("SIM PIN %s on slot %s", action, slot,
+                   extra={'interface_number': self.interface_number, 'slot': slot})
+        return {'action': action, 'slot': slot}
+
+    async def remove_sim_pin(self) -> dict:
+        """Disable the SIM PIN lock on the active, registered SIM.
+
+        Uses EnablePin(old_from_config, False).  The configured PIN is proven
+        correct by registration, so this cannot burn a retry.
+
+        Returns ``{'action': 'removed'|'already-disabled', 'slot': N}``.
+        """
+        slot = await self._require_registered_active_slot("remove PIN")
+        sim_slots = (self.config or {}).get('sim_slots', [])
+        active_cfg = next((s for s in sim_slots if s.get('slot') == slot), {})
+        iface = self.proxy.get_interface(MODEM_INTERFACE)
+
+        if not await self._pin_lock_enabled():
+            return {'action': 'already-disabled', 'slot': slot}
+
+        old_pin = active_cfg.get('pin', '')
+        if not old_pin:
+            raise RuntimeError(
+                "the SIM has a PIN enabled but no current PIN is configured for the "
+                "active slot — cannot disable it")
+        await iface.call_enable_pin(str(old_pin), False)
+        await asyncio.sleep(2)
+        logger.info("SIM PIN lock disabled on slot %s", slot,
+                   extra={'interface_number': self.interface_number, 'slot': slot})
+        return {'action': 'removed', 'slot': slot}
 
     async def _configure_preferred_carrier(self):
         """Configure preferred carrier with smart scanning to minimize delays"""
@@ -4580,6 +4918,302 @@ class ModemStateMachine:
                       extra={'interface_number': self.interface_number,
                              'timeout_seconds': timeout})
         return False
+
+    # ── Network time (NITZ) → system clock (opt-in) ──────────────────────────
+
+    @staticmethod
+    def _parse_network_time(value: str):
+        """Parse a ModemManager network-time string into a datetime.
+
+        MM returns ISO-8601 (e.g. ``2026-07-03T12:34:56+02:00``); some modems
+        omit the zone.  A value carrying an offset is used as-is; a naive value
+        is treated as UTC so the resulting epoch is deterministic regardless of
+        the box's current (possibly wrong) local timezone.  Returns ``None`` if
+        the string cannot be parsed.
+        """
+        if not value:
+            return None
+        text = str(value).strip()
+        # Python's fromisoformat handles 'Z' from 3.11+, but normalise anyway.
+        if text.endswith('Z'):
+            text = text[:-1] + '+00:00'
+        try:
+            dt = datetime.datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return dt
+
+    async def _is_ntp_synchronized(self) -> bool:
+        """Return True if systemd reports the clock as NTP-synchronized.
+
+        Used to guarantee modem network time never overrides a real NTP fix —
+        NITZ is only a cold-boot bootstrap for units with no RTC / no upstream
+        NTP reachability.  Any error is treated as "not synchronized" so the
+        bootstrap still runs when the state cannot be determined.
+        """
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                'timedatectl', 'show', '-p', 'NTPSynchronized', '--value',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await proc.communicate()
+            return stdout.decode(errors='replace').strip() == 'yes'
+        except Exception:
+            return False
+
+    async def _maybe_set_system_time_from_network(self, source: str = 'initial') -> bool:
+        """Set the system clock from cellular network time (NITZ) — opt-in.
+
+        Runs only when ``network-time`` is configured on the interface.  Reads
+        ``Modem.Time.GetNetworkTime()`` (delivered over the registration/NAS
+        signaling — no data bearer required) and sets the clock, but ONLY when
+        NTP has not already synchronized it, so it never fights chrony.  Applied
+        at most once per service run and persisted to the RTC.  Fully guarded:
+        every failure is logged and left non-fatal so the connection cascade is
+        never disrupted.
+
+        ``source`` identifies the trigger (``initial`` / ``retry`` / ``signal``)
+        for logging.  Returns ``True`` when the clock has been set OR the set is
+        no longer needed (NTP already owns it) — i.e. when the retry loop can
+        stop — and ``False`` when a later attempt should still be made.
+        """
+        try:
+            if not (self.config and self.config.get('network_time_enabled')):
+                return True
+            if self._network_time_applied:
+                return True
+            if not self.proxy:
+                return False
+
+            # Never override a real NTP fix — modem time is a bootstrap only.
+            if await self._is_ntp_synchronized():
+                logger.info(
+                    "Skipping modem network-time set — clock already "
+                    "NTP-synchronized",
+                    extra={'interface_number': self.interface_number,
+                           'source': source})
+                self._network_time_applied = True
+                return True
+
+            # Read network time over the control plane (no bearer needed).
+            try:
+                time_iface = self.proxy.get_interface(
+                    "org.freedesktop.ModemManager1.Modem.Time")
+                net_time_str = await time_iface.call_get_network_time()
+            except Exception as e:
+                logger.debug(
+                    f"Modem network time unavailable (no NITZ / interface "
+                    f"absent): {e}",
+                    extra={'interface_number': self.interface_number,
+                           'source': source})
+                return False
+
+            dt = self._parse_network_time(net_time_str)
+            if dt is None:
+                logger.warning(
+                    f"Could not parse modem network time: {net_time_str!r}",
+                    extra={'interface_number': self.interface_number,
+                           'source': source})
+                return False
+
+            epoch = int(dt.timestamp())
+            previous_epoch = int(time.time())
+
+            # Set via `date` (works even when chrony runs but has not synced;
+            # `timedatectl set-time` refuses while NTP is enabled).
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    'date', '-s', f'@{epoch}',
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                _, stderr = await proc.communicate()
+                if proc.returncode != 0:
+                    logger.warning(
+                        "Failed to set system clock from network time",
+                        extra={'interface_number': self.interface_number,
+                               'source': source,
+                               'error': stderr.decode(errors='replace').strip()})
+                    return False
+            except Exception as e:
+                logger.warning(
+                    f"Failed to set system clock from network time: {e}",
+                    extra={'interface_number': self.interface_number,
+                           'source': source})
+                return False
+
+            # Persist to the hardware clock so it survives reboot on boards
+            # that have an RTC.  Best-effort: RTC-less boards fail here
+            # harmlessly.
+            try:
+                hw = await asyncio.create_subprocess_exec(
+                    'hwclock', '--systohc',
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await hw.communicate()
+            except Exception:
+                pass
+
+            self._network_time_applied = True
+            logger.warning(
+                "System clock set from cellular network time (NITZ)",
+                extra={'interface_number': self.interface_number,
+                       'source': source,
+                       'network_time': dt.isoformat(),
+                       'previous_time': datetime.datetime.fromtimestamp(
+                           previous_epoch,
+                           datetime.timezone.utc).isoformat(),
+                       'delta_seconds': epoch - previous_epoch})
+            self._emit_alert(
+                alert_type='system_time_set',
+                severity='info',
+                message='System clock set from cellular network time (NITZ)',
+                network_time=dt.isoformat(),
+                delta_seconds=epoch - previous_epoch,
+                source=source,
+            )
+            return True
+        except Exception as e:
+            # Absolute backstop — this feature must never break the cascade.
+            logger.debug(
+                f"network-time set skipped due to unexpected error: {e}",
+                extra={'interface_number': self.interface_number,
+                       'source': source})
+            return False
+
+    def _network_time_config_enabled(self) -> bool:
+        """True when the opt-in ``network-time`` feature is configured."""
+        return bool(self.config and self.config.get('network_time_enabled'))
+
+    def _ensure_network_time_started(self):
+        """Arm background NITZ acquisition (signal + bounded poll) if needed.
+
+        Idempotent and cheap: does nothing when the feature is off, the clock
+        has already been set this run, or the loop is already running.  Called
+        from the registration gate on every (re)configuration, so a run that
+        started with no NITZ available gets a fresh acquisition window on the
+        next attach / SIM switch / recovery.
+        """
+        if not self._network_time_config_enabled():
+            return
+        if self._network_time_applied:
+            return
+        # Subscribe to NITZ push notifications so a late update is captured even
+        # after the bounded poll window closes.
+        self._bind_modem_time_handler()
+        if self._network_time_task and not self._network_time_task.done():
+            return
+        self._network_time_task = self._safe_create_task(
+            self._network_time_retry_loop())
+
+    async def _network_time_retry_loop(self):
+        """Poll for network time until the clock is set (or no longer needed).
+
+        NITZ can arrive seconds-to-minutes after registration, and some carriers
+        send it late or only sporadically.  This is the CRITICAL acquisition
+        path for a unit whose data plan has expired: the SIM still REGISTERS (so
+        NITZ is obtainable over NAS signaling) but no data bearer can come up, so
+        NTP can never reach a server — modem network time is then the ONLY way to
+        correct a wrong RTC.  We therefore never simply give up: poll fast at
+        first (NITZ usually lands within seconds), then fall back to a slow
+        steady cadence indefinitely so the clock still recovers whenever the
+        network eventually provides the time.
+
+        The loop exits only when the clock has been set, NTP has taken over, or
+        the feature is disabled.  It is cancelled with all other tasks on modem
+        removal / bus swap, and re-armed on the next registration.
+        """
+        fast_interval = 15
+        fast_deadline = time.time() + 900   # 15 min of tight polling
+        slow_interval = 300                 # then every 5 min, indefinitely
+        announced_slow = False
+        try:
+            while True:
+                if not self._network_time_config_enabled() or self._network_time_applied:
+                    return
+                if await self._maybe_set_system_time_from_network('retry'):
+                    return
+                if time.time() < fast_deadline:
+                    interval = fast_interval
+                else:
+                    if not announced_slow:
+                        announced_slow = True
+                        logger.info(
+                            "network-time still unset after 15 min — continuing "
+                            "to poll slowly (this box may depend on NITZ for its "
+                            "clock; will keep trying until the network provides it)",
+                            extra={'interface_number': self.interface_number})
+                    interval = slow_interval
+                await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.debug(f"network-time retry loop error (non-fatal): {e}",
+                        extra={'interface_number': self.interface_number})
+
+    def _dispatch_network_time_changed(self, network_time):
+        """dbus_next callback for Modem.Time ``NetworkTimeChanged``.
+
+        Signals arrive as synchronous callbacks, so schedule the guarded async
+        setter (which re-reads and applies under the NTP / applied guards).
+        Captures a NITZ push that lands after the poll window has closed.
+        """
+        try:
+            if self._network_time_applied or not self._network_time_config_enabled():
+                return
+            self._safe_create_task(
+                self._maybe_set_system_time_from_network('signal'))
+        except Exception as e:
+            logger.debug(f"NetworkTimeChanged dispatch error (non-fatal): {e}",
+                        extra={'interface_number': self.interface_number})
+
+    def _bind_modem_time_handler(self):
+        """Subscribe to Modem.Time ``NetworkTimeChanged`` (idempotent, no stacking).
+
+        Mirrors the PropertiesChanged handler discipline: track the interface +
+        path and unbind any prior registration before adding a new one so
+        handlers never accumulate on the bus across SIM switches / modem
+        re-enumeration.
+        """
+        if not self.proxy:
+            return
+        if (self._modem_time_iface is not None
+                and self._modem_time_bound_path == self.modem_path):
+            return
+        self._unbind_modem_time_handler()
+        try:
+            time_iface = self.proxy.get_interface(
+                "org.freedesktop.ModemManager1.Modem.Time")
+            time_iface.on_network_time_changed(self._dispatch_network_time_changed)
+            self._modem_time_iface = time_iface
+            self._modem_time_bound_path = self.modem_path
+            logger.info("NetworkTimeChanged signal monitoring enabled",
+                       extra={'interface_number': self.interface_number,
+                              'modem_path': self.modem_path})
+        except Exception as e:
+            # Time interface may be absent on this modem/MM build — the poll
+            # loop still covers acquisition, so this is non-fatal.
+            logger.debug(f"Could not bind NetworkTimeChanged handler: {e}",
+                        extra={'interface_number': self.interface_number})
+
+    def _unbind_modem_time_handler(self):
+        """Unbind the Modem.Time ``NetworkTimeChanged`` handler. Safe if unbound."""
+        iface = self._modem_time_iface
+        if iface is not None:
+            try:
+                iface.off_network_time_changed(self._dispatch_network_time_changed)
+                logger.debug("NetworkTimeChanged handler unbound",
+                            extra={'interface_number': self.interface_number,
+                                   'modem_path': self._modem_time_bound_path})
+            except Exception as off_err:
+                logger.debug(f"off_network_time_changed failed: {off_err}",
+                            extra={'interface_number': self.interface_number})
+        self._modem_time_iface = None
+        self._modem_time_bound_path = None
 
     async def _force_network_reregistration(self, reason: str = 'reregister'):
         """Nudge the modem to (re)acquire the network after a config change.
@@ -5172,6 +5806,10 @@ class ModemStateMachine:
         # by the caller (e.g. on_modem_removed) before this point.
         self._last_session_bytes = 0
         self._last_session_slot = None
+        # Drop any mid-session clear offset — it belongs to the session that
+        # just ended and must not suppress usage on the next one.
+        self._usage_session_offset = 0
+        self._usage_session_offset_slot = None
 
         logger.info("Recorded bearer disconnect",
                    extra={'interface_number': self.interface_number,
@@ -5272,6 +5910,25 @@ class ModemStateMachine:
         counter when a replacement SIM is issued on the same plan.
         """
         return self.current_active_sim or self.config.get('primary_sim_slot', 1)
+
+    def _effective_session_bytes(self, raw_session_bytes: int, slot: int) -> int:
+        """Live session bytes after discounting a mid-session usage clear.
+
+        The bearer's rx+tx counter is owned by ModemManager and keeps counting
+        from bearer connect; it cannot be zeroed on demand.  When an operator
+        clears data usage for the active slot mid-session, the raw session byte
+        count at that instant is recorded as an offset so every consumer (the
+        monitor loop, the flush path and the status report) measures session
+        usage from the clear point instead of from bearer connect.  The offset
+        is slot-keyed, so it never suppresses usage on a different slot.
+        """
+        try:
+            raw = int(raw_session_bytes or 0)
+        except (TypeError, ValueError):
+            raw = 0
+        if self._usage_session_offset_slot == slot and self._usage_session_offset:
+            return max(0, raw - self._usage_session_offset)
+        return max(0, raw)
 
     def _ensure_usage_monitoring_started(self, source: str):
         """Start usage monitoring whenever a bearer is connected."""
@@ -10458,6 +11115,10 @@ class ModemStateMachine:
         # cumulative + session formula, without double counting.
         self._usage_baseline_bytes = cumulative_bytes
         self._usage_baseline_slot = self._current_usage_slot()
+        # New session — drop any stale mid-session clear offset from a prior
+        # session so it cannot suppress this session's usage.
+        self._usage_session_offset = 0
+        self._usage_session_offset_slot = None
         warnings_logged = set()   # tracks which pct thresholds have been logged
         limit_logged = False
 
@@ -10476,14 +11137,28 @@ class ModemStateMachine:
                             stats = stats_variant.value
                             rx_bytes = stats.get('rx-bytes', 0)
                             tx_bytes = stats.get('tx-bytes', 0)
-                            session_bytes = rx_bytes + tx_bytes
-                            total_bytes = cumulative_bytes + session_bytes
+                            raw_session_bytes = rx_bytes + tx_bytes
+                            active_slot = self._current_usage_slot()
 
-                            # Cache the live session so an unplanned drop (e.g.
-                            # modem removal) can still salvage usage even after
-                            # the bearer becomes unreadable.
-                            self._last_session_bytes = session_bytes
-                            self._last_session_slot = self._current_usage_slot()
+                            # Cache the RAW live session so an unplanned drop
+                            # (e.g. modem removal) can still salvage usage even
+                            # after the bearer becomes unreadable.  The clear
+                            # offset is applied to totals only, never to this
+                            # salvage value.
+                            self._last_session_bytes = raw_session_bytes
+                            self._last_session_slot = active_slot
+
+                            # Honor an operator "clear data-usage" that may have
+                            # landed since this task started: the baseline attr
+                            # and session offset are the live source of truth,
+                            # so a clear converges this loop to zero on its next
+                            # poll instead of re-inflating the on-disk value.
+                            if (self._usage_baseline_slot == active_slot
+                                    and self._usage_baseline_bytes is not None):
+                                cumulative_bytes = self._usage_baseline_bytes
+                            session_bytes = self._effective_session_bytes(
+                                raw_session_bytes, active_slot)
+                            total_bytes = cumulative_bytes + session_bytes
 
                             logger.info("Data usage check",
                                        extra={'interface_number': self.interface_number,
@@ -10795,7 +11470,7 @@ class ModemStateMachine:
                                    'usage_tracking_slot': slot})
                 return
 
-        total_bytes = baseline + session_bytes
+        total_bytes = baseline + self._effective_session_bytes(session_bytes, slot)
         # Never regress a larger value already persisted (e.g. by a monitor
         # poll that ran after the cache was captured).
         existing = self._load_all_persisted_usage().get(str(slot), {})
@@ -10810,6 +11485,109 @@ class ModemStateMachine:
                           'usage_tracking_slot': slot,
                           'session_bytes': session_bytes,
                           'total_bytes': total_bytes})
+
+    async def clear_data_usage(self, slot: int) -> dict:
+        """Zero the persisted data-usage counters for one SIM slot.
+
+        Resets a slot's cumulative usage (and any in-flight session for the
+        active slot) to zero — for a new billing cycle or for diagnostics.  The
+        prior values are logged before they are cleared so the reset stays
+        auditable.
+
+        Concurrency: this coroutine takes its snapshot and performs the reset
+        with **no await points**, so on the single FSM event loop it runs
+        atomically with respect to the usage monitor, the SIM-switchover flush
+        and every other handler — it cannot interleave part-way through a
+        switchover.  For the active slot it also zeroes the in-memory baseline
+        and records a session offset, so a running monitor converges the
+        on-disk value to zero on its next poll instead of re-inflating it.
+
+        Returns a dict describing what was cleared and the previous values.
+        """
+        try:
+            slot = int(slot)
+        except (TypeError, ValueError):
+            raise ValueError(f'Invalid SIM slot: {slot!r}')
+
+        if slot < 1:
+            raise ValueError(f'SIM slot must be >= 1, got {slot}')
+
+        # Validate against configured slots when config is available so a typo
+        # does not silently create a bogus slot entry on disk.
+        configured_slots = sorted(
+            s.get('slot') for s in (self.config.get('sim_slots', []) if self.config else [])
+            if isinstance(s.get('slot'), int)
+        )
+        if configured_slots and slot not in configured_slots:
+            raise ValueError(
+                f'SIM slot {slot} is not configured (configured slots: '
+                f'{", ".join(str(s) for s in configured_slots)})')
+
+        active_slot = self._current_usage_slot()
+        is_active = (slot == active_slot)
+
+        # ── Snapshot prior values (same accounting as the status report) ──
+        persisted_entry = self._load_all_persisted_usage().get(str(slot), {}) or {}
+        prior_disk_bytes = (
+            int(persisted_entry.get('bytes', 0))
+            if isinstance(persisted_entry, dict) else 0
+        )
+        if (is_active and self._usage_baseline_slot == slot
+                and self._usage_baseline_bytes is not None):
+            prior_cumulative = int(self._usage_baseline_bytes)
+        else:
+            prior_cumulative = prior_disk_bytes
+
+        prior_session = 0
+        if is_active and self._last_session_slot == slot:
+            prior_session = self._effective_session_bytes(self._last_session_bytes, slot)
+        prior_total = prior_cumulative + prior_session
+
+        # ── Reset — synchronous critical section, DO NOT await below ──────
+        if is_active:
+            # Zero the baseline and discount the in-flight session so the
+            # running monitor / flush / status all report from zero without
+            # waiting for a bearer reconnect.
+            self._usage_baseline_bytes = 0
+            self._usage_baseline_slot = slot
+            raw_session_now = (
+                self._last_session_bytes if self._last_session_slot == slot else 0
+            )
+            self._usage_session_offset = int(raw_session_now or 0)
+            self._usage_session_offset_slot = slot
+
+        # Persist zero for this slot only (leaves other slots untouched).
+        self._persist_usage(0, slot=slot)
+        # ── End critical section ──────────────────────────────────────────
+
+        logger.warning(
+            "Cleared data-usage counters for SIM slot",
+            extra={'interface_number': self.interface_number,
+                   'sim_slot': slot,
+                   'was_active': is_active,
+                   'previous_cumulative_bytes': prior_cumulative,
+                   'previous_session_bytes': prior_session,
+                   'previous_total_bytes': prior_total})
+
+        self._emit_alert(
+            alert_type='data_usage_cleared',
+            severity='info',
+            message=f'Data usage counters cleared for SIM slot {slot}',
+            sim_slot=slot,
+            was_active=is_active,
+            previous_total_bytes=int(prior_total),
+            previous_cumulative_bytes=int(prior_cumulative),
+            previous_session_bytes=int(prior_session),
+        )
+
+        return {
+            'status': 'cleared',
+            'slot': slot,
+            'was_active': is_active,
+            'previous_cumulative_bytes': prior_cumulative,
+            'previous_session_bytes': prior_session,
+            'previous_total_bytes': prior_total,
+        }
 
     @staticmethod
     def _billing_cycle_crossed(last_dt, now_dt, billing_day: int) -> bool:
@@ -10954,9 +11732,17 @@ class ModemStateMachine:
         legacy wideband metric for 2G/3G. The two scales differ by ~20 dB, so
         each is compared against its own configured threshold.
 
+        On 5G NSA the modem serves an NR carrier PLUS an LTE anchor
+        (``anchor_rsrp`` in the detail).  Either carrier alone keeps the link
+        up and LTE throughput is comparable, so the effective coverage is the
+        BETTER of the two RSRPs -- this prevents a SIM failover being triggered
+        just because the NR SCell faded while the LTE anchor is still strong
+        (the network would simply drop you back to LTE anyway).
+
         Args:
             signal_detail: dict from _get_detailed_signal_quality with keys
-                'technology', 'rssi', 'rsrp' (values may be '' when absent).
+                'technology', 'rssi', 'rsrp' (values may be '' when absent),
+                plus optional 'anchor_rsrp' (LTE anchor RSRP on 5G NSA).
             signal_dbm: the collapsed dBm value (fallback when the preferred
                 metric field is unavailable).
             rssi_threshold: configured RSSI threshold (dBm).
@@ -10978,17 +11764,23 @@ class ModemStateMachine:
         rsrp = _num(detail.get('rsrp'))
         rssi = _num(detail.get('rssi'))
 
+        # 5G NSA: fold in the LTE anchor and use the stronger RSRP.
+        anchor_rsrp = _num(detail.get('anchor_rsrp'))
+        best_rsrp = rsrp
+        if anchor_rsrp is not None:
+            best_rsrp = anchor_rsrp if best_rsrp is None else max(best_rsrp, anchor_rsrp)
+
         # LTE / 5G-NR: prefer RSRP (3GPP coverage metric) when available.
-        if technology in ('LTE', '5G NR', 'NR5G', '5G') and rsrp is not None:
-            return 'rsrp', rsrp, rsrp_threshold
+        if technology in ('LTE', '5G NR', 'NR5G', '5G') and best_rsrp is not None:
+            return 'rsrp', best_rsrp, rsrp_threshold
 
         # 2G/3G or any RAT that only exposes RSSI.
         if rssi is not None:
             return 'rssi', rssi, rssi_threshold
 
         # No technology hint but an RSRP value is present (e.g. LTE-only modem).
-        if rsrp is not None:
-            return 'rsrp', rsrp, rsrp_threshold
+        if best_rsrp is not None:
+            return 'rsrp', best_rsrp, rsrp_threshold
 
         # Last resort: compare the collapsed value against the RSSI threshold
         # (matches legacy behaviour and the documented default scale).
@@ -11116,22 +11908,80 @@ class ModemStateMachine:
                         return v.value if hasattr(v, 'value') else v
                     return None
 
-                # Get LTE signal metrics from Signal interface
-                lte_signal_variant = await props.call_get("org.freedesktop.ModemManager1.Modem.Signal", "Lte")
-                if lte_signal_variant and lte_signal_variant.value:
-                    lte_signals = lte_signal_variant.value
+                def _first_num(signals, *keys):
+                    """First of *keys* present with a real numeric value.
 
-                    # Try RSSI first (most common)
-                    if 'rssi' in lte_signals:
-                        signal_dbm = _extract_val(lte_signals, 'rssi')
-                        logger.debug(f"Got RSSI signal: {signal_dbm} dBm",
-                                   extra={'interface_number': self.interface_number})
-                    # Fall back to RSRP for LTE
-                    elif 'rsrp' in lte_signals:
-                        signal_dbm = _extract_val(lte_signals, 'rsrp')
-                        logger.debug(f"Got RSRP signal: {signal_dbm} dBm",
-                                   extra={'interface_number': self.interface_number})
+                    Lets us prefer RSRP over RSSI and reject empty/'' fields so
+                    an empty per-RAT dict never masks a populated one.
+                    """
+                    for k in keys:
+                        v = _extract_val(signals, k)
+                        if v is None or v == '':
+                            continue
+                        try:
+                            float(v)
+                        except (TypeError, ValueError):
+                            continue
+                        return v
+                    return None
 
+                # Read BOTH the NR (SCell) and LTE (anchor / PCell) signal
+                # dicts up front so we can detect 5G NSA (both populated).
+                nr5g_signals = None
+                lte_signals = None
+                try:
+                    v = await props.call_get("org.freedesktop.ModemManager1.Modem.Signal", "Nr5g")
+                    if v and v.value:
+                        nr5g_signals = v.value
+                except Exception:
+                    pass
+                try:
+                    v = await props.call_get("org.freedesktop.ModemManager1.Modem.Signal", "Lte")
+                    if v and v.value:
+                        lte_signals = v.value
+                except Exception:
+                    pass
+
+                # 5G is measured by SS-RSRP; LTE by RSRP.  Prefer RSRP, fall
+                # back to RSSI, and reject empty fields (via _first_num).
+                nr_dbm = _first_num(nr5g_signals, 'rsrp', 'rssi') if nr5g_signals else None
+                lte_dbm = _first_num(lte_signals, 'rsrp', 'rssi') if lte_signals else None
+
+                if nr_dbm is not None:
+                    # NR present -> report 5G NR as the primary metric (this is
+                    # what the LED / display track).  Guarding on a real number
+                    # means an empty Nr5g dict never masks a live LTE anchor.
+                    signal_dbm = nr_dbm
+                    logger.debug(f"Got 5G NR signal: {signal_dbm} dBm",
+                               extra={'interface_number': self.interface_number})
+                    signal_detail = {
+                        'technology': '5G NR',
+                        'rssi': _extract_val(nr5g_signals, 'rssi') or '',
+                        'rsrp': _extract_val(nr5g_signals, 'rsrp') or '',
+                        'rsrq': _extract_val(nr5g_signals, 'rsrq') or '',
+                        'snr': _extract_val(nr5g_signals, 'snr') or '',
+                    }
+                    # 5G NSA: the LTE anchor is also serving.  Record its RSRP
+                    # as an anchor so the failover / reconnection threshold can
+                    # use the BETTER of the two carriers -- either one alone
+                    # keeps the link up (and LTE throughput is comparable), so
+                    # we must NOT fail the SIM over just because the NR SCell
+                    # faded while the anchor is still strong.  Display stays
+                    # NR-only; the anchor influences the decision, not the UI.
+                    if lte_dbm is not None:
+                        signal_detail['anchor_technology'] = 'LTE'
+                        signal_detail['anchor_rsrp'] = _extract_val(lte_signals, 'rsrp') or ''
+                        signal_detail['anchor_rssi'] = _extract_val(lte_signals, 'rssi') or ''
+                        logger.debug(f"5G NSA: NR {nr_dbm} dBm + LTE anchor {lte_dbm} dBm",
+                                   extra={'interface_number': self.interface_number})
+                elif lte_dbm is not None:
+                    # LTE-only (or NSA anchor without a usable NR reading).
+                    # Prefer RSRP so the collapsed dBm matches the RSRP shown in
+                    # status/op-mode and used by the thresholds (RSSI sits
+                    # ~20 dB higher and would misread as "stronger").
+                    signal_dbm = lte_dbm
+                    logger.debug(f"Got LTE signal: {signal_dbm} dBm",
+                               extra={'interface_number': self.interface_number})
                     signal_detail = {
                         'technology': 'LTE',
                         'rssi': _extract_val(lte_signals, 'rssi') or '',
@@ -11140,33 +11990,9 @@ class ModemStateMachine:
                         'snr': _extract_val(lte_signals, 'snr') or '',
                     }
 
-                # Try other technologies if LTE not available
+                # Other RATs (3G/2G) -- only if neither NR nor LTE produced a
+                # usable reading above.
                 if signal_dbm is None:
-                    # Try 5G NR signals first (most modern)
-                    try:
-                        nr5g_signal_variant = await props.call_get("org.freedesktop.ModemManager1.Modem.Signal", "Nr5g")
-                        if nr5g_signal_variant and nr5g_signal_variant.value:
-                            nr5g_signals = nr5g_signal_variant.value
-                            # 5G typically uses RSRP as primary metric
-                            if 'rsrp' in nr5g_signals:
-                                signal_dbm = _extract_val(nr5g_signals, 'rsrp')
-                                logger.debug(f"Got 5G NR RSRP signal: {signal_dbm} dBm",
-                                           extra={'interface_number': self.interface_number})
-                            elif 'rssi' in nr5g_signals:
-                                signal_dbm = _extract_val(nr5g_signals, 'rssi')
-                                logger.debug(f"Got 5G NR RSSI signal: {signal_dbm} dBm",
-                                           extra={'interface_number': self.interface_number})
-
-                            signal_detail = {
-                                'technology': '5G NR',
-                                'rssi': _extract_val(nr5g_signals, 'rssi') or '',
-                                'rsrp': _extract_val(nr5g_signals, 'rsrp') or '',
-                                'rsrq': _extract_val(nr5g_signals, 'rsrq') or '',
-                                'snr': _extract_val(nr5g_signals, 'snr') or '',
-                            }
-                    except Exception:
-                        pass
-
                     # Try UMTS signals (3G)
                     if signal_dbm is None:
                         try:
@@ -11468,6 +12294,7 @@ class ModemStateMachine:
                                   'metric': metric_name,
                                   'metric_dbm': metric_dbm,
                                   'threshold_dbm': threshold,
+                                  'anchor_rsrp': (signal_detail or {}).get('anchor_rsrp', ''),
                                   'recovery_threshold_dbm': recovery_threshold})
                 self._signal_failover_below_since = None
                 self._signal_failover_below_count = 0
@@ -11501,6 +12328,7 @@ class ModemStateMachine:
                                  'metric': metric_name,
                                  'metric_dbm': metric_dbm,
                                  'threshold_dbm': threshold,
+                                 'anchor_rsrp': (signal_detail or {}).get('anchor_rsrp', ''),
                                  'signal_loss_timer': loss_timer})
             return
 
@@ -11695,6 +12523,79 @@ class ModemStateMachine:
             'auto_failover_active': self.current_active_sim != self.config_active_sim
         }
 
+    async def _ensure_modem_proxy_for_status(self):
+        """Make sure ``self.proxy`` points at a live modem before a status read.
+
+        In FAILED / post-reset states ``self.proxy`` can be ``None`` or stale
+        (it was cleared by a reset, SIM switch or bus swap) even though
+        ModemManager still exposes the modem and therefore still knows its
+        hardware, SIM, band and signal details.  Without this, every
+        ``if self.proxy:`` guarded section of :meth:`get_comprehensive_status`
+        is skipped and the operator sees an almost-empty report even though the
+        data is right there in ModemManager.
+
+        Rather than cache and replay stale values, re-resolve the modem
+        straight from ModemManager via ``GetManagedObjects`` — exactly how the
+        initial scan matches it (``Device == "modemN"``) — and adopt it so this
+        and every downstream read (including the helper methods that read
+        ``self.proxy`` internally) return live data.
+
+        Read-only and fully defensive: on any error it leaves ``self.proxy``
+        untouched, so a genuinely absent modem still yields the empty report.
+        """
+        # Fast path — a current proxy that still answers is kept as-is.
+        if self.proxy is not None:
+            try:
+                props = self.proxy.get_interface("org.freedesktop.DBus.Properties")
+                await props.call_get(MODEM_INTERFACE, "Device")
+                return
+            except Exception:
+                pass  # Stale handle — fall through and re-resolve from MM.
+
+        if self.bus is None:
+            return
+
+        target_modem_id = f"modem{self.interface_number}"
+        try:
+            msg = Message(
+                destination=MODEM_MANAGER_SERVICE,
+                path=MODEM_MANAGER_PATH,
+                interface=OBJECT_MANAGER_INTERFACE,
+                member="GetManagedObjects",
+            )
+            reply = await self.bus.call(msg)
+            if reply.message_type.name != "METHOD_RETURN":
+                return
+            managed_objects = reply.body[0]
+        except Exception:
+            return
+
+        for path, interfaces in managed_objects.items():
+            if MODEM_INTERFACE not in interfaces:
+                continue
+            try:
+                introspect = await self.bus.introspect(MODEM_MANAGER_SERVICE, path)
+                proxy = self.bus.get_proxy_object(MODEM_MANAGER_SERVICE, path, introspect)
+                props = proxy.get_interface("org.freedesktop.DBus.Properties")
+                device_variant = await props.call_get(MODEM_INTERFACE, "Device")
+                if device_variant.value != target_modem_id:
+                    continue
+
+                # Adopt the freshly-resolved modem for this and subsequent reads.
+                self.proxy = proxy
+                self.modem_path = path
+                try:
+                    self.connection_manager.set_proxy(proxy)
+                except Exception:
+                    pass
+                logger.info(
+                    "Re-resolved modem from ModemManager for status read",
+                    extra={'interface_number': self.interface_number,
+                           'modem_path': path})
+                return
+            except Exception:
+                continue
+
     # ------------------------------------------------------------------
     # Comprehensive status report (used by D-Bus get_status)
     # ------------------------------------------------------------------
@@ -11712,6 +12613,12 @@ class ModemStateMachine:
         # serving-cell fallback) can safely read the QMI control port even if
         # that GetAll never ran or failed.
         modem_props = {}
+
+        # Self-heal the modem handle first: in FAILED / post-reset states
+        # self.proxy may be None or stale even though ModemManager still knows
+        # the modem.  Re-resolving it live here means the hardware, SIM, band
+        # and signal sections below report real data instead of blanks.
+        await self._ensure_modem_proxy_for_status()
 
         # ── 1. FSM / interface identity ──────────────────────────────────
         current_state = (
@@ -11773,8 +12680,8 @@ class ModemStateMachine:
             if self.proxy:
                 retries = await self._get_unlock_retries()
                 if retries:
-                    self._pin_retries_remaining = retries.get(1, self._pin_retries_remaining)
-                    self._puk_retries_remaining = retries.get(2, self._puk_retries_remaining)
+                    self._pin_retries_remaining = retries.get(2, self._pin_retries_remaining)
+                    self._puk_retries_remaining = retries.get(4, self._puk_retries_remaining)
                     status['pin_retries_remaining'] = self._pin_retries_remaining
                     status['puk_retries_remaining'] = self._puk_retries_remaining
         except Exception:
@@ -11947,31 +12854,55 @@ class ModemStateMachine:
                                 out[sk] = sv.value if hasattr(sv, 'value') else sv
                         return out
 
-                    # Try LTE first
-                    lte = _unwrap_sig_dict(sig_all.get('Lte'))
-                    if lte:
-                        signal_dbm = lte.get('rssi') or lte.get('rsrp')
-                        signal_detail = {
-                            'technology': 'LTE',
-                            'rssi': lte.get('rssi', ''),
-                            'rsrp': lte.get('rsrp', ''),
-                            'rsrq': lte.get('rsrq', ''),
-                            'snr': lte.get('snr', ''),
-                            'ecio': '',
-                            'rscp': '',
-                        }
+                    def _num_or_none(d, *keys):
+                        """First of *keys* with a real numeric value (in order).
 
-                    # 5G NR
-                    if signal_dbm is None:
-                        nr5g = _unwrap_sig_dict(sig_all.get('Nr5g'))
-                        if nr5g:
-                            signal_dbm = nr5g.get('rsrp') or nr5g.get('rssi')
+                        Prefers RSRP over RSSI and rejects empty/'' so an empty
+                        per-RAT dict never masks a populated one.
+                        """
+                        for k in keys:
+                            v = d.get(k)
+                            if v is None or v == '':
+                                continue
+                            try:
+                                float(v)
+                            except (TypeError, ValueError):
+                                continue
+                            return v
+                        return None
+
+                    # 5G NR first.  On 5G NSA both Lte (anchor) and Nr5g (SCell)
+                    # are populated; the NR carrier is the meaningful one, so
+                    # prefer it.  The numeric guard means an empty Nr5g dict can
+                    # never mask LTE, and SA / LTE-only fall through to LTE.
+                    nr5g = _unwrap_sig_dict(sig_all.get('Nr5g'))
+                    if nr5g:
+                        nr_dbm = _num_or_none(nr5g, 'rsrp', 'rssi')  # SS-RSRP first
+                        if nr_dbm is not None:
+                            signal_dbm = nr_dbm
                             signal_detail = {
                                 'technology': '5G NR',
                                 'rssi': nr5g.get('rssi', ''),
                                 'rsrp': nr5g.get('rsrp', ''),
                                 'rsrq': nr5g.get('rsrq', ''),
                                 'snr': nr5g.get('snr', ''),
+                                'ecio': '',
+                                'rscp': '',
+                            }
+
+                    # LTE (also the NSA anchor).  Prefer RSRP over RSSI so the
+                    # reported strength is the coverage metric, consistent with
+                    # the failover/reconnection path.
+                    if signal_dbm is None:
+                        lte = _unwrap_sig_dict(sig_all.get('Lte'))
+                        if lte:
+                            signal_dbm = _num_or_none(lte, 'rsrp', 'rssi')
+                            signal_detail = {
+                                'technology': 'LTE',
+                                'rssi': lte.get('rssi', ''),
+                                'rsrp': lte.get('rsrp', ''),
+                                'rsrq': lte.get('rsrq', ''),
+                                'snr': lte.get('snr', ''),
                                 'ecio': '',
                                 'rscp': '',
                             }
@@ -12270,6 +13201,10 @@ class ModemStateMachine:
                 # cumulative and there is no separate live session to add.
                 active_prior = persisted_active
                 session_total = 0
+
+            # Discount any mid-session clear so the reported total reflects
+            # usage since the clear, not since bearer connect.
+            session_total = self._effective_session_bytes(session_total, active_slot)
 
             status['cumulative_bytes'] = active_prior
             status['cumulative_plus_session'] = active_prior + session_total
@@ -12678,7 +13613,8 @@ class ModemStateMachine:
         self._cancel_failed_retry()
         for task_attr in ('usage_monitor_task', 'connectivity_monitor_task',
                           'failback_task', '_initial_config_task',
-                          '_signal_poll_task', '_ip_monitoring_task'):
+                          '_signal_poll_task', '_ip_monitoring_task',
+                          '_network_time_task'):
             task = getattr(self, task_attr, None)
             if task and not task.done():
                 task.cancel()

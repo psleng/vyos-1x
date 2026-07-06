@@ -682,6 +682,55 @@ def show_monitor_alerts(raw: bool,
     return '\n'.join(line for line in lines if line)
 
 
+def clear_data_usage(raw: bool, interface: str, slot: int):
+    """Zero the data-usage counters for a specific SIM slot.
+
+    CLI: clear interfaces wwan <wwanN> data-usage slot <N>
+
+    The slot must be given explicitly so the reset is always unambiguous.
+    The previous counters are logged by the service before they are cleared.
+    """
+    config = ConfigTreeQuery()
+    if not config.exists(['interfaces', 'wwan', interface]):
+        raise vyos.opmode.UnconfiguredSubsystem(
+            f'Interface "{interface}" is not configured'
+        )
+
+    try:
+        slot = int(slot)
+    except (TypeError, ValueError):
+        raise ValueError('SIM slot must be an integer')
+
+    if_num = _get_interface_number(interface)
+    try:
+        client = _get_client()
+        result = client.clear_data_usage(if_num, slot)
+    except Exception as e:
+        raise vyos.opmode.DataUnavailable(
+            f'Cannot clear data usage for {interface} slot {slot}: {e}'
+        )
+
+    if raw:
+        return result
+
+    def _mb(n):
+        try:
+            return f'{int(n) / (1024 * 1024):.1f} MB'
+        except (TypeError, ValueError):
+            return str(n)
+
+    prev_total = int(result.get('previous_total_bytes', 0) or 0)
+    prev_cumulative = int(result.get('previous_cumulative_bytes', 0) or 0)
+    prev_session = int(result.get('previous_session_bytes', 0) or 0)
+
+    lines = [f'Cleared data-usage counters for {interface} SIM slot {slot}.']
+    lines.append(_kv('Previous total:', f'{prev_total:,} bytes ({_mb(prev_total)})'))
+    lines.append(_kv('Previous cumulative:', f'{prev_cumulative:,} bytes'))
+    if result.get('was_active'):
+        lines.append(_kv('Previous session:', f'{prev_session:,} bytes'))
+    return '\n'.join(line for line in lines if line)
+
+
 if __name__ == '__main__':
     try:
         res = vyos.opmode.run(sys.modules[__name__])

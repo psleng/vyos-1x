@@ -659,6 +659,10 @@ def build_fsm_config(wwan):
         ),
         'network_mode': _leaf(wwan, 'network_mode', 'auto'),
 
+        # Network time (NITZ) — opt-in: set the system clock from cellular
+        # network time at registration (guarded so it never overrides NTP).
+        'network_time_enabled': _leaf_exists(wwan, 'network_time'),
+
         # Monitoring intervals
         'normal_monitoring_interval': _leaf_int(
             to, 'normal_monitoring_interval', 30
