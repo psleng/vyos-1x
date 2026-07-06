@@ -219,12 +219,12 @@ def verify(login):
 
         # Verify JIT role mappings have at least one attribute with values
         if 'jit' in login['saml']:
-            for role in ('admin', 'operator', 'super-operator'):
+            for role in ('admin', 'operator', 'super_operator'):
                 if role in login['saml']['jit']:
                     role_config = login['saml']['jit'][role]
                     if 'attribute' not in role_config:
                         raise ConfigError(
-                            f'system login saml jit {role}: '
+                            f'system login saml jit {role.replace("_", "-")}: '
                             f'at least one attribute must be defined'
                         )
                     for attr_name, attr_config in role_config.get(
@@ -232,7 +232,7 @@ def verify(login):
                     ).items():
                         if 'value' not in attr_config:
                             raise ConfigError(
-                                f'system login saml jit {role} attribute {attr_name}: '
+                                f'system login saml jit {role.replace("_", "-")} attribute {attr_name}: '
                                 f'at least one value must be defined'
                             )
 
@@ -645,14 +645,22 @@ def generate(login):
             saml_conf['serial-address'] = login['saml']['serial_address']
         if 'jit' in login['saml']:
             jit_conf = {}
-            for role in ('admin', 'operator', 'super-operator'):
-                if role in login['saml']['jit']:
+            # VyOS parses hyphenated CLI node names as underscored dict keys
+            # (e.g. CLI 'super-operator' -> 'super_operator'); the on-disk JSON
+            # keeps the hyphenated form to match the SP authenticator role map.
+            role_names = (
+                ('admin', 'admin'),
+                ('operator', 'operator'),
+                ('super_operator', 'super-operator'),
+            )
+            for src_key, out_key in role_names:
+                if src_key in login['saml']['jit']:
                     keys = {}
                     for attr_name, attr_config in (
-                        login['saml']['jit'][role].get('attribute', {}).items()
+                        login['saml']['jit'][src_key].get('attribute', {}).items()
                     ):
                         keys[attr_name] = attr_config.get('value', [])
-                    jit_conf[role] = keys
+                    jit_conf[out_key] = keys
             saml_conf['jit'] = jit_conf
 
         with open(saml_config_file, 'w') as f:
