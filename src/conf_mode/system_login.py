@@ -236,6 +236,11 @@ def verify(login):
                                 f'at least one value must be defined'
                             )
 
+        if 'encrypt' in login['saml'] and 'certificate' not in login['saml']:
+            raise ConfigError(
+                f'system login saml: certificate must be defined if using encryption'
+            )
+
     if 'user' in login:
         system_users = get_local_passwd_entries()
         # Collect users with a SAML email defined for cross-checks.
@@ -243,6 +248,11 @@ def verify(login):
             u: c
             for u, c in login['user'].items()
             if dict_search('authentication.saml', c)
+        }
+        saml_jit = {
+            u: c
+            for u, c in login['user'].items()
+            if dict_search('autentication.saml_jit', c)
         }
         # A SAML email maps a single identity to a single local user. Reject
         # configurations where the same SAML email is assigned to more than one
@@ -264,6 +274,13 @@ def verify(login):
             names = ', '.join(sorted(saml_users))
             Warning(
                 'system login saml block is not configured; users with a SAML '
+                f'identifier will not be accessible: {names}'
+            )
+
+        if saml_users and not dict_search("saml.jit", login):
+            names = ', '.join(sorted(saml_jit))
+            Warning(
+                'system login saml jit block is not configured; users with a SAML jit'
                 f'identifier will not be accessible: {names}'
             )
 
@@ -662,6 +679,18 @@ def generate(login):
                         keys[attr_name] = attr_config.get('value', [])
                     jit_conf[out_key] = keys
             saml_conf['jit'] = jit_conf
+        if 'encrypt' in login['saml']:
+            encrypt_conf = []
+            if 'assertions' in login['saml']['encrypt']:
+                encrypt_conf.append('assertions')
+            if 'name_id' in login['saml']['encrypt']:
+                encrypt_conf.append('name-id')
+            saml_conf['encypt'] = encrypt_conf
+        if 'sign' in login['saml']:
+            sign_conf = []
+            if 'messages' in login['saml']['sign']:
+                sign_conf.append('messages')
+            saml_conf['sign'] = sign_conf
 
         with open(saml_config_file, 'w') as f:
             json.dump(saml_conf, f)
