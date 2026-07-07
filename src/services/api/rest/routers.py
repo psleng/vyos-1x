@@ -986,7 +986,7 @@ def traceroute_op(data: TracerouteModel):
 
 
 @router.post('/auth')
-def auth_op(data: AuthModel):
+async def auth_op(data: AuthModel):
     op = data.op
     service = data.service
 
@@ -1009,7 +1009,8 @@ def auth_op(data: AuthModel):
     try:
         if op == 'login':
             payload = {'hostname': data.hostname, 'relay_state': data.relay_state or ''}
-            req = requests.post(
+            req = await run_in_threadpool(
+                requests.post,
                 f'{base_url}/login/web',
                 json=payload,
                 timeout=10,
@@ -1019,7 +1020,8 @@ def auth_op(data: AuthModel):
             return success(req.json().get('data'))
         elif op == 'validate':
             payload = {'session': data.session, 'secrete': data.secret}
-            req = requests.post(
+            req = await run_in_threadpool(
+                requests.post,
                 f'{base_url}/validate',
                 json=payload,
                 timeout=10,
