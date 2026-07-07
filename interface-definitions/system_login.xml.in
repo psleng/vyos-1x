@@ -366,26 +366,36 @@
                 </properties>
               </leafNode>
               <node name="encrypt">
-                <leafNode name="assertions">
-                  <properties>
-                    <help>Encrypt SAML assertions against pki key</help>
-                    <valueless/>
-                  </properties>
-                </leafNode>
-                <leafNode name="name-id">
-                  <properties>
-                    <help>Encrypt SAML assertions against pki key</help>
-                    <valueless/>
-                  </properties>
-                </leafNode>
-              <node name="sign">
-                <leafNode name="messages">
-                  <properties>
-                    <help>Require SAML messages to be signed</help>
-                    <valueless/>
-                  </properties>
-                </leafNode>
+                <properties>
+                  <help>Require encrypted SAML material from the IdP</help>
+                </properties>
+                <children>
+                  <leafNode name="assertions">
+                    <properties>
+                      <help>Encrypt SAML assertions against pki key</help>
+                      <valueless/>
+                    </properties>
+                  </leafNode>
+                  <leafNode name="name-id">
+                    <properties>
+                      <help>Encrypt SAML assertions against pki key</help>
+                      <valueless/>
+                    </properties>
+                  </leafNode>
+                </children>
               </node>
+              <node name="sign">
+                <properties>
+                  <help>SAML message signing options</help>
+                </properties>
+                <children>
+                  <leafNode name="messages">
+                    <properties>
+                      <help>Require SAML messages to be signed</help>
+                      <valueless/>
+                    </properties>
+                  </leafNode>
+                </children>
               </node>
               <leafNode name="serial-address">
                 <properties>
