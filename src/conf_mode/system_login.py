@@ -277,10 +277,10 @@ def verify(login):
                 f'identifier will not be accessible: {names}'
             )
 
-        if saml_users and not dict_search("saml.jit", login):
+        if saml_jit and not dict_search("saml.jit", login):
             names = ', '.join(sorted(saml_jit))
             Warning(
-                'system login saml jit block is not configured; users with a SAML jit'
+                'system login saml jit block is not configured; users with a SAML jit '
                 f'identifier will not be accessible: {names}'
             )
 
@@ -685,7 +685,7 @@ def generate(login):
                 encrypt_conf.append('assertions')
             if 'name_id' in login['saml']['encrypt']:
                 encrypt_conf.append('name-id')
-            saml_conf['encypt'] = encrypt_conf
+            saml_conf['encrypt'] = encrypt_conf
         if 'sign' in login['saml']:
             sign_conf = []
             if 'messages' in login['saml']['sign']:
