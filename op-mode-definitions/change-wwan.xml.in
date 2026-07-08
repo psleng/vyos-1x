@@ -1,6 +1,9 @@
 <?xml version="1.0"?>
 <interfaceDefinition>
   <node name="change">
+    <properties>
+      <help>Change device parameters</help>
+    </properties>
     <children>
       <node name="wwan">
         <properties>
