@@ -237,9 +237,10 @@ def verify(login):
                             )
 
         if 'encrypt' in login['saml'] and 'certificate' not in login['saml']:
-            raise ConfigError(
-                f'system login saml: certificate must be defined if using encryption'
-            )
+            if login['saml'].get('encrypt', {}):
+                raise ConfigError(
+                    f'system login saml: certificate must be defined if using encryption'
+                )
 
     if 'user' in login:
         system_users = get_local_passwd_entries()
