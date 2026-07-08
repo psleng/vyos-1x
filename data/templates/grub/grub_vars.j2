@@ -5,6 +5,7 @@ export {{ var_name | e }}
 
 {% raw %}
 source (hd0,gpt2)/RESET.ENV
+source (hd0,gpt2)/product.env
 
 if [ "${reset}" == "1" ]; then
     echo "Factory default iGOS boot ...."
