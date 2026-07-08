@@ -149,71 +149,50 @@ unmount_encrypted_config() {
     fi
 }
 
-# Function to extract prod_string and model_string from a file
-extract_from_file() {
-    local file=$1
-    prod_string=$(grep -oP '(?<=prod_id=)[^\s]+' "$file")
-    model_string=$(grep -oP '(?<=model=)[^\s]+' "$file")
-}
-
 # if necessary, provide initial config and remove nodes by product and model
 init_prod_model_bootfile_and_nodes () {
 
-    # check if config.boot.default exists 
+    # check if config.boot.default exists
     if [ -e $DEFAULT_BOOTFILE ]; then
         return
     fi
 
-    # Scan /proc/cmdline for the token 'prod_id=IOLAN|IRG|IT' and extract the model-string
-    prod_string=$(grep -oP '(?<=prod_id=)[^\s]+' /proc/cmdline)
+    # Resolve this unit's model definition and apply the artifacts it declares.
+    # vyos.system.model owns identity resolution (prod_id/model from
+    # /proc/cmdline, with a product.env fallback) AND the model-directory
+    # layout, so this script no longer constructs config-<id> / cli-remove-<id>
+    # paths.  Per-model file naming lives entirely in the model definition
+    # (vyos-build data/models/<platform>/<name>/); here we only dereference it.
+    # One eval resolves every artifact; empty MODEL_DIR => no match => keep the
+    # generic default config.
+    eval "$(python3 -m vyos.system.model --sh 2>/dev/null)"
 
-    # Scan /proc/cmdline for the token 'model=model-string' and extract the model-string
-    model_string=$(grep -oP '(?<=model=)[^\s]+' /proc/cmdline)
-
-    # Check if values are missing from /proc/cmdline
-    if [[ -z $prod_string || -z $model_string ]]; then
-        echo "No 'prod_id' and/or 'model' token found in /proc/cmdline, checking /mnt/efi/product.env"
-        extract_from_file /mnt/efi/product.env
-
-        # If still missing, check /etc/product.env
-        if [[ -z $prod_string || -z $model_string ]]; then
-            echo "No 'prod_id' and/or 'model' token found in /mnt/efi/product.env, checking /etc/product.env"
-            extract_from_file /etc/product.env
-
-            if [[ -z $prod_string || -z $model_string ]]; then
-                echo "No 'prod_id' and/or 'model' token found, using generic igos default config"
-                return
-            fi
-        fi
+    if [ -z "$MODEL_DIR" ]; then
+        echo "No model matched for this unit, using generic igos default config"
+        return
     fi
+    echo "Model definition: $MODEL_DIR (id=${MODEL_ID:-unknown})"
 
-    echo "Prod-Model string found: $prod_string-$model_string"
-
-    # Find the file with the model-string extension in /usr/libexec/vyos/init/model-info/
-    model_file="/usr/share/vyos/model-info/default-config/config-${prod_string}-${model_string}"
-    cli_remove_file="/usr/share/vyos/model-info/cli-remove/cli-remove-${prod_string}-${model_string}"
-
-    # Check if the file exists
-    if [ -f $model_file ]; then
-        # Copy the file to /opt/vyatta/etc/config.boot.default
-        cp $model_file $DEFAULT_BOOTFILE
-        echo "File $model_file successfully copied to /opt/vyatta/etc/config.boot.default"
+    # Default config for this model (optional — absent keeps the generic one).
+    if [ -n "$MODEL_DEFAULT_CONFIG" ] && [ -f "$MODEL_DEFAULT_CONFIG" ]; then
+        cp "$MODEL_DEFAULT_CONFIG" $DEFAULT_BOOTFILE
+        echo "File $MODEL_DEFAULT_CONFIG successfully copied to $DEFAULT_BOOTFILE"
         $vyos_libexec_dir/add-system-version.py >> $DEFAULT_BOOTFILE
-        echo "System version string added to /opt/vyatta/etc/config.boot.default"
+        echo "System version string added to $DEFAULT_BOOTFILE"
     else
-        echo "File $model_file not found...keeping generic default config"
+        echo "Model declares no default-config...keeping generic default config"
     fi
 
-    # Ensure the cli/node removal text file exists
-    if [ ! -f $cli_remove_file ]; then
-        echo "File $cli_remove_file not found...no cli nodes to remove"
+    # CLI node removal list for this model (optional).
+    if [ -z "$MODEL_CLI_REMOVE" ] || [ ! -f "$MODEL_CLI_REMOVE" ]; then
+        echo "Model declares no cli-remove list...no cli nodes to remove"
     else
-        echo "Cli node remove file found: $cli_remove_file ...removing all cli nodes:"
+        echo "Cli node remove file found: $MODEL_CLI_REMOVE ...removing all cli nodes:"
         # Read each line from the file and remove the file specified in the line
         while IFS= read -r line; do
             # Store the filename in a variable
             cli_node_to_remove="$line"
-    
+
             # Check if the node directory exists and remove it
             if [ -d "/opt/vyatta/share/$cli_node_to_remove" ]; then
                  echo "Removing cli directory node: $cli_node_to_remove"
@@ -221,7 +200,7 @@ init_prod_model_bootfile_and_nodes () {
             else
                  echo "Cli node not found: $cli_node_to_remove"
             fi
-        done < $cli_remove_file
+        done < $MODEL_CLI_REMOVE
         sync
     fi
 }

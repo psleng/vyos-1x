@@ -24,11 +24,15 @@ hardware-AGNOSTIC code:
   * :mod:`vyos.hardware.base`  — ``Pin`` dataclass + libgpiod-backed ``Board``
   * :mod:`vyos.hardware.board` — semantic helpers (modem reset, SIM, serial)
 
-The pin map (:mod:`vyos.hardware.pinmap`) is NOT shipped here. It is
-overlaid onto the image at build time by vyos-build, per hardware flavor
-(see ``vyos-build/data/build-flavors/igos-*``). On images without an
-overlay, ``BOARD`` is a stub that raises a clear error on first use, so
-this module remains importable everywhere.
+The pin map (:mod:`vyos.hardware.pinmap`) ships a small ``VARIANT='test'``
+stub in this package; on real hardware images vyos-build overlays a
+per-flavor pin map on top of it at build time (see
+``vyos-build/data/build-flavors/igos-*``). ``vyos.hardware`` is imported only
+by the WWAN runtime and the ``test hardware`` op-mode command — never on a
+generic boot/config path — and libgpiod is accessed lazily, so the bundled
+stub is inert on non-hardware images. If the pin map module is ever absent,
+or defines no pins, ``BOARD`` falls back to a stub that raises a clear error
+on first use, so this module remains importable everywhere.
 
 Typical caller usage::
 
