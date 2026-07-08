@@ -1,4 +1,4 @@
-<!-- include start from serial/general/keepalive-setting.xml.i -->
+<!-- include start from serial/global/keepalive-setting.xml.i -->
 <node name="tcp-keep-alive">
   <properties>
     <help>TCP Keep-alive global setting</help>

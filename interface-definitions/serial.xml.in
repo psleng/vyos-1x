@@ -23,7 +23,7 @@
               <valueless/>
             </properties>
           </leafNode>
-          #include <include/serial/general/keepalive-setting.xml.i>
+          #include <include/serial/global/keepalive-setting.xml.i>
           #include <include/serial/general/modbus-gateway.xml.i>
           #include <include/serial/general/vmodem-phonebook.xml.i>
           #include <include/serial/general/tls-global.xml.i>
