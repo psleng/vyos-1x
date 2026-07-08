@@ -252,7 +252,7 @@ def verify(login):
         saml_jit = {
             u: c
             for u, c in login['user'].items()
-            if dict_search('authentication.saml_jit', c)
+            if 'saml_jit' in c.get('authentication', {})
         }
         # A SAML email maps a single identity to a single local user. Reject
         # configurations where the same SAML email is assigned to more than one
