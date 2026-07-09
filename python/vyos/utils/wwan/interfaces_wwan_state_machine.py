@@ -74,9 +74,12 @@ SMS_STORAGE_DIR = "/var/lib/wwan/sms"
 SMS_MAX_MESSAGES = 100
 
 # ── APN state persistence ────────────────────────────────────────────────────
-# Survives service restarts and reboots so the last-connected APN is retried
-# first on the next boot without re-running the full discovery cascade.
-APN_STATE_DIR = "/var/lib/wwan/apn"
+# Stored under /run/wwan (tmpfs): survives a service crash/restart so the FSM
+# can retry the last-connected APN first (there is no VyOS-level restart hook),
+# but is intentionally cleared on reboot.  A cold boot therefore starts fresh
+# and re-runs discovery rather than displaying a stale APN for a SIM that may no
+# longer be present.
+APN_STATE_DIR = "/run/wwan/apn"
 
 # ── Central defaults ────────────────────────────────────────────────────────
 # Single source of truth for configuration defaults.  Every code path that
@@ -464,7 +467,7 @@ class ModemStateMachine:
         # SIM change tracking for worldwide operation
         self.last_known_sim_info = None     # Store SIM info from last successful connection
         self.sim_changed = False            # Flag to indicate SIM card change detected
-        self.connected_apn = self._restore_connected_apn()   # Last successful APN (persisted across reboots)
+        self.connected_apn = self._restore_connected_apn()   # Last successful APN (persisted across service restarts, cleared on reboot)
         self.requested_apn = ''             # APN name we asked MM to connect with (this session)
         self.negotiated_apn = ''            # APN the carrier actually activated (read over QMI)
         self.current_sim_path = None        # Last observed Modem.Sim object path
@@ -5962,7 +5965,11 @@ class ModemStateMachine:
         return os.path.join(APN_STATE_DIR, f"wwan{self.interface_number}.json")
 
     def _persist_connected_apn(self, apn: dict) -> None:
-        """Write the last-connected APN to disk so it survives reboots."""
+        """Persist the last-connected APN to /run/wwan (tmpfs).
+
+        Survives a service crash/restart so the FSM can retry the same APN
+        first; cleared on reboot by design.
+        """
         try:
             os.makedirs(APN_STATE_DIR, exist_ok=True)
             with open(self._apn_state_path(), 'w') as f:
