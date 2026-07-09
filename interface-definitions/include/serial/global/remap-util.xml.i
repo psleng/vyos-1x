@@ -1,4 +1,4 @@
-<!-- include start from serial/general/remap-util.xml.i -->
+<!-- include start from serial/global/remap-util.xml.i -->
 <leafNode name="remap">
   <properties>
     <help>Actual baud rate (baud rate on the serial port)</help>

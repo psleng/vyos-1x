@@ -1,5 +1,5 @@
-<!-- include start from serial/general/trueport-remap.xml.i -->
-<node name="trueport-remap">
+<!-- include start from serial/global/trueport-remap.xml.i -->
+<node name="trueport">
   <properties>
     <help>Trueport baud rate remapping setting</help>
   </properties>
@@ -14,7 +14,7 @@
             <help>50 remap to</help>
           </properties>
           <children>
-            #include <include/serial/general/remap-util.xml.i>
+            #include <include/serial/global/remap-util.xml.i>
             <leafNode name="remap">
               <defaultValue>57600</defaultValue>
             </leafNode>
@@ -25,7 +25,7 @@
             <help>75 remap to</help>
           </properties>
           <children>
-            #include <include/serial/general/remap-util.xml.i>
+            #include <include/serial/global/remap-util.xml.i>
             <leafNode name="remap">
               <defaultValue>300</defaultValue>
             </leafNode>
@@ -36,7 +36,7 @@
             <help>110 remap to</help>
           </properties>
           <children>
-            #include <include/serial/general/remap-util.xml.i>
+            #include <include/serial/global/remap-util.xml.i>
             <leafNode name="remap">
               <defaultValue>115200</defaultValue>
             </leafNode>
@@ -47,7 +47,7 @@
             <help>134 remap to</help>
           </properties>
           <children>
-            #include <include/serial/general/remap-util.xml.i>
+            #include <include/serial/global/remap-util.xml.i>
             <leafNode name="remap">
               <defaultValue>230400</defaultValue>
             </leafNode>
@@ -58,7 +58,7 @@
             <help>150 remap to</help>
           </properties>
           <children>
-            #include <include/serial/general/remap-util.xml.i>
+            #include <include/serial/global/remap-util.xml.i>
             <leafNode name="remap">
               <defaultValue>300</defaultValue>
             </leafNode>
@@ -69,7 +69,7 @@
             <help>200 remap to</help>
           </properties>
           <children>
-            #include <include/serial/general/remap-util.xml.i>
+            #include <include/serial/global/remap-util.xml.i>
             <leafNode name="remap">
               <defaultValue>300</defaultValue>
             </leafNode>
@@ -80,7 +80,7 @@
             <help>300 remap to</help>
           </properties>
           <children>
-            #include <include/serial/general/remap-util.xml.i>
+            #include <include/serial/global/remap-util.xml.i>
             <leafNode name="remap">
               <defaultValue>300</defaultValue>
             </leafNode>
@@ -91,7 +91,7 @@
             <help>600 remap to</help>
           </properties>
           <children>
-            #include <include/serial/general/remap-util.xml.i>
+            #include <include/serial/global/remap-util.xml.i>
             <leafNode name="remap">
               <defaultValue>600</defaultValue>
             </leafNode>
@@ -102,7 +102,7 @@
             <help>1200 remap to</help>
           </properties>
           <children>
-            #include <include/serial/general/remap-util.xml.i>
+            #include <include/serial/global/remap-util.xml.i>
             <leafNode name="remap">
               <defaultValue>1200</defaultValue>
             </leafNode>
@@ -113,7 +113,7 @@
             <help>1800 remap to</help>
           </properties>
           <children>
-            #include <include/serial/general/remap-util.xml.i>
+            #include <include/serial/global/remap-util.xml.i>
             <leafNode name="remap">
               <defaultValue>1800</defaultValue>
             </leafNode>
@@ -124,7 +124,7 @@
             <help>2400 remap to</help>
           </properties>
           <children>
-            #include <include/serial/general/remap-util.xml.i>
+            #include <include/serial/global/remap-util.xml.i>
             <leafNode name="remap">
               <defaultValue>2400</defaultValue>
             </leafNode>
@@ -135,7 +135,7 @@
             <help>4800 remap to</help>
           </properties>
           <children>
-            #include <include/serial/general/remap-util.xml.i>
+            #include <include/serial/global/remap-util.xml.i>
             <leafNode name="remap">
               <defaultValue>4800</defaultValue>
             </leafNode>
@@ -146,7 +146,7 @@
             <help>9600 remap to</help>
           </properties>
           <children>
-            #include <include/serial/general/remap-util.xml.i>
+            #include <include/serial/global/remap-util.xml.i>
             <leafNode name="remap">
               <defaultValue>9600</defaultValue>
             </leafNode>
@@ -157,7 +157,7 @@
             <help>19200 remap to</help>
           </properties>
           <children>
-            #include <include/serial/general/remap-util.xml.i>
+            #include <include/serial/global/remap-util.xml.i>
             <leafNode name="remap">
               <defaultValue>19200</defaultValue>
             </leafNode>
@@ -168,7 +168,7 @@
             <help>38400 remap to</help>
           </properties>
           <children>
-            #include <include/serial/general/remap-util.xml.i>
+            #include <include/serial/global/remap-util.xml.i>
             <leafNode name="remap">
               <defaultValue>38400</defaultValue>
             </leafNode>
