@@ -1,7 +1,7 @@
 <!-- include start from serial/service/utils/session-timeout.xml.i -->
 <leafNode name="session-timeout">
   <properties>
-    <help>Close the session/connection when the Session Timeout expires (in s)</help>
+    <help>Close the session/connection when the session timeout expires (in s)</help>
     <valueHelp>
       <format>u32:0-4294967</format>
       <description>Decimal integer (0 - 4294967)</description>
