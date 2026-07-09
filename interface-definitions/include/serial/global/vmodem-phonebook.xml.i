@@ -1,12 +1,12 @@
-<!-- include start from serial/service/general/vmodem-phonebook.xml.i -->
-<node name="vmodem-phone-list">
+<!-- include start from serial/global/vmodem-phonebook.xml.i -->
+<node name="vmodem">
   <properties>
     <help>Phone number to host mapping</help>
   </properties>
   <children>
-    <tagNode name="entry">
+    <tagNode name="directory-entry">
       <properties>
-        <help>Phonebook entry</help>
+        <help>Phonebook directory entry</help>
         <valueHelp>
           <format>u32:1-8</format>
           <description>Entry ID (1-8)</description>
@@ -16,20 +16,20 @@
         </constraint>
       </properties>
       <children>
-        <leafNode name="hostname">
+        <leafNode name="address">
           <properties>
-            <help>Mapped host name</help>
+            <help>Mapped host address</help>
             <valueHelp>
               <format>ipv4</format>
-              <description>IP address of current host</description>
+              <description>IPv4 address</description>
             </valueHelp>
             <valueHelp>
               <format>ipv6</format>
-              <description>IPv6 address of current host</description>
+              <description>IPv6 address</description>
             </valueHelp>
             <valueHelp>
               <format>hostname</format>
-              <description>Fully qualified host name of current host</description>
+              <description>Fully qualified host name</description>
             </valueHelp>
             <constraint>
               <validator name="ip-address"/>
@@ -39,7 +39,7 @@
         </leafNode>
         <leafNode name="port">
           <properties>
-            <help>Mapped tcp port</help>
+            <help>Mapped TCP port</help>
             <valueHelp>
               <format>u32:1-65535</format>
               <description>Port number</description>
