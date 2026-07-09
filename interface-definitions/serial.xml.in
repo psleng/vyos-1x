@@ -56,48 +56,6 @@
               <valueless/>
             </properties>
           </leafNode>
-          <leafNode name="service">
-            <properties>
-              <help>Active serial service</help>
-              <completionHelp>
-                <list>trueport-server trueport-client modbus-master modbus-slave vmodem udp tcp-reverse tcp-direct serial-tunnel ppp ssh-reverse telnet-reverse slip ssh-direct telnet-direct login nine-bits</list>
-              </completionHelp>
-              <constraint>
-                <regex>(trueport-server|trueport-client|modbus-master|modbus-slave|vmodem|udp|tcp-reverse|tcp-direct|serial-tunnel|ppp|ssh-reverse|telnet-reverse|slip|ssh-direct|telnet-direct|login|nine-bits)</regex>
-              </constraint>
-            </properties>
-          </leafNode>
-          <node name="service-setting">
-            <properties>
-              <help>Service specific setting</help>
-            </properties>
-            <children>
-              #include <include/serial/service/trueport.xml.i>
-              #include <include/serial/service/reverse.xml.i>
-              #include <include/serial/service/direct.xml.i>
-              #include <include/serial/service/modbus.xml.i>
-              #include <include/serial/service/vmodem.xml.i>
-              #include <include/serial/service/udp.xml.i>
-              #include <include/serial/service/serial-tunnel.xml.i>
-              #include <include/serial/service/ppp.xml.i>
-              #include <include/serial/service/slip.xml.i>
-              #include <include/serial/service/nine-bits.xml.i>
-            </children>
-          </node>
-          #include <include/serial/service/utils/tls-port.xml.i>
-          #include <include/serial/service/utils/keepalive.xml.i>
-          #include <include/serial/service/utils/data-logging.xml.i>
-          #include <include/serial/service/utils/sess-string-init.xml.i>
-          #include <include/serial/service/utils/sess-string-term.xml.i>
-          #include <include/serial/service/utils/sess-string-delay.xml.i>
-          #include <include/serial/service/utils/listen-port.xml.i>
-          #include <include/serial/service/utils/send-description.xml.i>
-          #include <include/serial/service/utils/host-list.xml.i>
-          #include <include/serial/service/utils/aliasing-address.xml.i>
-          #include <include/serial/service/utils/banner.xml.i>
-          #include <include/serial/service/utils/motd.xml.i>
-          #include <include/serial/service/utils/idle-timeout.xml.i>
-          #include <include/serial/service/utils/session-timeout.xml.i>
         </children>
       </tagNode>
     </children>
