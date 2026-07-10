@@ -13808,6 +13808,44 @@ class ModemStateMachine:
                            extra={'interface_number': self.interface_number})
             self.bearer_path = None
 
+        # Orderly network DEREGISTRATION before the downstream teardown and
+        # the (reboot-path) GPIO reset.
+        #
+        # Disconnecting the bearer above only ends the DATA session (PDP/
+        # bearer); the modem stays ENABLED and REGISTERED/attached on the
+        # operator's network.  On reboot we then GPIO-reset the modem, which
+        # is a hard yank — the network is never told we are leaving and must
+        # age the registration out.  Calling Modem.Enable(false) makes
+        # ModemManager take the modem to the DISABLED state, which performs a
+        # proper network detach/deregister first.  This is the clean way to
+        # leave the network ahead of a reset/power-down.
+        #
+        # BOUND IT.  Same hazard as the bearer disconnect: dbus_next has no
+        # client-side timeout, and a FAILED/sim-missing/wedged modem may not
+        # service Enable(false) promptly.  An unbounded await would burn the
+        # caller's whole shutdown budget (the 20s outer wait_for) on what is,
+        # on the reboot path, immediately followed by a GPIO reset anyway.
+        # Cap it short and continue on timeout so the GPIO reset still runs
+        # on time; deregistration is best-effort.
+        if self.proxy:
+            try:
+                modem_iface = self.proxy.get_interface(MODEM_INTERFACE)
+                await asyncio.wait_for(
+                    modem_iface.call_enable(False),
+                    timeout=self._shutdown_disconnect_timeout)
+                logger.info("Modem disabled (network deregistered) during shutdown",
+                           extra={'interface_number': self.interface_number})
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Modem disable timed out during shutdown — modem likely "
+                    "FAILED/wedged; continuing so teardown/GPIO reset run on time",
+                    extra={'interface_number': self.interface_number,
+                           'timeout_seconds': self._shutdown_disconnect_timeout})
+            except Exception as e:  # noqa: BLE001 -- best-effort deregister
+                logger.warning(
+                    f"Modem disable during shutdown failed (continuing): {e}",
+                    extra={'interface_number': self.interface_number})
+
         # Tear down every downstream artifact (passthrough,
         # ipv6-bridging, FSM MSS clamp, link DOWN).  Same cleanup the
         # admin-disable path performs — operator deleting the interface
