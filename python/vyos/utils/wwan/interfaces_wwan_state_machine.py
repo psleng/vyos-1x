@@ -73,6 +73,21 @@ SMS_INTERFACE = "org.freedesktop.ModemManager1.Sms"
 SMS_STORAGE_DIR = "/var/lib/wwan/sms"
 SMS_MAX_MESSAGES = 100
 
+# ── Cross-upgrade persistent state (data-usage billing counters, failover
+#    event log) ──────────────────────────────────────────────────────────────
+# Stored under /config so the data survives BOTH a reboot AND an image upgrade.
+#
+# WHY /config and not /var/lib: on the installed live image, / (and hence
+# /var/lib) is an overlay whose upperdir is keyed by the running image version
+# (…/persistence/boot/<version>/rw).  A plain `reboot now` of the same image
+# keeps it, but `add system image <new>` boots a FRESH per-version rw layer, so
+# anything under /var/lib is GONE after an upgrade.  /config is the directory
+# VyOS explicitly offers to copy forward when you install a new image (the
+# "Would you like to copy… to the new image?" prompt), so it is the sanctioned
+# place for state that must ride across upgrades — exactly what per-SIM billing
+# counters require.
+WWAN_PERSIST_DIR = "/config/wwan"
+
 # ── APN state persistence ────────────────────────────────────────────────────
 # Stored under /run/wwan (tmpfs): survives a service crash/restart so the FSM
 # can retry the last-connected APN first (there is no VyOS-level restart hook),
@@ -6551,9 +6566,10 @@ class ModemStateMachine:
                               reason: str, trigger: str, extra_data: dict = None):
         """Write a structured failover event to the per-interface event log.
 
-        Events are stored in /var/lib/vyos/wwan/wwan{N}_events.json as an
+        Events are stored in <WWAN_PERSIST_DIR>/wwan{N}_events.json as an
         array of objects.  The file is capped at 100 events to prevent
-        unbounded growth.  Survives reboots and service restarts.
+        unbounded growth.  Survives reboots, service restarts AND image
+        upgrades (stored under /config; see WWAN_PERSIST_DIR).
 
         Args:
             event_type: 'failover', 'failback', 'data_limit_failover', etc.
@@ -6576,10 +6592,10 @@ class ModemStateMachine:
         if extra_data:
             event['extra'] = extra_data
 
-        event_file = f'/var/lib/vyos/wwan/wwan{self.interface_number}_events.json'
+        event_file = f'{WWAN_PERSIST_DIR}/wwan{self.interface_number}_events.json'
 
         try:
-            os.makedirs('/var/lib/vyos/wwan', exist_ok=True)
+            os.makedirs(WWAN_PERSIST_DIR, exist_ok=True)
 
             # Load existing events
             events = []
@@ -11310,10 +11326,12 @@ class ModemStateMachine:
     def _usage_file_path(self) -> str:
         """Return the path to the per-interface usage persistence file.
 
-        Uses /var/lib/vyos/wwan/ for persistence across reboots and service
-        restarts.  The directory is created on first write by _persist_usage().
+        Uses /config (WWAN_PERSIST_DIR) so per-SIM billing counters persist
+        across reboots, service restarts AND image upgrades (VyOS copies
+        /config forward on `add system image`).  The directory is created on
+        first write by _persist_usage().
         """
-        return f"/var/lib/vyos/wwan/wwan{self.interface_number}_usage.json"
+        return f"{WWAN_PERSIST_DIR}/wwan{self.interface_number}_usage.json"
 
     def _load_all_persisted_usage(self) -> dict:
         """Return the full per-slot usage dict from disk (no billing-cycle reset).
@@ -11356,6 +11374,28 @@ class ModemStateMachine:
         # Check if we've crossed a billing cycle boundary since last update
         try:
             now = datetime.datetime.now()
+            # CLOCK-SANITY GUARD: never reset the billing counter while the
+            # system clock is untrustworthy.  At cold boot (before NTP/RTC
+            # sync) `now` can be an epoch-ish bogus date; feeding that to
+            # _billing_cycle_crossed() can FALSELY conclude a billing boundary
+            # passed and wipe the cumulative bytes to 0 — corrupting the very
+            # billing accounting this file exists to protect.
+            #
+            # This is SELF-HEALING: we leave stored_bytes AND last_updated
+            # untouched and just skip the reset.  _load_persisted_usage() is
+            # re-invoked on every reconnect, every usage flush, and every
+            # `show` status query, so once NTP corrects the clock the next call
+            # re-evaluates the SAME persisted last_updated against a sane `now`
+            # and performs the reset then, if a boundary genuinely passed.
+            if not self._clock_is_sane(now):
+                logger.warning(
+                    "System clock not yet trustworthy — deferring billing-cycle "
+                    "reset check to protect cumulative usage counter",
+                    extra={'interface_number': self.interface_number,
+                           'sim_slot': slot_key,
+                           'stored_bytes': stored_bytes,
+                           'clock_now': now.isoformat()})
+                return stored_bytes
             if last_updated:
                 last_dt = datetime.datetime.fromisoformat(last_updated)
                 # Reset if billing day has passed since last update
@@ -11595,6 +11635,27 @@ class ModemStateMachine:
             'previous_session_bytes': prior_session,
             'previous_total_bytes': prior_total,
         }
+
+    @staticmethod
+    def _clock_is_sane(now_dt=None) -> bool:
+        """Return True when the system clock looks trustworthy for billing math.
+
+        Gates the billing-cycle reset in _load_persisted_usage(): at cold boot,
+        before NTP/RTC sync, the clock can read a bogus early date and a naive
+        comparison would falsely trip a billing-cycle reset and wipe the
+        cumulative usage counter.
+
+        Heuristic (deliberately simple, dependency-free): sane if the year is at
+        or after a fixed floor that is safely in the past for any real
+        deployment but well after the epoch/boot-default dates an unsynced clock
+        reports (1970/2000-era).  We intentionally do NOT require strict
+        NTP-synchronized state — a plausible RTC-backed time is enough for
+        billing-boundary arithmetic, and requiring full sync would defer
+        counting forever on RTC-only units that never reach a time server.
+        """
+        if now_dt is None:
+            now_dt = datetime.datetime.now()
+        return now_dt.year >= 2024
 
     @staticmethod
     def _billing_cycle_crossed(last_dt, now_dt, billing_day: int) -> bool:
