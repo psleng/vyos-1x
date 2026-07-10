@@ -57,6 +57,8 @@
             </properties>
           </leafNode>
           #include <include/serial/service/login.xml.i>
+          #include <include/serial/service/modbus-profileable.xml.i>
+          #include <include/serial/service/modbus-not-profileable.xml.i>
         </children>
       </tagNode>
     </children>
