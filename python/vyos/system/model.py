@@ -86,10 +86,16 @@ def parse_conf(path: str) -> Dict[str, str]:
     Comments (``#``) and blank lines are ignored; surrounding whitespace is
     stripped.  Mirrors the format used by model.conf / product.env so there is
     one file grammar across the model tree.
+
+    The file is read with ``errors="replace"`` so a non-UTF-8 or partly binary
+    source (e.g. a ``product.env`` on a FAT/EFI partition that carries a BOM or
+    padding bytes) can never raise ``UnicodeDecodeError`` and abort identity
+    resolution -- undecodable bytes become replacement characters, the ASCII
+    ``key=value`` lines still parse, and a wholly unreadable file yields ``{}``.
     """
     result: Dict[str, str] = {}
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8", errors="replace") as f:
             for line in f:
                 line = line.strip()
                 if not line or line.startswith("#") or "=" not in line:

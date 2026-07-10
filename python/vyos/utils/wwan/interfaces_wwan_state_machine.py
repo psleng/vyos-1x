@@ -74,9 +74,12 @@ SMS_STORAGE_DIR = "/var/lib/wwan/sms"
 SMS_MAX_MESSAGES = 100
 
 # ── APN state persistence ────────────────────────────────────────────────────
-# Survives service restarts and reboots so the last-connected APN is retried
-# first on the next boot without re-running the full discovery cascade.
-APN_STATE_DIR = "/var/lib/wwan/apn"
+# Stored under /run/wwan (tmpfs): survives a service crash/restart so the FSM
+# can retry the last-connected APN first (there is no VyOS-level restart hook),
+# but is intentionally cleared on reboot.  A cold boot therefore starts fresh
+# and re-runs discovery rather than displaying a stale APN for a SIM that may no
+# longer be present.
+APN_STATE_DIR = "/run/wwan/apn"
 
 # ── Central defaults ────────────────────────────────────────────────────────
 # Single source of truth for configuration defaults.  Every code path that
@@ -464,7 +467,7 @@ class ModemStateMachine:
         # SIM change tracking for worldwide operation
         self.last_known_sim_info = None     # Store SIM info from last successful connection
         self.sim_changed = False            # Flag to indicate SIM card change detected
-        self.connected_apn = self._restore_connected_apn()   # Last successful APN (persisted across reboots)
+        self.connected_apn = self._restore_connected_apn()   # Last successful APN (persisted across service restarts, cleared on reboot)
         self.requested_apn = ''             # APN name we asked MM to connect with (this session)
         self.negotiated_apn = ''            # APN the carrier actually activated (read over QMI)
         self.current_sim_path = None        # Last observed Modem.Sim object path
@@ -5962,7 +5965,11 @@ class ModemStateMachine:
         return os.path.join(APN_STATE_DIR, f"wwan{self.interface_number}.json")
 
     def _persist_connected_apn(self, apn: dict) -> None:
-        """Write the last-connected APN to disk so it survives reboots."""
+        """Persist the last-connected APN to /run/wwan (tmpfs).
+
+        Survives a service crash/restart so the FSM can retry the same APN
+        first; cleared on reboot by design.
+        """
         try:
             os.makedirs(APN_STATE_DIR, exist_ok=True)
             with open(self._apn_state_path(), 'w') as f:
@@ -13353,19 +13360,40 @@ class ModemStateMachine:
 
                 # Physical SIM identity — start from cache, refresh from D-Bus
                 cached = self.sim_slot_info_cache.get(slot_num, {})
+                # SIM presence source of truth: on GPIO-mux boards the board
+                # SIM_DETECT lines are authoritative.  ModemManager only ever
+                # sees the currently-muxed slot, and on modems with a SIMDET
+                # quirk (e.g. Telit LE910C4) it can report the active card as
+                # "missing" while its identity is still readable — so MM must
+                # NOT drive the presence flag on those boards.  Use the GPIO
+                # controller's sampled state when the slot's presence is known;
+                # otherwise (modem-managed boards, or a GPIO line not yet
+                # sampled) fall back to the ModemManager/probe view below.
+                gpio_present = None
+                if getattr(self.sim_controller, 'is_gpio_mux', False):
+                    try:
+                        if self.sim_controller.slot_presence_known(slot_num):
+                            gpio_present = await self.sim_controller.is_present(slot_num)
+                    except Exception:
+                        gpio_present = None
                 if slot_num == (self.current_active_sim or 0):
                     # Active slot: use live SIM info (section 3 already queried it)
                     status[f"{prefix}_imsi"] = status.get('sim_imsi', cached.get('imsi', ''))
                     status[f"{prefix}_iccid"] = status.get('sim_iccid', cached.get('iccid', ''))
                     status[f"{prefix}_operator"] = status.get('sim_operator', cached.get('operator', ''))
                     status[f"{prefix}_mcc_mnc"] = status.get('sim_mcc_mnc', cached.get('mcc_mnc', ''))
-                    status[f"{prefix}_present"] = True
+                    # GPIO SIM_DETECT wins; else assume present (the active slot
+                    # is muxed to the modem, which is how section 3 read identity).
+                    status[f"{prefix}_present"] = (
+                        gpio_present if gpio_present is not None else True)
                 else:
                     # Inactive slot: try D-Bus probe, fall back to cache
                     try:
                         probed = await self._probe_sim_slot_info(slot_num)
                         # Merge: probed D-Bus values win, then cache, then empty
-                        status[f"{prefix}_present"] = probed.get('present', cached.get('present', False))
+                        mm_present = probed.get('present', cached.get('present', False))
+                        status[f"{prefix}_present"] = (
+                            gpio_present if gpio_present is not None else mm_present)
                         status[f"{prefix}_imsi"] = probed.get('imsi', cached.get('imsi', ''))
                         status[f"{prefix}_iccid"] = probed.get('iccid', cached.get('iccid', ''))
                         status[f"{prefix}_operator"] = probed.get('operator', cached.get('operator', ''))
@@ -13375,7 +13403,9 @@ class ModemStateMachine:
                             merged = {**cached, **{k: v for k, v in probed.items() if v}}
                             self.sim_slot_info_cache[slot_num] = merged
                     except Exception:
-                        status[f"{prefix}_present"] = cached.get('present', False)
+                        status[f"{prefix}_present"] = (
+                            gpio_present if gpio_present is not None
+                            else cached.get('present', False))
                         status[f"{prefix}_imsi"] = cached.get('imsi', '')
                         status[f"{prefix}_iccid"] = cached.get('iccid', '')
                         status[f"{prefix}_operator"] = cached.get('operator', '')
