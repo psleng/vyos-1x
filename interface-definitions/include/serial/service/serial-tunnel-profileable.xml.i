@@ -1,9 +1,11 @@
 <!-- include start from serial/service/serial-tunnel.xml.i -->
 <node name="serial-tunnel">
   <properties>
-    <help>Serial tunnel profile</help>
+    <help>Serial tunnel service settings</help>
   </properties>
   <children>
+    #include <include/serial/service/utils/tls-port.xml.i>
+    #include <include/serial/service/utils/keepalive.xml.i>
     <leafNode name="break-length">
       <properties>
         <help>The length of time the break condition will be asserted when received a break signal</help>
@@ -17,29 +19,9 @@
       </properties>
       <defaultValue>1000</defaultValue>
     </leafNode>
-    <leafNode name="mode">
-      <properties>
-        <help>Serial tunnel mode</help>
-        <completionHelp>
-          <list>client server</list>
-        </completionHelp>
-        <constraint>
-          <regex>(client|server)</regex>
-        </constraint>
-      </properties>
-      <defaultValue>server</defaultValue>
-    </leafNode>
-    <node name="client">
-      <properties>
-        <help>Client setting</help>
-      </properties>
-      <children>
-        #include <include/serial/service/utils/host-info.xml.i>
-      </children>
-    </node>
     <leafNode name="delay-after-break">
       <properties>
-        <help>The delay between the termination of a a break condition and the time data will be sent</help>
+        <help>The delay between the termination of a break condition and the time data will be sent</help>
         <valueHelp>
           <format>u32:0-65535</format>
           <description>Specifies the delay in milliseconds</description>
@@ -50,6 +32,14 @@
       </properties>
       <defaultValue>0</defaultValue>
     </leafNode>
+    <node name="client">
+      <properties>
+        <help>Serial tunnel client settings</help>
+      </properties>
+      <children>
+        #include <include/serial/service/utils/remote.xml.i>
+      </children>
+    </node>
   </children>
 </node>
 <!-- include end -->
