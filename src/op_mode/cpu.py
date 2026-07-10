@@ -29,6 +29,14 @@ cpu_template = Template("""
 {% if 'model name' in cpu %}Model:            {{cpu['model name']}}{% endif %}
 {% if 'cpu cores' in cpu %}Cores:            {{cpu['cpu cores']}}{% endif %}
 {% if 'cpu MHz' in cpu %}Current MHz:      {{cpu['cpu MHz']}}{% endif %}
+{# ARM (and other architectures) do not expose the x86 keys above in       #}
+{# /proc/cpuinfo, so fall back to the fields they do provide.              #}
+{% if 'CPU implementer' in cpu %}CPU Implementer:  {{cpu['CPU implementer']}}{% endif %}
+{% if 'CPU architecture' in cpu %}CPU Architecture: {{cpu['CPU architecture']}}{% endif %}
+{% if 'CPU variant' in cpu %}CPU Variant:      {{cpu['CPU variant']}}{% endif %}
+{% if 'CPU part' in cpu %}CPU Part:         {{cpu['CPU part']}}{% endif %}
+{% if 'CPU revision' in cpu %}CPU Revision:     {{cpu['CPU revision']}}{% endif %}
+{% if 'BogoMIPS' in cpu %}BogoMIPS:         {{cpu['BogoMIPS']}}{% endif %}
 {% endfor %}
 """)
 
@@ -36,6 +44,22 @@ cpu_summary_template = Template("""
 Physical CPU cores: {{count}}
 CPU model(s): {{models | join(", ")}}
 """)
+
+def _cpu_model(cpu):
+    # x86 exposes a friendly "model name"; ARM and some other architectures
+    # do not, so build a best-effort label from the fields they provide.
+    if 'model name' in cpu:
+        return cpu['model name']
+
+    parts = []
+    if 'CPU implementer' in cpu:
+        parts.append(f"impl {cpu['CPU implementer']}")
+    if 'CPU part' in cpu:
+        parts.append(f"part {cpu['CPU part']}")
+    if parts:
+        return "ARM CPU (" + ", ".join(parts) + ")"
+
+    return 'unknown'
 
 def _get_raw_data():
     return get_cpus()
@@ -47,7 +71,7 @@ def _format_cpus(cpu_data):
 def _get_summary_data():
     count = get_core_count()
     cpu_data = get_cpus()
-    models = [c.get('model name', 'unknown') for c in cpu_data]
+    models = [_cpu_model(c) for c in cpu_data]
     env = {'count': count, "models": models}
 
     return env
