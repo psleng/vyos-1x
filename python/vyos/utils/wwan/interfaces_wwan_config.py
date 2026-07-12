@@ -104,6 +104,9 @@ class InterfaceConfig(ServiceInterface):
         "network_scan_timeout": 60,
         "network_mode": "auto",
 
+        # Network time (NITZ) — opt-in system-clock set at registration
+        "network_time_enabled": False,
+
         # Monitoring intervals
         "normal_monitoring_interval": 30,
 
@@ -1459,6 +1462,12 @@ class InterfaceConfig(ServiceInterface):
                                  'validation_field': 'log_sink'})
             raise ValueError("log_sink must be 'both', 'journal', or 'syslog'")
 
+        if 'network_time_enabled' in config and not isinstance(config['network_time_enabled'], bool):
+            logger.warning("Invalid network_time_enabled",
+                          extra={'interface_number': self.interface_number,
+                                 'validation_field': 'network_time_enabled'})
+            raise ValueError("network_time_enabled must be true or false")
+
     def _normalize_connectivity_monitoring(self, config_data):
         """Normalize connectivity monitoring configuration"""
         connectivity = config_data.get('connectivity_monitoring', {})
@@ -2140,3 +2149,66 @@ class InterfaceConfig(ServiceInterface):
             logger.error(f"SMS delete-all failed: {e}",
                         extra={'interface_number': self.interface_number})
             raise DBusError("com.igos.IgosModemManager.SmsError", str(e))
+
+    @method()
+    async def change_sim_pin(self, new_pin: 's') -> 'a{sv}':  # type: ignore[name-defined]  # noqa: F821, F722
+        """Create or change the SIM PIN on the active, registered SIM.
+
+        Auto-detects create vs change from the SIM's current lock state.
+        Returns a dict with 'action' ('created'|'changed'|'unchanged') and
+        'slot' (the active slot number the change was applied to).
+        """
+        try:
+            logger.info("SIM PIN change requested",
+                       extra={'interface_number': self.interface_number})
+            result = await self.fsm.change_sim_pin(str(new_pin))
+            return {k: Variant('s', str(v)) for k, v in result.items()}
+        except Exception as e:
+            logger.error(f"SIM PIN change failed: {e}",
+                        extra={'interface_number': self.interface_number})
+            raise DBusError("com.igos.IgosModemManager.SimPinError", str(e))
+
+    @method()
+    async def remove_sim_pin(self) -> 'a{sv}':  # type: ignore[name-defined]  # noqa: F821, F722
+        """Disable the SIM PIN lock on the active, registered SIM.
+
+        Returns a dict with 'action' ('removed'|'already-disabled') and 'slot'.
+        """
+        try:
+            logger.info("SIM PIN removal requested",
+                       extra={'interface_number': self.interface_number})
+            result = await self.fsm.remove_sim_pin()
+            return {k: Variant('s', str(v)) for k, v in result.items()}
+        except Exception as e:
+            logger.error(f"SIM PIN removal failed: {e}",
+                        extra={'interface_number': self.interface_number})
+            raise DBusError("com.igos.IgosModemManager.SimPinError", str(e))
+
+    @method()
+    async def clear_data_usage(self, slot: 'i') -> 'a{sv}':  # type: ignore[name-defined]  # noqa: F821, F722
+        """Zero the persisted data-usage counters for a SIM slot.
+
+        Returns a dict with 'status', 'slot', 'was_active' and the previous
+        cumulative / session / total byte counts.
+        """
+        try:
+            logger.info("Data usage clear requested",
+                       extra={'interface_number': self.interface_number,
+                              'sim_slot': int(slot)})
+            result = await self.fsm.clear_data_usage(int(slot))
+            out = {}
+            for k, v in result.items():
+                # bool must be tested before int (bool is an int subclass).
+                if isinstance(v, bool):
+                    out[k] = Variant('b', v)
+                elif isinstance(v, int):
+                    out[k] = Variant('x', v)
+                else:
+                    out[k] = Variant('s', str(v))
+            return out
+        except ValueError as e:
+            raise DBusError("com.igos.IgosModemManager.InvalidSimSlot", str(e))
+        except Exception as e:
+            logger.error(f"Data usage clear failed: {e}",
+                        extra={'interface_number': self.interface_number})
+            raise DBusError("com.igos.IgosModemManager.DataUsageError", str(e))

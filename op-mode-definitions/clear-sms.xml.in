@@ -9,7 +9,7 @@
         <children>
           <node name="wwan">
             <properties>
-              <help>Clear Wireless Modem (WWAN) SMS data</help>
+              <help>Clear Wireless Modem (WWAN) data</help>
             </properties>
             <children>
               <virtualTagNode>
@@ -40,6 +40,29 @@
                               </completionHelp>
                             </properties>
                             <command>${vyos_op_scripts_dir}/wwan_sms.py delete_sms --interface="$4" --message-id="$7"</command>
+                          </virtualTagNode>
+                        </children>
+                      </node>
+                    </children>
+                  </node>
+                  <node name="data-usage">
+                    <properties>
+                      <help>Clear per-SIM data-usage counters</help>
+                    </properties>
+                    <children>
+                      <node name="slot">
+                        <properties>
+                          <help>Reset data-usage counters for a specific SIM slot</help>
+                        </properties>
+                        <children>
+                          <virtualTagNode>
+                            <properties>
+                              <help>SIM slot number</help>
+                              <completionHelp>
+                                <list>&lt;1-4&gt;</list>
+                              </completionHelp>
+                            </properties>
+                            <command>${vyos_op_scripts_dir}/show_wwan.py clear_data_usage --interface="$4" --slot="$7"</command>
                           </virtualTagNode>
                         </children>
                       </node>

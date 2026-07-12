@@ -190,6 +190,13 @@
             </properties>
             <defaultValue>auto</defaultValue>
           </leafNode>
+          <!-- ── Network time (NITZ) ─────────────────────────────── -->
+          <leafNode name="network-time">
+            <properties>
+              <help>Set the system clock from cellular network time (NITZ) at registration</help>
+              <valueless/>
+            </properties>
+          </leafNode>
           <!-- ── SIM management ──────────────────────────────────── -->
           <node name="sim">
             <properties>

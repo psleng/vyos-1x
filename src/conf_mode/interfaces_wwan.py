@@ -659,6 +659,10 @@ def build_fsm_config(wwan):
         ),
         'network_mode': _leaf(wwan, 'network_mode', 'auto'),
 
+        # Network time (NITZ) — opt-in: set the system clock from cellular
+        # network time at registration (guarded so it never overrides NTP).
+        'network_time_enabled': _leaf_exists(wwan, 'network_time'),
+
         # Monitoring intervals
         'normal_monitoring_interval': _leaf_int(
             to, 'normal_monitoring_interval', 30
@@ -949,7 +953,16 @@ def apply(wwan):
     # VRF, mirror/redirect, ip/ipv6 options, MTU, description, etc.
     if interface_exists(ifname):
         w = WWANIf(ifname)
-        w.update(wwan)
+        # Link bring-up is owned by the WWAN state machine when interface
+        # management + ensure-link-up-on-connect are active: it raises wwanN
+        # only AFTER ModemManager has set the qmi_wwan data-format (raw_ip),
+        # a change the kernel rejects while the netdev is running.  Defer the
+        # generic admin-UP so this commit does not race MM's raw_ip write on
+        # (re)connect ("qmi_wwan ... Cannot change a running device").  When
+        # the FSM will not raise the link, keep the historical bring-up here.
+        im = config['interface_management']
+        defer_admin_up = bool(im['enabled'] and im['ensure_link_up_on_connect'])
+        w.update(wwan, defer_admin_up=defer_admin_up)
 
     return None
 

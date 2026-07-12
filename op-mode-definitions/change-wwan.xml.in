@@ -1,0 +1,54 @@
+<?xml version="1.0"?>
+<interfaceDefinition>
+  <node name="change">
+    <properties>
+      <help>Change device parameters</help>
+    </properties>
+    <children>
+      <node name="wwan">
+        <properties>
+          <help>Change Wireless Modem (WWAN) parameters</help>
+        </properties>
+        <children>
+          <virtualTagNode>
+            <properties>
+              <help>WWAN interface name</help>
+              <completionHelp>
+                <path>interfaces wwan</path>
+                <script>cd /sys/class/net; ls -d wwan* 2>/dev/null</script>
+              </completionHelp>
+            </properties>
+            <children>
+              <node name="sim">
+                <properties>
+                  <help>SIM card operations on the active, registered SIM</help>
+                </properties>
+                <children>
+                  <node name="pin">
+                    <properties>
+                      <help>SIM PIN operations (active, registered SIM only)</help>
+                    </properties>
+                    <children>
+                      <tagNode name="new">
+                        <properties>
+                          <help>Set or change the SIM PIN (4 to 8 digits)</help>
+                        </properties>
+                        <command>${vyos_op_scripts_dir}/wwan_pin.py change_pin --interface="$3" --pin="$7"</command>
+                      </tagNode>
+                      <node name="remove">
+                        <properties>
+                          <help>Disable the SIM PIN lock</help>
+                        </properties>
+                        <command>${vyos_op_scripts_dir}/wwan_pin.py remove_pin --interface="$3"</command>
+                      </node>
+                    </children>
+                  </node>
+                </children>
+              </node>
+            </children>
+          </virtualTagNode>
+        </children>
+      </node>
+    </children>
+  </node>
+</interfaceDefinition>
