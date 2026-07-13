@@ -84,6 +84,25 @@
                   <help>Authentication settings</help>
                 </properties>
                 <children>
+                  <leafNode name="saml">
+                    <properties>
+                      <help>SAML v2 identifier (email)</help>
+                      <valueHelp>
+                        <format>txt</format>
+                        <description>Email address used as SAML NameID</description>
+                      </valueHelp>
+                      <constraint>
+                        <regex>[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}</regex>
+                      </constraint>
+                      <constraintErrorMessage>Invalid email identifier</constraintErrorMessage>
+                    </properties>
+                  </leafNode>
+                  <leafNode name="saml-jit">
+                    <properties>
+                      <help>Marks this user as SAML JIT provisioned (re-evaluated on each login)</help>
+                      <valueless/>
+                    </properties>
+                  </leafNode>
                   <leafNode name="encrypted-password">
                     <properties>
                       <help>Encrypted password</help>
@@ -268,7 +287,6 @@
               </leafNode>
             </children>
           </tagNode>
-          #include <include/saml.xml.i>
           #include <include/radius-server-ipv4-ipv6.xml.i>
           <node name="radius">
             <children>
@@ -282,6 +300,216 @@
                 </children>
               </tagNode>
               #include <include/interface/vrf.xml.i>
+            </children>
+          </node>
+          <node name="saml">
+            <properties>
+              <help>SAML based user authentication</help>
+            </properties>
+            <children>
+              <leafNode name="provider">
+                <properties>
+                  <help>SAML provider name configuration</help>
+                  <valueHelp>
+                    <format>name</format>
+                    <description>SAML provider name</description>
+                  </valueHelp>
+                </properties>
+              </leafNode>
+              <leafNode name="metadata-url">
+                <properties>
+                  <help>SAML provider metadata configuration</help>
+                  <valueHelp>
+                    <format>url</format>
+                    <description>SAML provider metadata URL (HTTP/HTTPS)</description>
+                  </valueHelp>
+                  <constraint>
+                    <regex>https?:\/\/(www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_\+.~#?&amp;//=]*)</regex>
+                  </constraint>
+                  <constraintErrorMessage>Invalid SAML metadata URL. Must be a valid HTTP or HTTPS URL.</constraintErrorMessage>
+                </properties>
+              </leafNode>
+              <leafNode name="entity-id">
+                <properties>
+                  <help>SAML application entity id configuration</help>
+                  <valueHelp>
+                    <format>url</format>
+                    <description>SAML entity id URI, must match what is configured in SAML provider</description>
+                  </valueHelp>
+                  <constraint>
+                    <regex>https?:\/\/(www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_\+.~#?&amp;//=]*)</regex>
+                  </constraint>
+                  <constraintErrorMessage>Invalid SAML entity ID. Must be a valid HTTP or HTTPS URI matching the SAML provider configuration.</constraintErrorMessage>
+                </properties>
+              </leafNode>
+              #include <include/pki/certificate.xml.i>
+              <leafNode name="acs-hostname">
+                <properties>
+                  <help>Hostname or IP used to construct the SAML ACS URL</help>
+                  <valueHelp>
+                    <format>ipv4</format>
+                    <description>IPv4 address (e.g. 192.0.2.1)</description>
+                  </valueHelp>
+                  <valueHelp>
+                    <format>ipv6</format>
+                    <description>IPv6 address</description>
+                  </valueHelp>
+                  <valueHelp>
+                    <format>hostname</format>
+                    <description>Hostname or FQDN (e.g. router.local)</description>
+                  </valueHelp>
+                  <constraint>
+                    <validator name="ip-address"/>
+                    <validator name="fqdn"/>
+                  </constraint>
+                  <constraintErrorMessage>Must be a valid IPv4/IPv6 address or hostname (no scheme or path)</constraintErrorMessage>
+                </properties>
+              </leafNode>
+              <node name="encrypt">
+                <properties>
+                  <help>Require encrypted SAML material from the IdP</help>
+                </properties>
+                <children>
+                  <leafNode name="assertions">
+                    <properties>
+                      <help>Encrypt SAML assertions against pki key</help>
+                      <valueless/>
+                    </properties>
+                  </leafNode>
+                  <leafNode name="name-id">
+                    <properties>
+                      <help>Encrypt SAML assertions against pki key</help>
+                      <valueless/>
+                    </properties>
+                  </leafNode>
+                </children>
+              </node>
+              <node name="sign">
+                <properties>
+                  <help>SAML message signing options</help>
+                </properties>
+                <children>
+                  <leafNode name="messages">
+                    <properties>
+                      <help>Require SAML messages to be signed</help>
+                      <valueless/>
+                    </properties>
+                  </leafNode>
+                </children>
+              </node>
+              <leafNode name="serial-address">
+                <properties>
+                  <help>Address used to construct the SAML login URL for serial console logins</help>
+                  <valueHelp>
+                    <format>ipv4</format>
+                    <description>IPv4 address (e.g. 192.0.2.1)</description>
+                  </valueHelp>
+                  <valueHelp>
+                    <format>ipv6</format>
+                    <description>IPv6 address</description>
+                  </valueHelp>
+                  <valueHelp>
+                    <format>hostname</format>
+                    <description>Hostname or FQDN (e.g. router.local)</description>
+                  </valueHelp>
+                  <constraint>
+                    <validator name="ip-address"/>
+                    <validator name="fqdn"/>
+                  </constraint>
+                  <constraintErrorMessage>Must be a valid IPv4/IPv6 address or hostname (no scheme or path)</constraintErrorMessage>
+                </properties>
+              </leafNode>
+              <node name="jit">
+                <properties>
+                  <help>SAML JIT (Just-In-Time) provisioning configuration</help>
+                </properties>
+                <children>
+                  <node name="admin">
+                    <properties>
+                      <help>Attributes that grant admin role</help>
+                    </properties>
+                    <children>
+                      <tagNode name="attribute">
+                        <properties>
+                          <help>SAML assertion attribute name from IdP</help>
+                          <valueHelp>
+                            <format>txt</format>
+                            <description>SAML attribute name (e.g. group, role, department)</description>
+                          </valueHelp>
+                        </properties>
+                        <children>
+                          <leafNode name="value">
+                            <properties>
+                              <help>Acceptable attribute values that grant this role</help>
+                              <multi/>
+                              <valueHelp>
+                                <format>txt</format>
+                                <description>Attribute value that maps to this role</description>
+                              </valueHelp>
+                            </properties>
+                          </leafNode>
+                        </children>
+                      </tagNode>
+                    </children>
+                  </node>
+                  <node name="operator">
+                    <properties>
+                      <help>Attributes that grant operator role</help>
+                    </properties>
+                    <children>
+                      <tagNode name="attribute">
+                        <properties>
+                          <help>SAML assertion attribute name from IdP</help>
+                          <valueHelp>
+                            <format>txt</format>
+                            <description>SAML attribute name (e.g. group, role, department)</description>
+                          </valueHelp>
+                        </properties>
+                        <children>
+                          <leafNode name="value">
+                            <properties>
+                              <help>Acceptable attribute values that grant this role</help>
+                              <multi/>
+                              <valueHelp>
+                                <format>txt</format>
+                                <description>Attribute value that maps to this role</description>
+                              </valueHelp>
+                            </properties>
+                          </leafNode>
+                        </children>
+                      </tagNode>
+                    </children>
+                  </node>
+                  <node name="super-operator">
+                    <properties>
+                      <help>Attributes that grant operator role</help>
+                    </properties>
+                    <children>
+                      <tagNode name="attribute">
+                        <properties>
+                          <help>SAML assertion attribute name from IdP</help>
+                          <valueHelp>
+                            <format>txt</format>
+                            <description>SAML attribute name (e.g. group, role, department)</description>
+                          </valueHelp>
+                        </properties>
+                        <children>
+                          <leafNode name="value">
+                            <properties>
+                              <help>Acceptable attribute values that grant this role</help>
+                              <multi/>
+                              <valueHelp>
+                                <format>txt</format>
+                                <description>Attribute value that maps to this role</description>
+                              </valueHelp>
+                            </properties>
+                          </leafNode>
+                        </children>
+                      </tagNode>
+                    </children>
+                  </node>
+                </children>
+              </node>
             </children>
           </node>
           <node name="tacacs">

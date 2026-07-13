@@ -419,7 +419,6 @@ Depends:
   telnet,
   stunnel4,
   uidmap,
-  saml-sso,
   igos-cloud-proxy,
 ## End optional utilities
 ## Serial telnet server
