@@ -1,4 +1,4 @@
-<!-- include start from serial/service/serial-tunnel.xml.i -->
+<!-- include start from serial/service/serial-tunnel-not-profileable.xml.i -->
 <node name="serial-tunnel">
   <properties>
     <help>Serial tunnel service settings</help>

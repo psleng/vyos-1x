@@ -1,4 +1,4 @@
-<!-- include start from serial/service/modbus.xml.i -->
+<!-- include start from serial/service/modbus-profileable.xml.i -->
 <node name="modbus-gateway">
   <properties>
     <help>Modbus gateway service settings</help>
