@@ -12,6 +12,7 @@
 "dhcp.py",
 "dns.py",
 "evpn.py",
+"hardware_model.py",
 "interfaces.py",
 "ipsec.py",
 "load-balancing_wan.py",

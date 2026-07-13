@@ -28,16 +28,19 @@ the bus during the transition (RS-485 contention, RS-232 receiver glitch).
 4. drives SHUT_N to the target state (1 for active protocols, 0 for
    ``isolate``).
 
-The pin map (:mod:`vyos.hardware.pinmap`) is NOT shipped by vyos-1x. It is
-overlaid onto the image at build time by vyos-build, per hardware flavor.
-This file therefore contains no board-specific data — only the semantic
-helpers (modem reset, SIM select, serial protocol) that are common to every
-SKU. If a particular SKU needs different sequencing, override here behind a
-``VARIANT`` check or move the helper into ``pinmap.py``.
+The pin map (:mod:`vyos.hardware.pinmap`) ships a small ``VARIANT='test'``
+stub in vyos-1x; on real hardware images vyos-build overlays a per-flavor pin
+map on top of it at build time. This file therefore contains no
+board-specific data — only the semantic helpers (modem reset, SIM select,
+serial protocol) that are common to every SKU. If a particular SKU needs
+different sequencing, override here behind a ``VARIANT`` check or move the
+helper into ``pinmap.py``.
 
-If ``vyos.hardware.pinmap`` is missing (e.g. on a generic cloud image that
-never installs a hardware overlay), importing this module still succeeds —
-``BOARD`` falls back to a stub that raises a clear error on first use.
+If ``vyos.hardware.pinmap`` is missing, or defines no pins, importing this
+module still succeeds — ``BOARD`` falls back to a stub that raises a clear
+error on first use. The bundled test stub does define pins, so on a generic
+image ``BOARD`` is an ordinary board built from that stub; it stays inert
+because nothing on a non-hardware path performs a pin operation.
 """
 
 from typing import Dict, List, Optional
@@ -923,6 +926,201 @@ class _NoPinmapBoard(Board):
     def modem_capabilities(self, modem=None) -> frozenset:
         return frozenset()
 
+# ---------------------------------------------------------------------------
+# Board population manifest (fork-only)
+# ---------------------------------------------------------------------------
+# A family master pinmap declares every peripheral the SoC could wire; a
+# given board variant populates only a subset (e.g. 1/2/4 serial ports).
+# vyos-build ships a tiny per-board manifest of populated-peripheral counts
+# next to the image; this engine trims the discovered peripheral set to
+# match, so a reduced board never advertises hardware (a serial tty, a
+# modem) that the pruned device tree does not create ("no phantoms").
+#
+# The manifest is board *data* (owned by vyos-build); this file is the
+# board-agnostic *engine* that consumes it. Absent manifest (generic/cloud
+# image, build host, CI) or unidentified unit -> no trimming, identical to the
+# unfiltered master.
+#
+# Source: the manifest is the model definition (``model.conf``) that
+# :mod:`vyos.system.model` resolves for this unit's identity. model.conf is a
+# superset of the population keys this engine consumes, so board.py reads the
+# hardware keys it knows and ignores the rest. There is no separate file or
+# staging step: board.py self-resolves on import.
+
+
+def _load_board_manifest(path: str) -> Dict[str, str]:
+    """Parse a per-board manifest (``key=value`` lines).
+
+    Returns ``{}`` when the file is absent or unreadable so a missing
+    manifest leaves the full master pinmap in place.
+    """
+    result: Dict[str, str] = {}
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                result[key.strip()] = value.strip()
+    except OSError:
+        return {}
+    return result
+
+
+def _resolve_board_manifest() -> Dict[str, str]:
+    """Return the population manifest for this unit, or ``{}`` for none.
+
+    Self-resolve: ask :mod:`vyos.system.model` to find the model definition
+    matching this unit's identity (``prod_id``/``model`` from the kernel
+    cmdline, with a ``product.env`` fallback) and read its ``model.conf`` —
+    which is a superset of the board manifest, so board.py simply ignores the
+    keys it does not consume.
+
+    No early-boot staging service is required: whenever board.py is imported
+    (WWAN manager start, a config commit, an op-mode query), it derives its
+    own manifest.  Any failure (no models tree on the image, unresolved
+    identity, generic/cloud build) falls back to ``{}`` so the full,
+    unfiltered master pinmap is used.  Identity matching is exact; an
+    unidentified board is left on the full master (the config-only fallback
+    model must never drive pin filtering), so ``find_model`` is called without
+    ``allow_fallback``.
+    """
+    try:
+        from vyos.system import model as _model  # lazy: avoid import cost/cycle
+        found = _model.find_model()
+        if found is not None:
+            return _load_board_manifest(found.model_conf)
+    except Exception:  # noqa: BLE001 -- any failure -> unfiltered master
+        pass
+    return {}
+
+
+def _serial_fill_key(meta_entry: Dict[str, str]) -> tuple:
+    """Sort key ordering serial ports by hardware fill order (ttyS1 first).
+
+    Ports declare a canonical ``tty`` such as ``/dev/ttyS2``; the trailing
+    integer is the order the hardware populates transceivers. Ports with
+    no numeric tty sort last (stably) so an odd pinmap never crashes the
+    trim — it just isn't preferred for a low ``serial`` count.
+    """
+    tty = meta_entry.get("tty") or meta_entry.get("by_path") or ""
+    match = re.search(r"(\d+)$", tty)
+    return (0, int(match.group(1))) if match else (1, 0)
+
+
+def _apply_serial_count(
+    ports: Dict[str, Dict[str, str]],
+    meta: Dict[str, Dict[str, str]],
+    types: Dict[str, str],
+    count: int,
+) -> tuple:
+    """Keep only the first ``count`` serial ports in hardware fill order.
+
+    Trims the *discovered* set (both implicitly-from-pins and explicit
+    ports), so a board that populates N transceivers advertises exactly
+    ttyS1..ttySN and nothing beyond. ``count`` is clamped to ``[0, len]``.
+    """
+    count = max(0, min(count, len(ports)))
+    ordered = sorted(ports, key=lambda p: _serial_fill_key(meta.get(p, {})))
+    keep = set(ordered[:count])
+    ports = {p: r for p, r in ports.items() if p in keep}
+    meta = {p: m for p, m in meta.items() if p in keep}
+    types = {p: t for p, t in types.items() if p in keep}
+    return ports, meta, types
+
+
+def _manifest_bool(value: Optional[str], *, default: bool) -> bool:
+    """Interpret a manifest string as a boolean; ``default`` when unset."""
+    if value is None:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _drop_pins_by_group(pins: Dict[str, Pin], predicate) -> Dict[str, Pin]:
+    """Return a copy of ``pins`` without entries whose ``group`` matches.
+
+    Used to remove an entire peripheral (e.g. the ``cell`` or ``wifi0``
+    group) on a board that does not populate it, so ``apply_defaults`` and
+    the LED/semantic helpers never drive or look up pins for hardware that
+    is not on this variant. Copies the dict so the imported pinmap module
+    is left untouched.
+    """
+    return {
+        n: p for n, p in pins.items()
+        if not predicate((getattr(p, "group", "") or ""))
+    }
+
+
+def _strip_modem_sim(
+    modems: Dict[str, Dict[str, object]],
+) -> Dict[str, Dict[str, object]]:
+    """Drop ``sim_select``/``sim_detect`` roles from every modem.
+
+    The WWAN FSM chooses its SIM-switch strategy purely from the modem's
+    capabilities (see ``make_sim_controller``): a modem that exposes
+    ``sim_select`` is driven as a board GPIO mux; without it, SIM handling
+    is delegated to ModemManager. Boards whose modem manages its own SIMs
+    (e.g. auto-SIM firmware) declare ``sim_mux = modem`` so this strips the
+    board-mux roles and the FSM picks the ModemManager-managed controller.
+    """
+    stripped: Dict[str, Dict[str, object]] = {}
+    for name, roles in modems.items():
+        new_roles = dict(roles)
+        new_roles.pop("sim_select", None)
+        new_roles["sim_detect"] = []
+        stripped[name] = new_roles
+    return stripped
+
+
+def _apply_board_manifest(board: "IgosBoard", manifest: Dict[str, str]) -> None:
+    """Trim the family master pinmap to what this board variant populates.
+
+    Mutates ``board`` in place. Each key is independent and optional; an
+    absent or unparseable value leaves that facet at the full-master
+    default, so a board with no manifest behaves exactly as before.
+
+    Facets handled by this (runtime) engine:
+      * ``serial = N``   — expose only the first N serial ports (ttyS1..N).
+      * ``cell = none``  — no cellular: drop the modem and its pins.
+      * ``sim_mux = modem`` — modem present but SIM handled by the modem /
+        ModemManager, not the board GPIO mux (strip sim_select/sim_detect).
+      * ``wifi = false`` — no radio: drop the wifi pin group.
+
+    NOTE: ethernet naming/count/PoE and wwan interface naming are driven
+    from ``ETH_INTERFACES``/``WWAN_INTERFACES`` by the build-time
+    interfaces.conf generator, not by this runtime engine, so they are
+    intentionally not handled here.
+    """
+    if "serial" in manifest:
+        try:
+            serial_count: Optional[int] = int(manifest["serial"])
+        except ValueError:
+            serial_count = None
+        if serial_count is not None:
+            (board._serial_ports,
+             board._serial_meta,
+             board._serial_types) = _apply_serial_count(
+                board._serial_ports,
+                board._serial_meta,
+                board._serial_types,
+                serial_count,
+            )
+
+    cell = manifest.get("cell", "").strip().lower()
+    if cell == "none":
+        # No cellular on this variant — no modem, no cell pins.
+        board._modems = {}
+        board.PINS = _drop_pins_by_group(board.PINS, lambda g: g == "cell")
+    elif manifest.get("sim_mux", "").strip().lower() == "modem":
+        # Modem present, but it (or ModemManager) owns SIM switching.
+        board._modems = _strip_modem_sim(board._modems)
+
+    if not _manifest_bool(manifest.get("wifi"), default=True):
+        board.PINS = _drop_pins_by_group(
+            board.PINS, lambda g: g.startswith("wifi")
+        )
+
 
 def _build_board() -> Board:
     try:
@@ -949,9 +1147,18 @@ def _build_board() -> Board:
     (board._serial_ports,
      board._serial_meta,
      board._serial_types) = _discover_serial_ports(pins, explicit_ports)
-    # Same idea for modems.
+
+    # Discover modems (implicit from *_UNCOND_RESET pins, plus any explicit
+    # pinmap.MODEMS declarations).
     explicit_modems = getattr(pinmap, "MODEMS", None)
     board._modems = _discover_modems(pins, explicit_modems)
+
+    # Fork-only: trim the family master pinmap to what this board variant
+    # actually populates, per the optional vyos-build board manifest. A
+    # missing manifest / field leaves the full discovered master in place,
+    # so a generic image (or build host / CI) is unaffected.
+    _apply_board_manifest(board, _resolve_board_manifest())
+
     return board
 
 

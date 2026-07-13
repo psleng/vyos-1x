@@ -2,7 +2,9 @@
 
 # This would step the system clock if the adjustment is larger than 0.1 seconds,
 # but only in the first three clock updates.
-makestep 1.0 3
+# makestep 1.0 3
+# Perle: allow chronyd to step the clock at any time, but only if the adjustment is larger than 1 second.
+makestep 1.0 -1
 
 # The rtcsync directive enables a mode where the system time is periodically
 # copied to the RTC and chronyd does not try to track its drift. This directive

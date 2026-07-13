@@ -54,8 +54,10 @@ generate
 clear
   └── interfaces
         └── wwan <wwanN>
-              └── sms                                      # clear all SMS messages
-                    └── message <id>                       # clear specific SMS message
+              ├── sms                                      # clear all SMS messages
+              │     └── message <id>                       # clear specific SMS message
+              └── data-usage                               # clear per-SIM data-usage counters
+                    └── slot <N>                           # reset counters for SIM slot N
 ```
 
 ---
@@ -568,6 +570,55 @@ igos@igos:~$ clear interfaces wwan wwan0 sms message 3
 
 ---
 
+### `clear interfaces wwan <wwanN> data-usage slot <N>`
+
+Reset the persisted per-SIM data-usage counters for one SIM slot to zero — for
+a new monthly billing cycle or for diagnostics.  The SIM slot must always be
+given explicitly so the reset is unambiguous.
+
+The counters cleared are the cumulative byte totals tracked per SIM slot (the
+values shown under **Cumulative Data Usage** in `show interfaces wwan <wwanN>
+detail`).  Runtime diagnostic counters (bearer drops, reconnects, SIM switches,
+downtime) are **not** affected.  The previous values are written to the service
+log and emitted as a `data_usage_cleared` alert before they are cleared, so the
+reset stays auditable.
+
+```
+igos@igos:~$ clear interfaces wwan wwan0 data-usage slot 1
+Cleared data-usage counters for wwan0 SIM slot 1.
+  Previous total:          1,234,567,890 bytes (1177.4 MB)
+  Previous cumulative:     1,200,000,000 bytes
+  Previous session:           34,567,890 bytes
+```
+
+(The **Previous session** line is shown only when the cleared slot is the
+currently active SIM.)
+
+**Script:** `show_wwan.py clear_data_usage --interface="$4" --slot="$7"`
+
+**Output:**
+- Human: multi-line summary of the previous counters (as above)
+- JSON (`--raw`):
+  ```json
+  {
+    "status": "cleared",
+    "slot": 1,
+    "was_active": true,
+    "previous_cumulative_bytes": 1200000000,
+    "previous_session_bytes": 34567890,
+    "previous_total_bytes": 1234567890
+  }
+  ```
+
+**Tab completion:** SIM slot accepts values 1–4.
+
+**Concurrency:** The reset runs atomically on the FSM event loop, so it is safe
+to issue at any time — including during a SIM switchover or while data-usage
+monitoring is active.  A running monitor converges the on-disk total to zero on
+its next poll rather than re-inflating it.
+
+---
+
 ## D-Bus Service Interface
 
 All operational commands flow through the WWAN FSM D-Bus service.  Op-mode
@@ -597,6 +648,7 @@ scripts use the `WWANClientSync` client library from
 | `read_sms(message_id)` | integer | Message dict | Read specific SMS (marks as read) |
 | `delete_sms(message_id)` | integer | `{"status": "ok"}` | Delete specific SMS |
 | `delete_all_sms()` | — | `{"status": "ok"}` | Delete all SMS for active SIM |
+| `clear_data_usage(slot)` | integer | Status dict | Zero per-SIM data-usage counters for a slot |
 
 ### Control D-Bus Methods
 
@@ -694,10 +746,10 @@ an HTTPS POST body, use `syslog-identifier igos-wwan-alertbus-json` and parse
 |---|---|
 | `op-mode-definitions/show-interfaces-wwan.xml.in` | XML: `show interfaces wwan` command tree |
 | `op-mode-definitions/generate-sms.xml.in` | XML: `generate interfaces wwan ... sms` command |
-| `op-mode-definitions/clear-sms.xml.in` | XML: `clear interfaces wwan … sms` commands |
+| `op-mode-definitions/clear-sms.xml.in` | XML: `clear interfaces wwan … sms` and `data-usage` commands |
 | `op-mode-definitions/connect.xml.in` | XML: `connect interface` (shared with PPPoE/SSTPC) |
 | `op-mode-definitions/disconnect.xml.in` | XML: `disconnect interface` (shared with PPPoE/SSTPC) |
-| `src/op_mode/show_wwan.py` | Python: status, hardware, sim, signal, detail handlers |
+| `src/op_mode/show_wwan.py` | Python: status, hardware, sim, signal, detail, clear data-usage handlers |
 | `src/op_mode/wwan_sms.py` | Python: send, list, read, delete SMS handlers |
 | `src/op_mode/connect_disconnect.py` | Python: connect/disconnect handler (shared) |
 | `python/vyos/utils/wwan/wwan_client.py` | Python: `WWANClientSync` D-Bus client library |
@@ -730,3 +782,4 @@ an HTTPS POST body, use `syslog-identifier igos-wwan-alertbus-json` and parse
 | `generate interfaces wwan wwan0 sms number '+15551234567' message 'hello'` | Send an SMS |
 | `clear interfaces wwan wwan0 sms` | Clear all SMS messages |
 | `clear interfaces wwan wwan0 sms message 3` | Clear SMS message #3 |
+| `clear interfaces wwan wwan0 data-usage slot 1` | Reset SIM slot 1 data-usage counters |

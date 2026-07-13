@@ -33,6 +33,7 @@ interfaces
         ├── vrf <name>                                    # VRF instance name
         ├── connection-mode <always-on|connect-on-demand|dial-on-demand>
         ├── network-mode <auto|lte|5g|5g-only|3g|2g>      # modem-level RAT selection
+        ├── network-time                                  # valueless — set system clock from NITZ at registration
         │
         ├── ip                                            # IPv4 routing parameters (kernel-level)
         │     ├── adjust-mss <bytes|clamp-mss-to-pmtu>
@@ -206,6 +207,7 @@ bearer is established:
 - `data-usage` / per-SIM `data-limit` thresholds, actions, billing-date, warnings
 - `connectivity-monitoring`, `reconnection`, `failed-retry`, `hardware-reset`,
   `sim-failover` / `sim-failback` policy, `apn-discovery`, `logging`
+- `network-time` (read at the next registration; does not bounce the bearer)
 - `ip-passthrough` and `ipv6-bridging` (reconciled in place)
 - **edits to the SIM slot you are *not* currently running on** — e.g.
   provisioning the backup SIM, fixing its APN, setting its PIN. These touch the
@@ -333,6 +335,28 @@ set interfaces wwan wwan0 vrf 'CELLULAR'
 
 # Network mode — modem RAT selection
 set interfaces wwan wwan0 network-mode 'auto'
+
+# Network time (NITZ) — opt-in.  Presence makes the FSM set the system clock
+# from the cellular network's time once the modem registers (no data bearer
+# required).  Guarded: it is applied only when the clock is NOT already
+# NTP-synchronized, so it never overrides chrony — it is a cold-boot bootstrap
+# for units with no RTC battery or no upstream NTP reachability.  The value is
+# persisted to the hardware clock (RTC) when one is present.
+#
+# Acquisition is resilient to late NITZ: it is armed on ANY registration (not
+# just first boot), tries once immediately, then keeps polling — fast for the
+# first 15 min, then slowly and indefinitely — AND subscribes to the modem's
+# NetworkTimeChanged push.  It stops only once the clock is set, NTP takes over,
+# or the feature is disabled.  The clock is set at most once per service run.
+#
+# WHY THIS MATTERS — expired-data-plan recovery: if the data plan is exhausted,
+# no data bearer can come up, so a configured NTP client can never reach a
+# server.  If the RTC is also wrong (dead battery / drift) the box would other-
+# wise NEVER recover a correct clock.  But the SIM still REGISTERS on the
+# network without a data plan, and NITZ rides that registration signaling — so
+# with this option the modem's network time is the one remaining way to fix the
+# clock.  It keeps trying until the carrier provides the time.
+# set interfaces wwan wwan0 network-time
 
 # MTU — fallback if carrier does not provide one; also ceiling (per-SIM mtu overrides when that SIM is active)
 set interfaces wwan wwan0 mtu 1420

@@ -1084,6 +1084,64 @@ class WWANClient:
         except DBusError as exc:
             raise WWANError(f"DeleteAllSms failed: {exc}") from exc
 
+    # ── Data usage methods ───────────────────────────────────────
+
+    async def clear_data_usage(
+        self, interface_number: int, slot: int
+    ) -> Dict[str, Any]:
+        """Zero the persisted data-usage counters for a SIM slot.
+
+        Parameters
+        ----------
+        interface_number : int
+            Interface index.
+        slot : int
+            SIM slot number whose counters to clear.
+
+        Returns
+        -------
+        dict
+            ``{'status': 'cleared', 'slot': N, 'was_active': bool,
+            'previous_cumulative_bytes': int, 'previous_session_bytes': int,
+            'previous_total_bytes': int}``
+        """
+        iface = await self._get_iface(interface_number)
+        try:
+            raw = await iface.call_clear_data_usage(int(slot))
+            return _variant_to_python(raw)
+        except DBusError as exc:
+            raise WWANError(f"ClearDataUsage failed: {exc}") from exc
+
+    # ── SIM PIN methods ──────────────────────────────────────────────────
+
+    async def change_sim_pin(
+        self, interface_number: int, new_pin: str
+    ) -> Dict[str, Any]:
+        """Create or change the SIM PIN on the active, registered SIM.
+
+        The service auto-detects create vs change from the SIM's current lock
+        state.  Returns ``{'action': 'created'|'changed'|'unchanged',
+        'slot': N}``.
+        """
+        iface = await self._get_iface(interface_number)
+        try:
+            raw = await iface.call_change_sim_pin(new_pin)
+            return _variant_to_python(raw)
+        except DBusError as exc:
+            raise WWANError(f"ChangeSimPin failed: {exc}") from exc
+
+    async def remove_sim_pin(self, interface_number: int) -> Dict[str, Any]:
+        """Disable the SIM PIN lock on the active, registered SIM.
+
+        Returns ``{'action': 'removed'|'already-disabled', 'slot': N}``.
+        """
+        iface = await self._get_iface(interface_number)
+        try:
+            raw = await iface.call_remove_sim_pin()
+            return _variant_to_python(raw)
+        except DBusError as exc:
+            raise WWANError(f"RemoveSimPin failed: {exc}") from exc
+
     # ── convenience helpers ──────────────────────────────────────────────
 
     async def wait_for_bearer(
@@ -1416,6 +1474,10 @@ class WWANClientSync:
         """Full status dict.  See :meth:`WWANClient.get_status`."""
         return self._run(self._call("get_status", interface_number))
 
+    def clear_data_usage(self, interface_number: int, slot: int) -> Dict[str, Any]:
+        """Clear per-SIM data usage.  See :meth:`WWANClient.clear_data_usage`."""
+        return self._run(self._call("clear_data_usage", interface_number, slot=slot))
+
     def get_recent_alerts(self, limit: int = 50, interface_number: int = -1) -> list:
         """Fetch recent alerts.  See :meth:`WWANClient.get_recent_alerts`."""
         return self._run(self._method(
@@ -1573,6 +1635,16 @@ class WWANClientSync:
     def delete_all_sms(self, interface_number: int) -> Dict[str, Any]:
         """Delete all SMS.  See :meth:`WWANClient.delete_all_sms`."""
         return self._run(self._call("delete_all_sms", interface_number))
+
+    # ── SIM PIN ────────────────────────────────────────────────────────────
+
+    def change_sim_pin(self, interface_number: int, new_pin: str) -> Dict[str, Any]:
+        """Create/change SIM PIN.  See :meth:`WWANClient.change_sim_pin`."""
+        return self._run(self._method("change_sim_pin", interface_number, new_pin))
+
+    def remove_sim_pin(self, interface_number: int) -> Dict[str, Any]:
+        """Remove SIM PIN lock.  See :meth:`WWANClient.remove_sim_pin`."""
+        return self._run(self._call("remove_sim_pin", interface_number))
 
     def wait_for_bearer(
         self,
