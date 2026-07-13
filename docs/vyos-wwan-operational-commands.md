@@ -44,6 +44,10 @@ connect
 disconnect
   └── interface <wwanN>                                    # tear down WWAN bearer
 
+execute
+  └── wwan
+        └── stop-manager                                  # stop the WWAN manager service
+
 generate
   └── interfaces
         └── wwan <wwanN>
@@ -509,6 +513,25 @@ igos@igos:~$ disconnect interface wwan0
 
 ---
 
+## Execute Commands
+
+### `execute wwan stop-manager`
+
+Stop the WWAN manager service.
+
+```
+igos@igos:~$ execute wwan stop-manager
+```
+
+**Script:** `execute_wwan.py execute_stop_manager`
+
+**Behavior:**
+- Stops the `igos-wwan-manager.service` systemd unit
+- Intended for controlled shutdown or troubleshooting of the WWAN manager
+- Does not change the syntax or behavior of the other WWAN operational commands
+
+---
+
 ## SMS Commands
 
 ### `generate interfaces wwan <wwanN> sms number <phone> message <text>`
@@ -749,9 +772,11 @@ an HTTPS POST body, use `syslog-identifier igos-wwan-alertbus-json` and parse
 | `op-mode-definitions/clear-sms.xml.in` | XML: `clear interfaces wwan … sms` and `data-usage` commands |
 | `op-mode-definitions/connect.xml.in` | XML: `connect interface` (shared with PPPoE/SSTPC) |
 | `op-mode-definitions/disconnect.xml.in` | XML: `disconnect interface` (shared with PPPoE/SSTPC) |
+| `op-mode-definitions/execute-wwan.xml.in` | XML: `stop wwan manager` command |
 | `src/op_mode/show_wwan.py` | Python: status, hardware, sim, signal, detail, clear data-usage handlers |
 | `src/op_mode/wwan_sms.py` | Python: send, list, read, delete SMS handlers |
 | `src/op_mode/connect_disconnect.py` | Python: connect/disconnect handler (shared) |
+| `src/op_mode/execute_wwan.py` | Python: stop WWAN manager service handler |
 | `python/vyos/utils/wwan/wwan_client.py` | Python: `WWANClientSync` D-Bus client library |
 | `python/vyos/utils/wwan/alert_adapters.py` | Python: AlertBus subscriber adapters (REST/MQTT/SNMP skeletons) |
 | `python/vyos/utils/wwan/interfaces_wwan_config.py` | Python: D-Bus service — per-interface methods |
@@ -779,6 +804,7 @@ an HTTPS POST body, use `syslog-identifier igos-wwan-alertbus-json` and parse
 | `show interfaces wwan wwan0 event-log link` | Link-state events only |
 | `connect interface wwan0` | Bring up WWAN bearer |
 | `disconnect interface wwan0` | Tear down WWAN bearer |
+| `execute wwan stop-manager` | Stop the WWAN manager service |
 | `generate interfaces wwan wwan0 sms number '+15551234567' message 'hello'` | Send an SMS |
 | `clear interfaces wwan wwan0 sms` | Clear all SMS messages |
 | `clear interfaces wwan wwan0 sms message 3` | Clear SMS message #3 |

@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<interfaceDefinition>
+  <node name="execute">
+    <properties>
+      <help>Execute operational commands</help>
+    </properties>
+    <children>
+      <node name="wwan">
+        <properties>
+          <help>Execute WWAN operations</help>
+        </properties>
+        <children>
+          <leafNode name="stop-manager">
+            <properties>
+              <help>Stop the WWAN manager service</help>
+            </properties>
+            <command>${vyos_op_scripts_dir}/execute_wwan.py execute_stop_manager</command>
+          </leafNode>
+        </children>
+      </node>
+    </children>
+  </node>
+</interfaceDefinition>
