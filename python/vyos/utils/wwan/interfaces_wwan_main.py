@@ -15,6 +15,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import asyncio
+import os
 import signal
 import subprocess
 import sys
@@ -468,13 +469,20 @@ async def main():
         if stop_event.is_set():
             logger.info("Received shutdown signal, shutting down...")
 
-        # Cancel remaining tasks
+        # Cancel remaining tasks.  Bound each join: a cancelled task may be
+        # parked inside a non-cancellable dbus_next call to a ModemManager
+        # that is going down in the same reboot transaction, in which case
+        # CancelledError cannot be delivered until that call returns (it may
+        # never).  An unbounded `await task` there would wedge the process
+        # until systemd's TimeoutStopSec SIGKILLs us.
         for task in pending:
             task.cancel()
             try:
-                await task
-            except asyncio.CancelledError:
+                await asyncio.wait_for(task, timeout=5.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
                 pass
+            except Exception as e:  # noqa: BLE001 -- best-effort cleanup
+                logger.debug(f"Error awaiting cancelled task: {e}")
 
     except KeyboardInterrupt:
         logger.info("Received interrupt signal, shutting down...")
@@ -504,14 +512,32 @@ async def main():
                     "forcing teardown")
             except Exception as e:  # noqa: BLE001 -- best-effort cleanup
                 logger.error(f"Error during manager shutdown: {e}")
+        # Disconnect the service/FSM D-Bus connection BEFORE the GPIO reset.
+        #
+        # LOAD-BEARING ORDERING — do NOT move the GPIO reset above this.
+        # The GPIO reset physically drops each modem off USB, which makes
+        # ModemManager emit a "modem removed" signal.  If the service bus is
+        # still connected, the FSM's still-subscribed MM signal handlers
+        # re-enter on that removal ("transitioning to scanning", "Setting
+        # interface DOWN", spawning fresh tasks/subprocesses) AFTER we have
+        # already cancelled the pending tasks — orphan work that keeps the
+        # process (and a child python3) alive until systemd SIGKILLs us at
+        # TimeoutStopSec.  Tearing the bus down first means the removal has
+        # no live handler to re-enter.  The GPIO reset needs no D-Bus (pure
+        # local sysfs via the hardware API), so nothing below depends on it.
+        if bus:
+            try:
+                bus.disconnect()
+            except Exception as e:  # noqa: BLE001 -- best-effort cleanup
+                logger.debug(f"Error disconnecting service bus: {e}")
         # On a real system reboot/shutdown the modems keep power across the
         # soft reboot and retain their internal state (e.g. a
         # failed/sim-missing latch that orderly disconnect cannot clear).
-        # AFTER the orderly bearer disconnect above, force a GPIO reset on
-        # every declared modem so each re-enumerates clean at next boot.
-        # Gated on the SIGTERM path AND systemd actually stopping the system,
-        # so a plain `systemctl restart igos-wwan-manager` (service restart,
-        # system staying up) does NOT power-cycle the modems.
+        # AFTER the orderly bearer disconnect and bus teardown above, force a
+        # GPIO reset on every declared modem so each re-enumerates clean at
+        # next boot.  Gated on the SIGTERM path AND systemd actually stopping
+        # the system, so a plain `systemctl restart igos-wwan-manager`
+        # (service restart, system staying up) does NOT power-cycle the modems.
         if stop_event.is_set() and system_is_stopping():
             logger.info(
                 "System is stopping — GPIO-resetting all modems "
@@ -523,8 +549,20 @@ async def main():
                 logger.error("Shutdown GPIO modem reset timed out after 8s")
             except Exception as e:  # noqa: BLE001 -- best-effort cleanup
                 logger.error(f"Shutdown GPIO modem reset error: {e}")
-        if bus:
-            bus.disconnect()
+            logger.info("WWAN Interface Manager stopped")
+            # Hard exit on the confirmed system-stopping path.  The GPIO reset
+            # runs modem_reset via asyncio.to_thread; wait_for() above bounds
+            # the *await* but cannot cancel the underlying executor thread if
+            # its subprocess wedges.  Returning here would then hand control to
+            # asyncio.run(), whose shutdown_default_executor() joins that
+            # thread with NO timeout — the exact wedge that made systemd wait
+            # out TimeoutStopSec and SIGKILL us (leaving a lingering child).
+            # The box is being torn down anyway, so bypass interpreter teardown
+            # entirely and exit now.  flush stdio first so the final log line
+            # is not lost.
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(0)
         logger.info("WWAN Interface Manager stopped")
 
 if __name__ == "__main__":

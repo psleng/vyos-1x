@@ -290,9 +290,12 @@ class GpioMuxSimController(SimController):
     async def switch_to(self, slot: int) -> bool:
         """Drive the mux to ``slot`` and reboot the modem to enumerate it.
 
-        The reboot uses the FSM's existing escalation ladder
-        (``modem_reset``): orderly ModemManager disable+reset first, then
-        the board GPIO ``UNCOND_RESET`` pulse, then the nuclear option.
+        Sequence: select the mux slot, let the SIM rails settle, best-effort
+        deregister the outgoing SIM (bounded ``Modem.Enable(false)``), then
+        reboot the modem via the FSM's reset ladder in HARDWARE-FIRST,
+        NO-NUCLEAR mode (``prefer_hardware=True``): the board GPIO
+        ``UNCOND_RESET`` pulse is the deterministic way to make the modem
+        re-read the selected SIM.  ModemManager is never restarted here.
         This is the only place a reboot is issued on a SIM becoming active.
         """
         mux_before = None
@@ -339,6 +342,50 @@ class GpioMuxSimController(SimController):
         #        CONCURRENT initial-configuration that collides with this
         #        in-progress switch (FSM transition errors, enable failures,
         #        cascading reset storms).
+        #
+        # 2a. BEST-EFFORT orderly network deregister BEFORE the GPIO pulse.
+        #     prefer_hardware=True means the reset ladder goes straight to the
+        #     board UNCOND_RESET pulse (see _try_board_modem_reset) — it does
+        #     NOT disable the modem first, so absent this step the OUTGOING SIM
+        #     is yanked off the network while still enabled/registered.  A
+        #     Modem.Enable(false) here makes ModemManager perform a proper
+        #     detach/deregister of the SIM we are leaving.
+        #
+        #     STRICTLY OPPORTUNISTIC + SHORT-BOUNDED.  The common trigger for a
+        #     SIM switch is that the current SIM is FAILED/sim-missing, in which
+        #     state Enable(false) fails or does not return promptly.  dbus_next
+        #     has no client-side timeout, so we cap this hard and continue on
+        #     timeout/error — failover latency matters more than a clean
+        #     deregister of an already-failing SIM, and the GPIO reset below
+        #     re-reads the SIM regardless.  Timeout is deliberately shorter than
+        #     the shutdown path's disconnect cap.
+        if self.fsm.proxy:
+            deregister_timeout = 3.0
+            try:
+                modem_iface = self.fsm.proxy.get_interface(
+                    "org.freedesktop.ModemManager1.Modem")
+                await asyncio.wait_for(
+                    modem_iface.call_enable(False),
+                    timeout=deregister_timeout)
+                logger.info(
+                    "SIM switch: modem disabled (outgoing SIM deregistered) "
+                    "before reset",
+                    extra={'interface_number': self.fsm.interface_number,
+                           'modem': self.modem_name})
+            except asyncio.TimeoutError:
+                logger.info(
+                    "SIM switch: modem disable timed out (likely FAILED/"
+                    "sim-missing) — proceeding straight to GPIO reset",
+                    extra={'interface_number': self.fsm.interface_number,
+                           'modem': self.modem_name,
+                           'timeout_seconds': deregister_timeout})
+            except Exception as e:  # noqa: BLE001 -- best-effort deregister
+                logger.info(
+                    f"SIM switch: modem disable before reset skipped ({e}) — "
+                    "proceeding to GPIO reset",
+                    extra={'interface_number': self.fsm.interface_number,
+                           'modem': self.modem_name})
+
         from vyos.utils.wwan.interfaces_wwan_util import modem_reset
         ok = await modem_reset(self.fsm.interface_number,
                                prefer_hardware=True, allow_nuclear=False)
