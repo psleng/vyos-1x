@@ -366,6 +366,10 @@ Depends:
 # End "serial"
 # For web interface
   flask-react-web,
+# flask-react-web's postinst builds a Python venv (/opt/flask/venv), which
+# needs ensurepip/pip from python3-venv + python3-pip present in the image.
+  python3-pip,
+  python3-venv,
 # End web interface
 ## End Configuration mode
 ## Operational mode
