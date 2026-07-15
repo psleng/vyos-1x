@@ -26,7 +26,7 @@ VARIANT = 'test'
 # raises a clear error on first pin use, and ``list_serial_ports()`` returns
 # nothing. So "no overlay" is treated as "no hardware present" -- exactly like
 # the (absent) ETH/WWAN maps -- instead of advertising phantom serial ports
-# with plausible-looking tty/dt_node values.
+# with plausible-looking tty values.
 #
 # Do NOT add example pin numbers or serial addresses here: a populated stub
 # would fabricate ports/pins on any image lacking an overlay and mask a
