@@ -9646,8 +9646,23 @@ class ModemStateMachine:
         ModemManager's ``Bearer.Properties.apn`` only echoes back the value we
         passed to ``Simple.Connect()`` — including the empty string on the
         automatic-assignment path — so it cannot tell us which APN the network
-        actually activated.  The genuinely-negotiated APN is exposed by QMI
-        ``WDS Get Current Settings`` for the running packet session.
+        actually activated.  The genuinely-negotiated APN is read from QMI
+        ``WDS Get LTE Attach Parameters``, which reports the APN the device
+        attached to the network with (the default/initial EPS bearer).
+
+        This deliberately does NOT use ``WDS Get Current Settings``: that
+        command never emits an APN field (only IP/DNS/MTU/gateway), and over
+        the shared ``qmi-proxy`` it is answered on a freshly-allocated WDS
+        client that does not own MM's data call, so it typically fails with
+        ``OutOfCall``.  ``Get LTE Attach Parameters`` is a modem-global query
+        that answers regardless of which client owns the call.
+
+        5G standalone (SA) has no LTE attach, and QMI exposes no dedicated
+        "5G attach parameters" message, so ``Get LTE Attach Parameters`` is
+        empty there (it still covers 5G NSA, which anchors on an LTE attach).
+        As a RAT-agnostic fallback the modem's DEFAULT 3GPP profile APN is
+        read (also modem-global) — the DNN/APN the default PDU session
+        attaches with on SA.
 
         Runs over the shared ModemManager ``qmi-proxy`` (``-p``, read-only) so
         it does not disturb MM's own QMI session.  Never raises.
@@ -9671,39 +9686,99 @@ class ModemStateMachine:
             if not shutil.which('qmicli'):
                 return ''
 
-            try:
-                proc = await asyncio.create_subprocess_exec(
-                    'qmicli', '-d', device, '-p', '--wds-get-current-settings',
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                out, err = await asyncio.wait_for(proc.communicate(), timeout=8)
-            except asyncio.TimeoutError:
-                # Reap the child — a timed-out qmicli left unkilled leaks an
-                # FD/zombie, and this path fires exactly when the modem is
-                # wedged (i.e. repeatedly).
+            async def _qmicli(*args):
+                """Run a read-only qmicli command over MM's qmi-proxy.
+                Returns stdout text, or ``None`` on failure/timeout."""
+                proc = None
                 try:
-                    proc.kill()
-                    await proc.wait()
-                except Exception:
-                    pass
-                logger.info("qmicli current-APN query timed out",
-                            extra={'interface_number': self.interface_number})
-                return ''
-            if proc.returncode != 0:
-                logger.info("qmicli current-APN query failed",
-                            extra={'interface_number': self.interface_number,
-                                   'device': device,
-                                   'error': err.decode(errors='replace').strip()})
+                    proc = await asyncio.create_subprocess_exec(
+                        'qmicli', '-d', device, '-p', *args,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    out, err = await asyncio.wait_for(
+                        proc.communicate(), timeout=8)
+                except asyncio.TimeoutError:
+                    # Reap the child — a timed-out qmicli left unkilled leaks
+                    # an FD/zombie, and this path fires exactly when the modem
+                    # is wedged (i.e. repeatedly).
+                    try:
+                        proc.kill()
+                        await proc.wait()
+                    except Exception:
+                        pass
+                    logger.info("qmicli APN query timed out",
+                                extra={'interface_number': self.interface_number,
+                                       'args': ' '.join(args)})
+                    return None
+                if proc.returncode != 0:
+                    logger.info("qmicli APN query failed",
+                                extra={'interface_number': self.interface_number,
+                                       'device': device,
+                                       'args': ' '.join(args),
+                                       'error': err.decode(errors='replace').strip()})
+                    return None
+                return out.decode(errors='replace')
+
+            def _first_apn(text):
+                """First real "APN: <name>" value in qmicli output, else ''.
+
+                Quote-tolerant: LTE attach parameters emit the value UNQUOTED,
+                profile/other outputs quote it.  Anchored to horizontal
+                whitespace only (spaces/tabs, not a class that also matches
+                newlines) so an empty "APN:" line cannot let the match run
+                across the newline into the next field.  Skips empty / "n/a" /
+                "(null)" sentinels.
+                """
+                if not text:
+                    return ''
+                for m in re.finditer(
+                        r"^[ \t]*APN:[ \t]*'?([^'\r\n]+?)'?[ \t]*\r?$",
+                        text, re.IGNORECASE | re.MULTILINE):
+                    apn = m.group(1).strip()
+                    if apn and apn.lower() not in ('n/a', 'null', '(null)'):
+                        return apn
                 return ''
 
-            # Output carries one "APN: 'name'" line per active WDS session
-            # (IPv4/IPv6 share the same APN).  Take the first non-empty value.
-            text = out.decode(errors='replace')
-            for match in re.finditer(r"APN:\s*'([^']*)'", text, re.IGNORECASE):
-                apn = match.group(1).strip()
-                if apn:
-                    return apn
+            async def _default_profile_apn():
+                """RAT-agnostic fallback: APN of the modem's default 3GPP
+                profile (for 5G SA, where no LTE attach parameters exist)."""
+                num_text = await _qmicli(
+                    '--wds-get-default-profile-number=3gpp')
+                if not num_text:
+                    return ''
+                m = re.search(r"Default profile number:[ \t]*'?(\d+)'?",
+                              num_text, re.IGNORECASE)
+                if not m:
+                    return ''
+                default_idx = m.group(1)
+                list_text = await _qmicli('--wds-get-profile-list=3gpp')
+                if not list_text:
+                    return ''
+                # qmicli prints one block per profile, each headed by a
+                # "[<index>]" line ("\t[1] 3gpp - internet") followed by
+                # "\t\tAPN: '<name>'".  Split on the index header and keep the
+                # block whose index equals the default profile number.
+                parts = re.split(r"^[ \t]*\[(\d+)\]", list_text,
+                                 flags=re.MULTILINE)
+                for i in range(1, len(parts) - 1, 2):
+                    if parts[i] == default_idx:
+                        return _first_apn(parts[i + 1])
+                return ''
+
+            # PRIMARY: the network-negotiated LTE attach APN.  Covers LTE and
+            # 5G NSA (both anchor on an LTE attach); modem-global, so it
+            # answers over the proxy even though MM owns the data call.
+            apn = _first_apn(await _qmicli('--wds-get-lte-attach-parameters'))
+            if apn:
+                return apn
+
+            # FALLBACK: 5G SA (or any state with no LTE attach) — QMI has no
+            # "5G attach parameters" message, so use the modem's default 3GPP
+            # profile APN.
+            apn = await _default_profile_apn()
+            if apn:
+                return apn
         except Exception as e:
             logger.info("Negotiated APN not readable over QMI",
                         extra={'interface_number': self.interface_number,
