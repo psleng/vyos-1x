@@ -1,0 +1,325 @@
+<?xml version="1.0"?>
+<interfaceDefinition>
+  <node name="interfaces">
+    <children>
+      <tagNode name="ppp-tty" owner="${vyos_conf_scripts_dir}/serial.py">
+        <properties>
+          <help>Point-to-Point Protocol Interface on serial port</help>
+          <priority>486</priority>
+          <constraint>
+            <regex>pppttys[0-9]+</regex>
+          </constraint>
+          <constraintErrorMessage>PPP interface must be named pppttysN</constraintErrorMessage>
+          <valueHelp>
+            <format>pppttysN</format>
+            <description>PPP on TTY interface name</description>
+          </valueHelp>
+        </properties>
+        <children>
+          #include <include/generic-description.xml.i>
+          #include <include/serial/service/utils/idle-timeout.xml.i>
+          #include <include/serial/service/utils/interface-device.xml.i>
+          <leafNode name="local-address">
+            <properties>
+              <help>The IPv4 address of the current device end of the PPP link</help>
+              <valueHelp>
+                <format>ipv4net</format>
+                <description>IPv4 address and prefix length</description>
+              </valueHelp>
+              <constraint>
+                <validator name="ipv4-host"/>
+              </constraint>
+            </properties>
+          </leafNode>
+          <leafNode name="accm">
+            <properties>
+              <help>Specifies the ACCM (Asynchronous Control Character Map) characters that should be escaped from the data stream</help>
+              <constraint>
+                <regex>.{8,8}</regex>
+              </constraint>
+              <constraintErrorMessage>hex value must be 8 digits long</constraintErrorMessage>
+            </properties>
+            <defaultValue>00000000</defaultValue>
+          </leafNode>
+          <node name = "authentication">
+            <properties>
+              <help>Authentication setting</help>
+            </properties>
+            <children>
+              <node name="protocol">
+                <properties>
+                  <help>Authentication protocol (required)</help>
+                  <completionHelp>
+                    <list>chap pap none</list>
+                  </completionHelp>
+                </properties>
+                <children>
+                  <leafNode name="none">
+                    <properties>
+                      <help>No authentication</help>
+                      <valueless/>
+                    </properties>
+                  </leafNode>
+                  <node name="chap">
+                    <properties>
+                      <help>Use CHAP authentication</help>
+                    </properties>
+                    <children>
+                      #include <include/serial/service/utils/user-password.xml.i>
+                      <leafNode name="challenge-interval">
+                        <properties>
+                          <help>The interval to issue a CHAP re-challenge to the remote end</help>
+                          <valueHelp>
+                            <format>u32:0-255</format>
+                            <description>CHAP re-challenge interval (in minutes)</description>
+                          </valueHelp>
+                          <constraint>
+                            <validator name="numeric" argument="--range 0-255"/>
+                          </constraint>
+                        </properties>
+                        <defaultValue>0</defaultValue>
+                      </leafNode>
+                    </children>
+                  </node>
+                  <node name="pap">
+                    <properties>
+                      <help>Use PAP authentication</help>
+                    </properties>
+                    <children>
+                      #include <include/serial/service/utils/user-password.xml.i>
+                    </children>
+                  </node>
+                </children>
+              </node>
+              <leafNode name="timeout">
+                <properties>
+                  <help>The timeout during which successful authentication must take place</help>
+                  <valueHelp>
+                    <format>u32:0-255</format>
+                    <description>Minutes</description>
+                  </valueHelp>
+                  <constraint>
+                    <validator name="numeric" argument="--range 0-255"/>
+                  </constraint>
+                </properties>
+                <defaultValue>1</defaultValue>
+              </leafNode>
+            </children>
+          </node>
+          <leafNode name="disable-address-control-compression">
+            <properties>
+              <help>Disable compression of the PPP Address and Control fields</help>
+              <valueless/>
+            </properties>
+          </leafNode>
+          <leafNode name="disable-protocol-compression">
+            <properties>
+              <help>Disable compression of the PPP Protocol field</help>
+              <valueless/>
+            </properties>
+          </leafNode>
+          <node name="configure-request">
+            <properties>
+              <help>Configure Link Control Protocol (LCP) configure-request parameters</help>
+            </properties>
+            <children>
+              <leafNode name="retry">
+                <properties>
+                  <help>The maximum number of times a configure request packet will be re-sent before the link is terminated</help>
+                  <valueHelp>
+                    <format>u32:0-255</format>
+                    <description>Times</description>
+                  </valueHelp>
+                  <constraint>
+                    <validator name="numeric" argument="--range 0-255"/>
+                  </constraint>
+                </properties>
+                <defaultValue>10</defaultValue>
+              </leafNode>
+              <leafNode name="timeout">
+                <properties>
+                  <help>The maximum time, in seconds, that LCP (Link Control Protocol) will wait before it considers a configure request packet to have been lost</help>
+                  <valueHelp>
+                    <format>u32:1-255</format>
+                    <description>Seconds</description>
+                  </valueHelp>
+                  <constraint>
+                    <validator name="numeric" argument="--range 1-255"/>
+                  </constraint>
+                </properties>
+                <defaultValue>3</defaultValue>
+              </leafNode>
+            </children>
+          </node>
+          <node name="echo">
+            <properties>
+              <help>Configure echo parameters</help>
+            </properties>
+            <children>
+              <leafNode name="retry">
+                <properties>
+                  <help>The maximum number of times an echo request packet will be re-sent before the link is terminated</help>
+                  <valueHelp>
+                    <format>u32:0-255</format>
+                    <description>Times</description>
+                  </valueHelp>
+                  <constraint>
+                    <validator name="numeric" argument="--range 0-255"/>
+                  </constraint>
+                </properties>
+                <defaultValue>3</defaultValue>
+              </leafNode>
+              <leafNode name="timeout">
+                <properties>
+                  <help>The maximum time, in seconds, between sending an echo request packet if no response is received from the remote host</help>
+                  <valueHelp>
+                    <format>u32:0-255</format>
+                    <description>Seconds</description>
+                  </valueHelp>
+                  <constraint>
+                    <validator name="numeric" argument="--range 0-255"/>
+                  </constraint>
+                </properties>
+                <defaultValue>30</defaultValue>
+              </leafNode>
+            </children>
+          </node>
+          <node name="terminate-request">
+            <properties>
+              <help>Configure terminate request parameters</help>
+            </properties>
+            <children>
+              <leafNode name="retry">
+                <properties>
+                  <help>The maximum number of times a terminate request packet will be re-sent before the link is terminated</help>
+                  <valueHelp>
+                    <format>u32:0-255</format>
+                    <description>Times</description>
+                  </valueHelp>
+                  <constraint>
+                    <validator name="numeric" argument="--range 0-255"/>
+                  </constraint>
+                </properties>
+                <defaultValue>2</defaultValue>
+              </leafNode>
+              <leafNode name="timeout">
+                <properties>
+                  <help>The maximum time that Link Control Protocol (LCP) will wait before it considers a terminate request packet to have been lost</help>
+                  <valueHelp>
+                    <format>u32:1-255</format>
+                    <description>Seconds</description>
+                  </valueHelp>
+                  <constraint>
+                    <validator name="numeric" argument="--range 1-255"/>
+                  </constraint>
+                </properties>
+                <defaultValue>3</defaultValue>
+              </leafNode>
+            </children>
+          </node>
+          <node name="ipv6">
+            <properties>
+              <help>Configure IPv6 parameters</help>
+            </properties>
+            <children>
+              <leafNode name="global-parameters-network-prefix">
+                <properties>
+                  <help>Specify an IPv6 global network prefix that the current device will advertise to the device at the other end of the PPP link</help>
+                  <valueHelp>
+                    <format>ipv6</format>
+                    <description>IPv6 address</description>
+                  </valueHelp>
+                  <constraint>
+                    <validator name="ipv6-host"/>
+                  </constraint>
+                </properties>
+              </leafNode>
+              <leafNode name="local-interface-identifier">
+                <properties>
+                  <help>The local IPv6 interface identifier of the current device end of the PPP link</help>
+                  <valueHelp>
+                    <format>&lt;::h:h:h:h&gt;</format>
+                    <description>Standard ASCII notation of IPv6 addresses</description>
+                  </valueHelp>
+                  <constraint>
+                    <validator name="ppp-v6-interface-identifier"/>
+                  </constraint>
+                </properties>
+              </leafNode>
+              <leafNode name="remote-interface-identifier">
+                <properties>
+                  <help>The remote IPv6 interface identifier of the remote end of the PPP link</help>
+                  <valueHelp>
+                    <format>&lt;::h:h:h:h&gt;</format>
+                    <description>Standard ASCII notation of IPv6 addresses</description>
+                  </valueHelp>
+                  <constraint>
+                    <validator name="ppp-v6-interface-identifier"/>
+                  </constraint>
+                </properties>
+              </leafNode>
+            </children>
+          </node>
+          <leafNode name="magic-negotiation">
+            <properties>
+              <help>Enable random numbers sent on the link if a line is looping back</help>
+              <valueless/>
+            </properties>
+          </leafNode>
+          <leafNode name="mru">
+            <properties>
+              <help>The Maximum Receive Unit (MRU) parameter specifies the maximum size of PPP packets that the current device will accept</help>
+              <valueHelp>
+                <format>u32:64-1500</format>
+                <description>Bytes</description>
+              </valueHelp>
+              <constraint>
+                <validator name="numeric" argument="--range 64-1500"/>
+              </constraint>
+            </properties>
+            <defaultValue>1500</defaultValue>
+          </leafNode>
+          <leafNode name="nak-retry">
+            <properties>
+              <help>The maximum number of times a configure NAK packet will be re-sent before the link is terminated</help>
+              <valueHelp>
+                <format>u32:0-255</format>
+                <description>Times</description>
+              </valueHelp>
+              <constraint>
+                <validator name="numeric" argument="--range 0-255"/>
+              </constraint>
+            </properties>
+            <defaultValue>10</defaultValue>
+          </leafNode>
+          <leafNode name="remote-address">
+            <properties>
+              <help>The IPv4 address of the remote end of the PPP link</help>
+              <completionHelp>
+                <list>negotiation</list>
+              </completionHelp>
+              <valueHelp>
+                <format>ipv4net</format>
+                <description>IPv4 address and prefix length</description>
+              </valueHelp>
+              <valueHelp>
+                <format>negotiation</format>
+                <description>Obtain address via PPP negotiation</description>
+              </valueHelp>
+              <constraint>
+                <validator name="ipv4-host"/>
+                <regex>(negotiation)</regex>
+              </constraint>
+            </properties>
+          </leafNode>
+          <leafNode name="vj-compression">
+            <properties>
+              <help>Enable Van Jacobson style TCP/IP header compression in both the transmit and the receive direction</help>
+              <valueless/>
+            </properties>
+          </leafNode>
+        </children>
+      </tagNode>
+    </children>
+  </node>
+</interfaceDefinition>
