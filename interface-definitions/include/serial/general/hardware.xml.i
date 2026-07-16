@@ -147,6 +147,12 @@
         </leafNode>
       </children>
     </node>
+    <leafNode name="discard-chars-rxd-with-errors">
+      <properties>
+        <help>Enable discard characters received with errors</help>
+        <valueless/>
+      </properties>
+    </leafNode>
   </children>
 </node>
 <!-- include end -->
