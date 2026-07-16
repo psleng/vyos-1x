@@ -958,6 +958,45 @@ class ModemStateMachine:
 
         return False
 
+    async def _reset_modem_for_capability_fault(self) -> bool:
+        """Power-cycle a modem stuck in FAILED with ``unknown-capabilities``.
+
+        MM ``unknown-capabilities`` (StateFailedReason 4) means ModemManager
+        could not read the modem's capabilities at all — it is a modem-level
+        fault, NOT a SIM problem, and it does not clear on its own (the
+        Modem.Simple interface is not even exposed while FAILED, so the
+        connection cascade can never run).  A full power-cycle is the only
+        recovery.  Guarded by the cooldown / max-reset policy
+        (``_is_reset_allowed``); returns True only when a reset was actually
+        performed and the post-reset rescan ran.
+        """
+        if not self._is_reset_allowed():
+            logger.warning(
+                "Modem FAILED with unknown-capabilities but hardware reset is "
+                "blocked (cooldown/max reached) — deferring recovery",
+                extra={'interface_number': self.interface_number})
+            return False
+        logger.warning(
+            "Modem FAILED with unknown-capabilities — hardware-resetting the "
+            "modem to recover",
+            extra={'interface_number': self.interface_number})
+        try:
+            ok = await modem_reset(self.interface_number)
+            self._record_reset()
+            if not ok:
+                logger.warning(
+                    "unknown-capabilities recovery: no working reset method "
+                    "for this modem",
+                    extra={'interface_number': self.interface_number})
+                return False
+            await self._rescan_after_reset()
+            return True
+        except Exception as e:
+            logger.error(
+                f"unknown-capabilities hardware reset failed: {e}",
+                extra={'interface_number': self.interface_number})
+            return False
+
     # ------------------------------------------------------------------
     # Failed-state periodic retry (exponential backoff)
     # ------------------------------------------------------------------
@@ -1178,6 +1217,16 @@ class ModemStateMachine:
                                     f"sim-missing rescan failover error: {e}",
                                     extra={'interface_number': self.interface_number})
                             continue
+                        if failed_reason == 4:  # unknown-capabilities → modem fault
+                            logger.warning(
+                                "Failed-state retry: modem in FAILED with "
+                                "unknown-capabilities — attempting hardware "
+                                "reset to recover",
+                                extra={'interface_number': self.interface_number,
+                                       'failed_reason': failed_reason})
+                            if await self._reset_modem_for_capability_fault():
+                                continue
+                            # reset blocked or failed → fall through and defer
                     logger.info(
                         f"Modem not ready (state {mm_state}), "
                         "deferring retry to next interval",
@@ -6741,6 +6790,7 @@ class ModemStateMachine:
 
             reason_name = {
                 0: 'none', 1: 'unknown', 2: 'sim-missing', 3: 'sim-error',
+                4: 'unknown-capabilities', 5: 'esim-without-profiles',
             }.get(failed_reason, f'unknown({failed_reason})')
 
             # Debounce duplicate investigations of the same FAILED reason.
@@ -6769,6 +6819,20 @@ class ModemStateMachine:
                        'mm_state': mm_state,
                        'failed_reason': failed_reason,
                        'failed_reason_name': reason_name})
+
+            # unknown-capabilities (4) is a MODEM fault, not a SIM problem —
+            # ModemManager could not read the modem's capabilities at all, so
+            # it never exposes Modem.Simple and the SIM/GPIO-mux routing below
+            # is irrelevant.  Handle it here, before that routing: power-cycle
+            # the modem (guarded by the cooldown/max-reset policy) and make
+            # sure the failed-state retry loop is running so recovery is
+            # retried on the backoff schedule if a reset is not allowed yet.
+            if failed_reason == 4:  # MM_MODEM_STATE_FAILED_REASON_UNKNOWN_CAPABILITIES
+                await self._reset_modem_for_capability_fault()
+                retry_task = self._failed_retry_task
+                if not (retry_task and not retry_task.done()):
+                    self._start_failed_retry()
+                return
 
             # GPIO-mux: the modem does NOT reliably report sim-missing — it
             # just fails generically when the active SIM is pulled.  So
