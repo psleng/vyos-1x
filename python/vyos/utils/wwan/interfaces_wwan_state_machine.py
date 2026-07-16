@@ -958,6 +958,45 @@ class ModemStateMachine:
 
         return False
 
+    async def _reset_modem_for_capability_fault(self) -> bool:
+        """Power-cycle a modem stuck in FAILED with ``unknown-capabilities``.
+
+        MM ``unknown-capabilities`` (StateFailedReason 4) means ModemManager
+        could not read the modem's capabilities at all — it is a modem-level
+        fault, NOT a SIM problem, and it does not clear on its own (the
+        Modem.Simple interface is not even exposed while FAILED, so the
+        connection cascade can never run).  A full power-cycle is the only
+        recovery.  Guarded by the cooldown / max-reset policy
+        (``_is_reset_allowed``); returns True only when a reset was actually
+        performed and the post-reset rescan ran.
+        """
+        if not self._is_reset_allowed():
+            logger.warning(
+                "Modem FAILED with unknown-capabilities but hardware reset is "
+                "blocked (cooldown/max reached) — deferring recovery",
+                extra={'interface_number': self.interface_number})
+            return False
+        logger.warning(
+            "Modem FAILED with unknown-capabilities — hardware-resetting the "
+            "modem to recover",
+            extra={'interface_number': self.interface_number})
+        try:
+            ok = await modem_reset(self.interface_number)
+            self._record_reset()
+            if not ok:
+                logger.warning(
+                    "unknown-capabilities recovery: no working reset method "
+                    "for this modem",
+                    extra={'interface_number': self.interface_number})
+                return False
+            await self._rescan_after_reset()
+            return True
+        except Exception as e:
+            logger.error(
+                f"unknown-capabilities hardware reset failed: {e}",
+                extra={'interface_number': self.interface_number})
+            return False
+
     # ------------------------------------------------------------------
     # Failed-state periodic retry (exponential backoff)
     # ------------------------------------------------------------------
@@ -1178,6 +1217,16 @@ class ModemStateMachine:
                                     f"sim-missing rescan failover error: {e}",
                                     extra={'interface_number': self.interface_number})
                             continue
+                        if failed_reason == 4:  # unknown-capabilities → modem fault
+                            logger.warning(
+                                "Failed-state retry: modem in FAILED with "
+                                "unknown-capabilities — attempting hardware "
+                                "reset to recover",
+                                extra={'interface_number': self.interface_number,
+                                       'failed_reason': failed_reason})
+                            if await self._reset_modem_for_capability_fault():
+                                continue
+                            # reset blocked or failed → fall through and defer
                     logger.info(
                         f"Modem not ready (state {mm_state}), "
                         "deferring retry to next interval",
@@ -6741,6 +6790,7 @@ class ModemStateMachine:
 
             reason_name = {
                 0: 'none', 1: 'unknown', 2: 'sim-missing', 3: 'sim-error',
+                4: 'unknown-capabilities', 5: 'esim-without-profiles',
             }.get(failed_reason, f'unknown({failed_reason})')
 
             # Debounce duplicate investigations of the same FAILED reason.
@@ -6769,6 +6819,20 @@ class ModemStateMachine:
                        'mm_state': mm_state,
                        'failed_reason': failed_reason,
                        'failed_reason_name': reason_name})
+
+            # unknown-capabilities (4) is a MODEM fault, not a SIM problem —
+            # ModemManager could not read the modem's capabilities at all, so
+            # it never exposes Modem.Simple and the SIM/GPIO-mux routing below
+            # is irrelevant.  Handle it here, before that routing: power-cycle
+            # the modem (guarded by the cooldown/max-reset policy) and make
+            # sure the failed-state retry loop is running so recovery is
+            # retried on the backoff schedule if a reset is not allowed yet.
+            if failed_reason == 4:  # MM_MODEM_STATE_FAILED_REASON_UNKNOWN_CAPABILITIES
+                await self._reset_modem_for_capability_fault()
+                retry_task = self._failed_retry_task
+                if not (retry_task and not retry_task.done()):
+                    self._start_failed_retry()
+                return
 
             # GPIO-mux: the modem does NOT reliably report sim-missing — it
             # just fails generically when the active SIM is pulled.  So
@@ -9646,8 +9710,23 @@ class ModemStateMachine:
         ModemManager's ``Bearer.Properties.apn`` only echoes back the value we
         passed to ``Simple.Connect()`` — including the empty string on the
         automatic-assignment path — so it cannot tell us which APN the network
-        actually activated.  The genuinely-negotiated APN is exposed by QMI
-        ``WDS Get Current Settings`` for the running packet session.
+        actually activated.  The genuinely-negotiated APN is read from QMI
+        ``WDS Get LTE Attach Parameters``, which reports the APN the device
+        attached to the network with (the default/initial EPS bearer).
+
+        This deliberately does NOT use ``WDS Get Current Settings``: that
+        command never emits an APN field (only IP/DNS/MTU/gateway), and over
+        the shared ``qmi-proxy`` it is answered on a freshly-allocated WDS
+        client that does not own MM's data call, so it typically fails with
+        ``OutOfCall``.  ``Get LTE Attach Parameters`` is a modem-global query
+        that answers regardless of which client owns the call.
+
+        5G standalone (SA) has no LTE attach, and QMI exposes no dedicated
+        "5G attach parameters" message, so ``Get LTE Attach Parameters`` is
+        empty there (it still covers 5G NSA, which anchors on an LTE attach).
+        As a RAT-agnostic fallback the modem's DEFAULT 3GPP profile APN is
+        read (also modem-global) — the DNN/APN the default PDU session
+        attaches with on SA.
 
         Runs over the shared ModemManager ``qmi-proxy`` (``-p``, read-only) so
         it does not disturb MM's own QMI session.  Never raises.
@@ -9671,39 +9750,99 @@ class ModemStateMachine:
             if not shutil.which('qmicli'):
                 return ''
 
-            try:
-                proc = await asyncio.create_subprocess_exec(
-                    'qmicli', '-d', device, '-p', '--wds-get-current-settings',
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                out, err = await asyncio.wait_for(proc.communicate(), timeout=8)
-            except asyncio.TimeoutError:
-                # Reap the child — a timed-out qmicli left unkilled leaks an
-                # FD/zombie, and this path fires exactly when the modem is
-                # wedged (i.e. repeatedly).
+            async def _qmicli(*args):
+                """Run a read-only qmicli command over MM's qmi-proxy.
+                Returns stdout text, or ``None`` on failure/timeout."""
+                proc = None
                 try:
-                    proc.kill()
-                    await proc.wait()
-                except Exception:
-                    pass
-                logger.info("qmicli current-APN query timed out",
-                            extra={'interface_number': self.interface_number})
-                return ''
-            if proc.returncode != 0:
-                logger.info("qmicli current-APN query failed",
-                            extra={'interface_number': self.interface_number,
-                                   'device': device,
-                                   'error': err.decode(errors='replace').strip()})
+                    proc = await asyncio.create_subprocess_exec(
+                        'qmicli', '-d', device, '-p', *args,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    out, err = await asyncio.wait_for(
+                        proc.communicate(), timeout=8)
+                except asyncio.TimeoutError:
+                    # Reap the child — a timed-out qmicli left unkilled leaks
+                    # an FD/zombie, and this path fires exactly when the modem
+                    # is wedged (i.e. repeatedly).
+                    try:
+                        proc.kill()
+                        await proc.wait()
+                    except Exception:
+                        pass
+                    logger.info("qmicli APN query timed out",
+                                extra={'interface_number': self.interface_number,
+                                       'args': ' '.join(args)})
+                    return None
+                if proc.returncode != 0:
+                    logger.info("qmicli APN query failed",
+                                extra={'interface_number': self.interface_number,
+                                       'device': device,
+                                       'args': ' '.join(args),
+                                       'error': err.decode(errors='replace').strip()})
+                    return None
+                return out.decode(errors='replace')
+
+            def _first_apn(text):
+                """First real "APN: <name>" value in qmicli output, else ''.
+
+                Quote-tolerant: LTE attach parameters emit the value UNQUOTED,
+                profile/other outputs quote it.  Anchored to horizontal
+                whitespace only (spaces/tabs, not a class that also matches
+                newlines) so an empty "APN:" line cannot let the match run
+                across the newline into the next field.  Skips empty / "n/a" /
+                "(null)" sentinels.
+                """
+                if not text:
+                    return ''
+                for m in re.finditer(
+                        r"^[ \t]*APN:[ \t]*'?([^'\r\n]+?)'?[ \t]*\r?$",
+                        text, re.IGNORECASE | re.MULTILINE):
+                    apn = m.group(1).strip()
+                    if apn and apn.lower() not in ('n/a', 'null', '(null)'):
+                        return apn
                 return ''
 
-            # Output carries one "APN: 'name'" line per active WDS session
-            # (IPv4/IPv6 share the same APN).  Take the first non-empty value.
-            text = out.decode(errors='replace')
-            for match in re.finditer(r"APN:\s*'([^']*)'", text, re.IGNORECASE):
-                apn = match.group(1).strip()
-                if apn:
-                    return apn
+            async def _default_profile_apn():
+                """RAT-agnostic fallback: APN of the modem's default 3GPP
+                profile (for 5G SA, where no LTE attach parameters exist)."""
+                num_text = await _qmicli(
+                    '--wds-get-default-profile-number=3gpp')
+                if not num_text:
+                    return ''
+                m = re.search(r"Default profile number:[ \t]*'?(\d+)'?",
+                              num_text, re.IGNORECASE)
+                if not m:
+                    return ''
+                default_idx = m.group(1)
+                list_text = await _qmicli('--wds-get-profile-list=3gpp')
+                if not list_text:
+                    return ''
+                # qmicli prints one block per profile, each headed by a
+                # "[<index>]" line ("\t[1] 3gpp - internet") followed by
+                # "\t\tAPN: '<name>'".  Split on the index header and keep the
+                # block whose index equals the default profile number.
+                parts = re.split(r"^[ \t]*\[(\d+)\]", list_text,
+                                 flags=re.MULTILINE)
+                for i in range(1, len(parts) - 1, 2):
+                    if parts[i] == default_idx:
+                        return _first_apn(parts[i + 1])
+                return ''
+
+            # PRIMARY: the network-negotiated LTE attach APN.  Covers LTE and
+            # 5G NSA (both anchor on an LTE attach); modem-global, so it
+            # answers over the proxy even though MM owns the data call.
+            apn = _first_apn(await _qmicli('--wds-get-lte-attach-parameters'))
+            if apn:
+                return apn
+
+            # FALLBACK: 5G SA (or any state with no LTE attach) — QMI has no
+            # "5G attach parameters" message, so use the modem's default 3GPP
+            # profile APN.
+            apn = await _default_profile_apn()
+            if apn:
+                return apn
         except Exception as e:
             logger.info("Negotiated APN not readable over QMI",
                         extra={'interface_number': self.interface_number,

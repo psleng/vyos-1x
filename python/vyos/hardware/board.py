@@ -90,7 +90,7 @@ _PORT_PIN_SUFFIXES = {
 # only ever sees a path like /dev/ttyS1 or /dev/igos/uartc2 and never the
 # underlying GPIO pin names.
 _PORT_META_KEYS = frozenset({
-    "type", "tty", "by_path", "alias", "label", "dt_node",
+    "type", "tty", "by_path", "alias", "label",
 })
 
 
@@ -574,74 +574,6 @@ class IgosBoard(Board):
             f"declared: {self.list_serial_ports() or '<none>'}"
         )
 
-    # -------- runtime tty <-> port verification --------
-    def verify_serial_bindings(self, *, strict: bool = True) -> Dict[str, str]:
-        """
-        Assert that every port whose pinmap entry declares a ``dt_node``
-        actually resolves to that device-tree node via ``/sys/class/tty``.
-
-        This is the missing link between the GPIO-controlled transceiver
-        (mode/shut pins) and the kernel's ``/dev/ttySN`` numbering — without
-        it, a typo in the pinmap's ``tty`` value would silently re-wire the
-        wrong UART to the wrong transceiver.
-
-        Returns ``{port: realpath_of_node}`` for every port that was
-        successfully verified. Ports without ``dt_node`` are skipped.
-
-        ``strict=True`` (default) raises ``RuntimeError`` on the first
-        mismatch. ``strict=False`` collects and returns
-        ``{port: 'ERROR: ...'}`` entries instead so callers can log
-        everything at startup.
-
-        Soft-skips silently when:
-          * ``/sys/class/tty/<name>`` is absent (e.g. running this code
-            on a build host or in CI),
-          * the tty's ``device/of_node`` symlink is absent
-            (non-DT system).
-        """
-        import os
-        result: Dict[str, str] = {}
-        for port, meta in self._serial_meta.items():
-            dt_node = meta.get("dt_node")
-            tty = meta.get("tty") or meta.get("by_path")
-            if not dt_node or not tty:
-                continue
-            # Resolve the tty to a /sys/class/tty/<name> entry.
-            try:
-                tty_real = os.path.realpath(tty)
-            except OSError:
-                continue
-            tty_name = os.path.basename(tty_real)
-            sys_of = f"/sys/class/tty/{tty_name}/device/of_node"
-            if not os.path.exists(sys_of):
-                continue  # not a DT system, or tty not yet present
-            try:
-                of_real = os.path.realpath(sys_of)
-            except OSError as exc:
-                msg = f"{port}: cannot resolve {sys_of}: {exc}"
-                if strict:
-                    raise RuntimeError(msg) from exc
-                result[port] = f"ERROR: {msg}"
-                continue
-            # dt_node is declared as the leaf path (e.g.
-            # '/bus@f4000/serial@2810000'); accept either an exact tail
-            # match against /sys/firmware/devicetree/base/... or against
-            # the of_node symlink target itself.
-            wanted = dt_node.rstrip("/")
-            if of_real.endswith(wanted):
-                result[port] = of_real
-                continue
-            msg = (
-                f"{port}: pinmap claims tty={tty!r} is at dt_node={dt_node!r}, "
-                f"but {tty_name} resolves to {of_real!r}. "
-                "Pinmap and device tree disagree — fix the pinmap or "
-                "the .dts before continuing."
-            )
-            if strict:
-                raise RuntimeError(msg)
-            result[port] = f"ERROR: {msg}"
-        return result
-
     # -------- modems --------
     def list_modems(self) -> List[str]:
         """Return every modem name declared by the active pinmap."""
@@ -913,9 +845,6 @@ class _NoPinmapBoard(Board):
     def serial_port_for_tty(self, path):    self._fail()
     def serial_port_type(self, port):       self._fail()
     def serial_port_supported_protocols(self, port):  return []
-
-    def verify_serial_bindings(self, *, strict=True):
-        return {}
 
     def list_modems(self) -> list:
         return []

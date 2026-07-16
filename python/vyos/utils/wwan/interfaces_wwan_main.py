@@ -251,6 +251,43 @@ class ModemManagerMonitor:
             return False
 
     @staticmethod
+    async def stop_modemmanager():
+        """Stop the ModemManager system service.
+
+        This manager owns ModemManager's lifecycle: it is the sole starter
+        of MM (see check_and_start_modemmanager, run on our own startup), so
+        MM must not be left running once we are gone.  On a standalone
+        `systemctl stop`/`restart igos-wwan-manager` (the system staying up)
+        nothing else would stop MM, so we stop it here.
+
+        NOT used on a full-system reboot/poweroff: there systemd stops MM
+        right after us via the unit's `After=ModemManager.service` ordering,
+        and our own graceful bearer disconnect needs MM alive until we exit.
+
+        Runs on the teardown path — bounded by the caller and must never
+        raise.  The blocking `systemctl` call is offloaded to a thread with
+        its own timeout so it cannot stall the event loop or wedge exit.
+        """
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                ["systemctl", "stop", "ModemManager"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except Exception as e:  # noqa: BLE001 -- best-effort teardown
+            logger.error(f"Error stopping ModemManager: {e}")
+            return False
+
+        if result.returncode == 0:
+            logger.info("ModemManager stopped (manager owns its lifecycle)")
+            return True
+        logger.warning(
+            f"ModemManager stop had issues: {result.stderr.strip()}")
+        return False
+
+    @staticmethod
     async def restart_modemmanager():
         """Restart ModemManager service with enhanced stability checking.
 
@@ -563,6 +600,31 @@ async def main():
             sys.stdout.flush()
             sys.stderr.flush()
             os._exit(0)
+        elif stop_event.is_set():
+            # Standalone `systemctl stop`/`restart igos-wwan-manager`: a
+            # SIGTERM with the system staying UP (the reboot/poweroff branch
+            # above already handled the system_is_stopping() case).  This
+            # manager owns ModemManager's lifecycle — it is the only thing
+            # that starts MM — so it must not leave MM orphaned behind it.
+            # Stop MM now, AFTER the orderly bearer disconnect (which needs
+            # MM alive) and the service-bus teardown (so MM's exit fires no
+            # live FSM signal handler), mirroring the GPIO-reset ordering
+            # rationale above.
+            #
+            # Gated on stop_event so a crash / `Restart=on-failure` — where
+            # this finally runs with no signal delivered — leaves MM up for
+            # the auto-restarted instance to reuse via
+            # check_and_start_modemmanager().  On an explicit `restart` MM is
+            # bounced together with us and re-established by the new instance;
+            # that is consistent with this service owning MM's life.
+            logger.info("Manager stopping — stopping ModemManager")
+            try:
+                await asyncio.wait_for(
+                    ModemManagerMonitor.stop_modemmanager(), timeout=12.0)
+            except asyncio.TimeoutError:
+                logger.error("ModemManager stop timed out")
+            except Exception as e:  # noqa: BLE001 -- best-effort cleanup
+                logger.error(f"Error stopping ModemManager: {e}")
         logger.info("WWAN Interface Manager stopped")
 
 if __name__ == "__main__":

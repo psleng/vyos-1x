@@ -346,23 +346,3 @@ def serial_port_supported_protocols(port: str) -> list:
     calling :func:`serial_protocol`.
     """
     return _b.serial_port_supported_protocols(port)
-
-
-def verify_serial_bindings(*, strict: bool = True) -> dict:
-    """
-    Assert that every port whose pinmap entry declares a ``dt_node``
-    resolves to that device-tree node via ``/sys/class/tty/<N>/device/of_node``.
-
-    This is the bridge between the pinmap (which controls the
-    transceiver) and the kernel's ``/dev/ttySN`` numbering (which the
-    application opens). Without this check a typo in the pinmap's
-    ``tty`` value would silently re-wire the wrong UART to the wrong
-    transceiver.
-
-    Call once at FSM/daemon startup. ``strict=True`` (default) raises
-    ``RuntimeError`` on the first mismatch; ``strict=False`` returns a
-    ``{port: 'ERROR: ...'}`` dict so callers can log every problem at
-    once. Soft-skips on build hosts / CI where ``/sys/class/tty`` is
-    absent.
-    """
-    return _b.verify_serial_bindings(strict=strict)
