@@ -2666,7 +2666,15 @@ class ModemStateMachine:
                                extra={'interface_number': self.interface_number,
                                       'fsm_state': current_fsm_state,
                                       'connection_mode': self.connection_mode})
-                    if current_fsm_state == ModemState.FAILED.value:
+                    # Neither DISCONNECTED nor FAILED has a direct CONNECT
+                    # transition — route both through RECONFIGURE (-> CONFIGURING)
+                    # so the following CONNECT is valid.  REGISTERED_IDLE has a
+                    # defined CONNECT transition, so it connects directly.
+                    # Without this, an always-on modem that re-registers
+                    # out-of-band while the FSM is stale in DISCONNECTED hit a
+                    # dead end (CONNECT from DISCONNECTED throws -> FSM stuck).
+                    if current_fsm_state in (ModemState.FAILED.value,
+                                             ModemState.DISCONNECTED.value):
                         self.transition(ModemEvent.RECONFIGURE)
                     self.transition(ModemEvent.CONNECT)
                     self._safe_create_task(self.apply_modem_configuration())
@@ -10385,8 +10393,13 @@ class ModemStateMachine:
                     return
                 # Set interface UP
                 await self._ensure_interface_up()
-                # Transition to CONNECTED state
-                if self.machine.current_state != ModemState.CONNECTED.value:
+                # Transition to CONNECTED state.  Only CONNECTING -> CONNECTED is
+                # a defined transition, so step through CONFIGURING -> CONNECTING
+                # first when the FSM has not reached CONNECTING yet (firing
+                # CONNECTED directly from CONFIGURING would throw and stick).
+                if self.machine.current_state == ModemState.CONFIGURING.value:
+                    self.transition(ModemEvent.CONNECT)
+                if self.machine.current_state == ModemState.CONNECTING.value:
                     self.transition(ModemEvent.CONNECTED)
                 return
 
