@@ -1,112 +1,116 @@
 <?xml version="1.0"?>
 <interfaceDefinition>
-  <node name="serial" owner="${vyos_conf_scripts_dir}/serial.py">
-    <properties>
-      <help>Serial</help>
-      <priority>1280</priority> <!-- after service ssh which has <priority>1000</priority> -->
-    </properties>
+  <node name="service">
     <children>
-      <node name="global-parameters">
+      <node name="serial" owner="${vyos_conf_scripts_dir}/serial.py">
         <properties>
-          <help>Global setting for serial ports</help>
+          <help>Serial</help>
+          <priority>1280</priority> <!-- after service ssh which has <priority>1000</priority> -->
         </properties>
         <children>
-          <leafNode name="flush-on-close">
+          <node name="global-parameters">
             <properties>
-              <help>Enable flush on Close</help>
-              <valueless/>
-            </properties>
-          </leafNode>
-          #include <include/serial/global/process-break.xml.i>
-          #include <include/serial/global/keepalive-setting.xml.i>
-          #include <include/serial/global/modbus-gateway.xml.i>
-          #include <include/serial/global/vmodem-phonebook.xml.i>
-          #include <include/serial/global/tls-global.xml.i>
-          #include <include/serial/global/trueport-remap.xml.i>
-          #include <include/serial/global/ssh-telnet-server-logging.xml.i>
-        </children>
-      </node>
-      <node name="profile">
-        <properties>
-          <help>Profile setting for serial ports</help>
-        </properties>
-        <children>
-          <tagNode name="tty-profile">
-            <properties>
-              <help>Profile for the serial interface</help>
+              <help>Global setting for serial ports</help>
             </properties>
             <children>
+              <leafNode name="flush-on-close">
+                <properties>
+                  <help>Enable flush on Close</help>
+                  <valueless/>
+                </properties>
+              </leafNode>
+              #include <include/serial/global/process-break.xml.i>
+              #include <include/serial/global/keepalive-setting.xml.i>
+              #include <include/serial/global/modbus-gateway.xml.i>
+              #include <include/serial/global/vmodem-phonebook.xml.i>
+              #include <include/serial/global/tls-global.xml.i>
+              #include <include/serial/global/trueport-remap.xml.i>
+              #include <include/serial/global/ssh-telnet-server-logging.xml.i>
+            </children>
+          </node>
+          <node name="profile">
+            <properties>
+              <help>Profile setting for serial ports</help>
+            </properties>
+            <children>
+              <tagNode name="tty-profile">
+                <properties>
+                  <help>Profile for the serial interface</help>
+                </properties>
+                <children>
+                  #include <include/serial/general/hardware.xml.i>
+                  #include <include/serial/general/packet-forwarding.xml.i>
+                  #include <include/serial/service/login.xml.i>
+                  #include <include/serial/service/modbus-profileable.xml.i>
+                  #include <include/serial/service/nine-bits.xml.i>
+                  #include <include/serial/service/serial-tunnel-profileable.xml.i>
+                  #include <include/serial/service/ssh-profileable.xml.i>
+                  #include <include/serial/service/tcp-profileable.xml.i>
+                  #include <include/serial/service/telnet-profileable.xml.i>
+                  #include <include/serial/service/trueport-profileable.xml.i>
+                  #include <include/serial/service/udp.xml.i>
+                  #include <include/serial/service/vmodem-profileable.xml.i>
+                  #include <include/serial/service/ppp.xml.i>
+                  #include <include/serial/service/slip.xml.i>
+                </children>
+              </tagNode>
+            </children>
+          </node>
+          <tagNode name="device">
+            <properties>
+              <help>System serial interface name (ttyS)</help>
+              <completionHelp>
+                <script>${vyos_completion_dir}/list_serial.py --selector all</script>
+              </completionHelp>
+              <valueHelp>
+                <format>ttySxxx</format>
+                <description>Regular serial interface</description>
+              </valueHelp>
+              <constraint>
+                <validator name="tty-port"/>
+              </constraint>
+            </properties>
+            <children>
+              <leafNode name="disable">
+                <properties>
+                  <help>Disable the port</help>
+                  <valueless/>
+                </properties>
+              </leafNode>
+              #include <include/generic-description.xml.i>
               #include <include/serial/general/hardware.xml.i>
               #include <include/serial/general/packet-forwarding.xml.i>
+              <leafNode name="profile">
+                <properties>
+                  <help>Serial profile name</help>
+                  <completionHelp>
+                    <path>service serial profile tty-profile</path>
+                  </completionHelp>
+                </properties>
+              </leafNode>
               #include <include/serial/service/login.xml.i>
               #include <include/serial/service/modbus-profileable.xml.i>
+              #include <include/serial/service/modbus-not-profileable.xml.i>
               #include <include/serial/service/nine-bits.xml.i>
               #include <include/serial/service/serial-tunnel-profileable.xml.i>
+              #include <include/serial/service/serial-tunnel-not-profileable.xml.i>
               #include <include/serial/service/ssh-profileable.xml.i>
+              #include <include/serial/service/ssh-not-profileable.xml.i>
               #include <include/serial/service/tcp-profileable.xml.i>
+              #include <include/serial/service/tcp-not-profileable.xml.i>
               #include <include/serial/service/telnet-profileable.xml.i>
+              #include <include/serial/service/telnet-not-profileable.xml.i>
               #include <include/serial/service/trueport-profileable.xml.i>
+              #include <include/serial/service/trueport-not-profileable.xml.i>
               #include <include/serial/service/udp.xml.i>
               #include <include/serial/service/vmodem-profileable.xml.i>
+              #include <include/serial/service/vmodem-not-profileable.xml.i>
               #include <include/serial/service/ppp.xml.i>
               #include <include/serial/service/slip.xml.i>
             </children>
           </tagNode>
         </children>
       </node>
-      <tagNode name="device">
-        <properties>
-          <help>System serial interface name (ttyS)</help>
-          <completionHelp>
-            <script>${vyos_completion_dir}/list_serial.py --selector all</script>
-          </completionHelp>
-          <valueHelp>
-            <format>ttySxxx</format>
-            <description>Regular serial interface</description>
-          </valueHelp>
-          <constraint>
-            <validator name="tty-port"/>
-          </constraint>
-        </properties>
-        <children>
-          <leafNode name="disable">
-            <properties>
-              <help>Disable the port</help>
-              <valueless/>
-            </properties>
-          </leafNode>
-          #include <include/generic-description.xml.i>
-          #include <include/serial/general/hardware.xml.i>
-          #include <include/serial/general/packet-forwarding.xml.i>
-          <leafNode name="profile">
-            <properties>
-              <help>Serial profile name</help>
-              <completionHelp>
-                <path>service serial profile tty-profile</path>
-              </completionHelp>
-            </properties>
-          </leafNode>
-          #include <include/serial/service/login.xml.i>
-          #include <include/serial/service/modbus-profileable.xml.i>
-          #include <include/serial/service/modbus-not-profileable.xml.i>
-          #include <include/serial/service/nine-bits.xml.i>
-          #include <include/serial/service/serial-tunnel-profileable.xml.i>
-          #include <include/serial/service/serial-tunnel-not-profileable.xml.i>
-          #include <include/serial/service/ssh-profileable.xml.i>
-          #include <include/serial/service/ssh-not-profileable.xml.i>
-          #include <include/serial/service/tcp-profileable.xml.i>
-          #include <include/serial/service/tcp-not-profileable.xml.i>
-          #include <include/serial/service/telnet-profileable.xml.i>
-          #include <include/serial/service/telnet-not-profileable.xml.i>
-          #include <include/serial/service/trueport-profileable.xml.i>
-          #include <include/serial/service/trueport-not-profileable.xml.i>
-          #include <include/serial/service/udp.xml.i>
-          #include <include/serial/service/vmodem-profileable.xml.i>
-          #include <include/serial/service/vmodem-not-profileable.xml.i>
-          #include <include/serial/service/ppp.xml.i>
-          #include <include/serial/service/slip.xml.i>
-        </children>
-      </tagNode>
     </children>
   </node>
 </interfaceDefinition>
