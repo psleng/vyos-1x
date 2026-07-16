@@ -1066,7 +1066,25 @@ class ModemStateMachine:
                         active = (self.current_active_sim
                                   or (self.config or {}).get('primary_sim_slot', 1))
                         present = await self.sim_controller.present_slots()
-                        if any(s != active for s in present):
+                        if active in present:
+                            # Backstop for a missed/coalesced SIM_DETECT
+                            # INSERTED edge on the ACTIVE slot.  The edge
+                            # watcher normally drives _handle_sim_detect_insertion
+                            # the instant the active slot's SIM returns, but a
+                            # dropped edge would otherwise leave us parked in
+                            # FAILED forever — the modem cannot enumerate a
+                            # reinserted SIM without a reboot.  Re-run the same
+                            # insertion handler (reboot-to-enumerate, itself
+                            # cooldown-gated) so recovery is not edge-dependent.
+                            logger.info(
+                                "sim-missing watch (GPIO): active-slot SIM "
+                                "present while FAILED — running insertion "
+                                "handler (missed-edge backstop)",
+                                extra={'interface_number': self.interface_number,
+                                       'present_slots': sorted(present),
+                                       'active_slot': active})
+                            await self._handle_sim_detect_insertion(active)
+                        elif any(s != active for s in present):
                             logger.info(
                                 "sim-missing watch (GPIO): alternate SIM "
                                 "present — triggering failover",
@@ -7413,22 +7431,62 @@ class ModemStateMachine:
                 self._start_failback_monitor()
                 return
 
-            # Insertion into the slot the modem is wired to, while parked.  The
-            # modem cannot detect the SIM on its own, so reboot to enumerate.
-            if slot == selected and state in (ModemState.FAILED.value,
-                                              ModemState.WAITING_FOR_SIM.value):
+            # Insertion into the slot the modem is wired to.  The modem cannot
+            # enumerate a reinserted SIM on its own, so a reboot is required to
+            # make it re-read the card.  Reboot whenever we are NOT in a healthy
+            # data session — deliberately NOT limited to FAILED/WAITING_FOR_SIM:
+            # on some modems (e.g. Telit LE910C4) a pulled SIM leaves the modem
+            # lingering in SEARCHING/SCANNING for minutes before it ever reaches
+            # FAILED, so the reinsertion edge (which fires within seconds) would
+            # otherwise arrive in a non-FAILED state and be silently dropped.
+            # This is safe because the GPIO SIM-detect watcher emits only on
+            # absent->present EDGES (no initial-state event at boot), so a
+            # genuine INSERTED edge always represents a real reinsertion.
+            healthy_states = (ModemState.CONNECTED.value,
+                              ModemState.USAGE_MONITORING.value)
+            if slot == selected and state not in healthy_states:
                 if not self._is_reset_allowed():
                     logger.info("SIM_DETECT: selected-slot SIM inserted but reset "
                                "blocked by cooldown — will retry on next event/poll",
                                extra={'interface_number': self.interface_number,
                                       'slot': slot})
                     return
-                logger.info("SIM_DETECT: SIM inserted into selected slot while parked "
-                           "— rebooting modem to enumerate it",
+                logger.info("SIM_DETECT: SIM inserted into selected slot while modem "
+                           "not connected — rebooting modem to enumerate it",
                            extra={'interface_number': self.interface_number,
                                   'slot': slot, 'state': state})
                 self._cancel_failed_retry()
-                ok = await modem_reset(self.interface_number)
+                # Best-effort: get off the network BEFORE the hard reset.  The
+                # soft (mmcli) reset does not make a GPIO-mux modem re-read the
+                # SIM, so we go hardware-first (prefer_hardware=True) — but the
+                # modem may still hold a cached registration (some modems, e.g.
+                # Telit LE910C4, only drop to SEARCHING when the SIM is pulled),
+                # so a bounded Modem.Enable(false) lets ModemManager deregister
+                # cleanly instead of the network having to age out a
+                # hard-yanked session.  Strictly bounded + best-effort: a
+                # SIM-less/wedged modem may not service it promptly, and the
+                # GPIO reset re-reads the SIM regardless of whether this
+                # succeeds.
+                if self.proxy:
+                    try:
+                        modem_iface = self.proxy.get_interface(MODEM_INTERFACE)
+                        await asyncio.wait_for(
+                            modem_iface.call_enable(False), timeout=3.0)
+                        logger.info("SIM_DETECT: modem disabled (network "
+                                   "deregistered) before reset",
+                                   extra={'interface_number': self.interface_number,
+                                          'slot': slot})
+                    except asyncio.TimeoutError:
+                        logger.info("SIM_DETECT: modem disable timed out before "
+                                   "reset — proceeding straight to GPIO reset",
+                                   extra={'interface_number': self.interface_number,
+                                          'slot': slot})
+                    except Exception as e:  # noqa: BLE001 -- best-effort deregister
+                        logger.info(f"SIM_DETECT: modem disable before reset "
+                                   f"skipped ({e}) — proceeding to GPIO reset",
+                                   extra={'interface_number': self.interface_number,
+                                          'slot': slot})
+                ok = await modem_reset(self.interface_number, prefer_hardware=True)
                 self._record_reset()
                 if not ok:
                     logger.warning("SIM_DETECT: modem reboot after insertion found "

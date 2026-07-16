@@ -182,6 +182,14 @@ class StateTransitionManager:
                 StateTransition("CONNECTED", "FAILED", "CONNECTION_FAILED", "Active connection failed"),
                 StateTransition("CONFIGURING", "FAILED", "CONNECTION_FAILED", "Configuration failed"),
                 StateTransition("DISCONNECTING", "FAILED", "CONNECTION_FAILED", "Recovery from disconnecting failed"),
+                # A reconnect attempt (e.g. apply_modem_configuration's
+                # registration gate) can fire CONNECTION_FAILED while the FSM
+                # is parked in DISCONNECTED after a bearer drop.  Without this
+                # transition process_event() raised ("Can not transition from
+                # state 'DISCONNECTED' on event 'connection_failed'") and the
+                # FSM stuck in DISCONNECTED, never entering FAILED and so never
+                # starting the failed-retry loop.
+                StateTransition("DISCONNECTED", "FAILED", "CONNECTION_FAILED", "Connection failed while disconnected"),
                 StateTransition("SCANNING", "FAILED", "CONNECTION_FAILED", "Modem scan failed"),
                 StateTransition("FAILED", "SCANNING", "START_SCAN", "Retry modem scanning"),
                 StateTransition("FAILED", "CONNECTING", "CONNECT", "Retry connection"),
