@@ -1,0 +1,68 @@
+<?xml version="1.0"?>
+<interfaceDefinition>
+  <node name="interfaces">
+    <children>
+      <tagNode name="slip-tty" owner="${vyos_conf_scripts_dir}/serial.py">
+        <properties>
+          <help>Serial Line Internet Protocol (SLIP) Interface on serial port</help>
+          <priority>487</priority>
+          <constraint>
+            <regex>slttys[0-9]+</regex>
+          </constraint>
+          <constraintErrorMessage>SLIP interface must be named slttysN</constraintErrorMessage>
+          <valueHelp>
+            <format>slttysN</format>
+            <description>SLIP on TTY interface name</description>
+          </valueHelp>
+        </properties>
+        <children>
+          #include <include/generic-description.xml.i>
+          #include <include/serial/service/utils/interface-device.xml.i>
+          <leafNode name="local-address">
+            <properties>
+              <help>The IPv4 address of the current device end of the SLIP link (required)</help>
+              <valueHelp>
+                <format>ipv4net</format>
+                <description>IPv4 address and prefix length</description>
+              </valueHelp>
+              <constraint>
+                <validator name="ipv4-host"/>
+              </constraint>
+            </properties>
+          </leafNode>
+          <leafNode name="disable-vj-comp">
+            <properties>
+              <help>Disable Van Jacobson style TCP/IP header compression in both the transmit and the receive direction</help>
+              <valueless/>
+            </properties>
+          </leafNode>
+          <leafNode name="mtu">
+            <properties>
+              <help>The Maximum Transmission Unit (MTU) parameter restricts the size of individual SLIP packets being sent by the current device</help>
+              <valueHelp>
+                <format>u32:256-1006</format>
+                <description>(in bytes)</description>
+              </valueHelp>
+              <constraint>
+                <validator name="numeric" argument="--range 256-1006"/>
+              </constraint>
+            </properties>
+            <defaultValue>256</defaultValue>
+          </leafNode>
+          <leafNode name="remote-address">
+            <properties>
+              <help>The IPv4 address of the remote end of the SLIP link (required)</help>
+              <valueHelp>
+                <format>ipv4net</format>
+                <description>IPv4 address and prefix length</description>
+              </valueHelp>
+              <constraint>
+                <validator name="ipv4-host"/>
+              </constraint>
+            </properties>
+          </leafNode>
+        </children>
+      </tagNode>
+    </children>
+  </node>
+</interfaceDefinition>
