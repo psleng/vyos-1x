@@ -31,6 +31,10 @@ if [ -n "$CLIENT_SECRET" ]; then
     ARGS+=(-d "client_secret=$CLIENT_SECRET")
 fi
 
+if [ -n "$SCOPE" ]; then
+    ARGS+=(-d "scope=$SCOPE")
+fi
+
 RESPONSE=$(curl "${ARGS[@]}" "$TOKEN_URL")
 
 ERROR=$(echo "$RESPONSE" | jq -r '.error // empty')

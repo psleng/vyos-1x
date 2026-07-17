@@ -357,7 +357,7 @@ Depends:
 # For email client 
   msmtp,
   msmtp-mta,
-# End  email cleint
+# End  email client
 ## End Configuration mode
 ## Operational mode
 # Used for hypervisor model in "run show version"

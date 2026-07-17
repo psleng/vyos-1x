@@ -209,10 +209,12 @@ def verify(cfg):
                     f"Profile '{name}' requires client-id"
                 )
 
-            if not oauth['client_secret']:
-                raise ConfigError(
-                    f"Profile '{name}' requires client-secret"
-                )
+            # client-secret is optional for some OAuth2 providers (public clients)
+            # and the msmtp helper supports an empty CLIENT_SECRET.
+            # if not oauth['client_secret']:
+            #     raise ConfigError(
+            #         f"Profile '{name}' requires client-secret"
+            #     )
 
             if not oauth['refresh_token']:
                 raise ConfigError(
@@ -346,8 +348,8 @@ def generate(cfg):
         content += [
             'auth on',
             'auth plain',
-            f'user {p["username"]}',
-            f'password {p["password"]}'
+            f'user "{p["username"]}"',
+            f'password "{p["password"]}"'
         ]
 
     elif p['authentication'] == 'oauth2':
@@ -360,7 +362,7 @@ def generate(cfg):
         content += [
             'auth on',
             'auth oauthbearer',
-            f'user {p["username"]}',
+            f'user "{p["username"]}"',
             f'passwordeval {OAUTH_HELPER} {name}'
         ]
 

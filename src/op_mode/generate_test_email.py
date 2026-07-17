@@ -10,7 +10,11 @@ import subprocess
 import sys
 from datetime import datetime
 
-sys.path.append('/usr/libexec/vyos/conf_mode')
+from vyos.defaults import directories
+sys.path.append(directories['conf_mode'])
+
+# sys.path.append('/usr/libexec/vyos/conf_mode')
+
 try:
     import system_email
 except ImportError:
@@ -46,7 +50,8 @@ def send_test_email(message: str) -> None:
     print(f"Processing delivery to {len(enabled_recipients)} enabled recipient(s)...")
 
     success_count = 0
-    date_str = datetime.now().strftime("%a, %d %b %Y %H:%M:%S %z")
+    date_str = datetime.now().astimezone().strftime("%a, %d %b %Y %H:%M:%S %z")
+    # date_str = datetime.now().strftime("%a, %d %b %Y %H:%M:%S %z")
 
     for alias, data in enabled_recipients.items():
         target_email = data.get('email') or alias
