@@ -6,7 +6,7 @@
   <children>
     <node name="primary">
       <properties>
-        <help>Primary host connection settings</help>
+        <help>Primary host connection settings (required)</help>
       </properties>
       <children>
         <leafNode name="port">

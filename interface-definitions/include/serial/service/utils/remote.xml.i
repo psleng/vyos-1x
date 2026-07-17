@@ -1,7 +1,7 @@
 <!-- include start from serial/service/utils/remote.xml.i -->
 <node name="remote">
   <properties>
-    <help>Remote host connection settings</help>
+    <help>Remote host connection settings (required)</help>
   </properties>
   <children>
     <leafNode name="port">
