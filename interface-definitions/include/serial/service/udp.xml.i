@@ -37,11 +37,11 @@
       <properties>
         <help>UDP rule entry</help>
         <valueHelp>
-          <format>u32:1-4</format>
-          <description>Entry ID (1-4)</description>
+          <format>u32:1-10</format>
+          <description>Entry ID (1-10)</description>
         </valueHelp>
         <constraint>
-          <validator name="numeric" argument="--range 1-4"/>
+          <validator name="numeric" argument="--range 1-10"/>
         </constraint>
       </properties>
       <children>
