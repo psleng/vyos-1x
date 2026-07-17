@@ -1,5 +1,5 @@
 <!-- include start from serial/service/vmodem-profileable.xml.i -->
-<node name="vmodem">
+<node name="virtual-modem">
   <properties>
     <help>Virtual Modem service settings</help>
   </properties>
@@ -15,11 +15,11 @@
     </leafNode>
     <leafNode name="initialization-string">
       <properties>
-        <help>String that is sent to the modem when a connection succeeds</help>
+        <help>Additional virtual modem commands that will affect how virtual modem starts</help>
         <constraint>
           <regex>.{0,254}</regex>
         </constraint>
-        <constraintErrorMessage>Vmodem modem initialization string too long (limit 254 characters)</constraintErrorMessage>
+        <constraintErrorMessage>Virtual modem initialization string too long (limit 254 characters)</constraintErrorMessage>
       </properties>
     </leafNode>
     <leafNode name="response-delay">
@@ -57,7 +57,7 @@
                 <constraint>
                   <regex>.{0,30}</regex>
                 </constraint>
-                <constraintErrorMessage>Vmodem failure string too long (limit 30 characters)</constraintErrorMessage>
+                <constraintErrorMessage>Virtual modem failure string too long (limit 30 characters)</constraintErrorMessage>
               </properties>
               <defaultValue>NO&#160;CARRIER</defaultValue>
             </leafNode>
@@ -67,7 +67,7 @@
                 <constraint>
                   <regex>.{0,40}</regex>
                 </constraint>
-                <constraintErrorMessage>Vmodem success string too long (limit 40 characters)</constraintErrorMessage>
+                <constraintErrorMessage>Virtual modem success string too long (limit 40 characters)</constraintErrorMessage>
               </properties>
               <defaultValue>CONNECT</defaultValue>
             </leafNode>

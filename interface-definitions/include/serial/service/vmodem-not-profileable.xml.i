@@ -1,5 +1,5 @@
 <!-- include start from serial/service/vmodem-not-profileable.xml.i -->
-<node name="vmodem">
+<node name="virtual-modem">
   <properties>
     <help>Virtual Modem service settings</help>
   </properties>
