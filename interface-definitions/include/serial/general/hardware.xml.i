@@ -48,6 +48,12 @@
   </properties>
   <defaultValue>1</defaultValue>
 </leafNode>
+<leafNode name="discard-chars-rxd-with-errors">
+  <properties>
+    <help>Enable discard characters received with errors</help>
+    <valueless/>
+  </properties>
+</leafNode>
 <node name="protocol">
   <properties>
     <help>Serial protocol (required)</help>
@@ -147,12 +153,6 @@
         </leafNode>
       </children>
     </node>
-    <leafNode name="discard-chars-rxd-with-errors">
-      <properties>
-        <help>Enable discard characters received with errors</help>
-        <valueless/>
-      </properties>
-    </leafNode>
   </children>
 </node>
 <!-- include end -->
