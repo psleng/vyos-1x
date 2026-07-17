@@ -133,7 +133,7 @@
         <help>Modbus slave service settings</help>
       </properties>
       <children>
-        <tagNode name="remap">
+        <tagNode name="remap-uid">
           <properties>
             <help>Source master UID or UID range to remap from</help>
             <valueHelp>
