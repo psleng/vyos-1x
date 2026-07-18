@@ -50,6 +50,15 @@ class ModemManagerMonitor:
         self._name_owner_bus = None
         self._last_mm_owner = ''
         self._reconnect_lock = asyncio.Lock()
+        # G1 -- wedged-but-running MM detection.  `systemctl is-active` only
+        # proves the PROCESS is up; an MM whose D-Bus has gone unresponsive
+        # still reads 'active' yet answers no method calls, and is invisible
+        # everywhere except a CONNECTED interface's ping.  Probe MM's D-Bus
+        # each cycle; after this many CONSECUTIVE unanswered probes treat MM
+        # as wedged and drive the same recovery as a hard crash.  Conservative
+        # threshold -- a too-eager MM restart can cascade.
+        self._mm_dbus_miss_count = 0
+        self._mm_dbus_miss_threshold = 4
 
     async def monitor_modemmanager(self):
         """Monitor ModemManager and restart if it crashes"""
@@ -67,13 +76,45 @@ class ModemManagerMonitor:
                 )
 
                 if result.returncode != 0 or result.stdout.strip() != "active":
-                    logger.error("ModemManager has crashed or stopped!")
+                    logger.error("ModemManager has crashed or stopped "
+                                "(systemd reports inactive)")
+                    self._mm_dbus_miss_count = 0  # crash path owns recovery
                     await self.handle_modemmanager_crash()
-                else:
+                elif await self._probe_mm_dbus_responsive():
+                    # Process up AND answering D-Bus -- genuinely healthy.
+                    if self._mm_dbus_miss_count:
+                        logger.info(
+                            "ModemManager D-Bus responsive again after "
+                            "%d missed probe(s)", self._mm_dbus_miss_count,
+                            extra={'mm_dbus_miss_count':
+                                   self._mm_dbus_miss_count})
+                        self._mm_dbus_miss_count = 0
                     # Reset restart attempts if ModemManager is running fine
                     if self.restart_attempts > 0:
                         logger.info("ModemManager is stable again, resetting restart counter")
                         self.restart_attempts = 0
+                else:
+                    # Process is 'active' but did NOT answer D-Bus -- a wedged
+                    # MM looks exactly like this.  Count consecutive misses and
+                    # only escalate once we are confident (not a transient
+                    # blip / mid-restart).
+                    self._mm_dbus_miss_count += 1
+                    logger.warning(
+                        "ModemManager is 'active' but did not answer D-Bus "
+                        "(missed probe %d/%d) -- possible wedged ModemManager",
+                        self._mm_dbus_miss_count, self._mm_dbus_miss_threshold,
+                        extra={'mm_dbus_miss_count': self._mm_dbus_miss_count,
+                               'mm_dbus_miss_threshold':
+                                   self._mm_dbus_miss_threshold})
+                    if self._mm_dbus_miss_count >= self._mm_dbus_miss_threshold:
+                        logger.error(
+                            "ModemManager wedged: 'active' but unresponsive on "
+                            "D-Bus for %d consecutive probes -- forcing restart",
+                            self._mm_dbus_miss_count,
+                            extra={'mm_dbus_miss_count':
+                                   self._mm_dbus_miss_count})
+                        self._mm_dbus_miss_count = 0
+                        await self.handle_modemmanager_crash()
 
                 # Check every 10 seconds
                 await asyncio.sleep(10)
@@ -81,6 +122,32 @@ class ModemManagerMonitor:
             except Exception as e:
                 logger.error(f"Error monitoring ModemManager: {e}")
                 await asyncio.sleep(5)
+
+    async def _probe_mm_dbus_responsive(self, timeout: float = 8.0) -> bool:
+        """Bounded probe: does ModemManager actually answer on D-Bus?
+
+        A wedged-but-running MM passes `systemctl is-active` but never replies
+        to method calls.  One bounded GetManagedObjects on the service bus
+        tells us whether the D-Bus side is alive.  Returns True when we cannot
+        even attempt the probe yet (no bus during early startup / mid-restart)
+        so this never manufactures a false wedge.
+        """
+        bus = getattr(self.service_manager, 'bus', None)
+        if bus is None:
+            return True
+        try:
+            from dbus_next import Message  # pylint: disable=import-error
+            msg = Message(
+                destination="org.freedesktop.ModemManager1",
+                path="/org/freedesktop/ModemManager1",
+                interface="org.freedesktop.DBus.ObjectManager",
+                member="GetManagedObjects")
+            reply = await asyncio.wait_for(bus.call(msg), timeout=timeout)
+            return (reply is not None
+                    and reply.message_type.name == "METHOD_RETURN")
+        except Exception as e:
+            logger.debug(f"ModemManager D-Bus probe failed: {e}")
+            return False
 
     async def handle_modemmanager_crash(self):
         """Handle ModemManager crash by attempting to restart it"""
