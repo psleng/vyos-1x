@@ -2088,6 +2088,40 @@ class ModemStateMachine:
                     self.reset_grace_period_end = 0
 
                 self.handle_modem_event(state, None)
+
+                # GPIO-mux only: the SIM-detect watcher emits on absent->present
+                # EDGES and produces no initial-state event, so a SIM that was
+                # already inserted before the service (and its watcher) started
+                # generates no INSERTED event.  A hotswap-blind modem then sits
+                # here in FAILED/UNKNOWN with a SIM physically present and never
+                # enumerates it — the field symptom being that the card has to be
+                # ejected and re-inserted to produce a real edge.  Read the GPIO
+                # now and replay each present slot through the SAME entry point an
+                # edge uses, so a present-at-startup SIM is handled exactly like a
+                # fresh insertion.  _handle_sim_detect_insertion is self-guarded
+                # (reboots to enumerate only for the selected slot when not
+                # already connected and when a reset is allowed), and the reset
+                # cooldown prevents any double reset with the handling above.
+                # Gated to this FAILED/UNKNOWN branch so a normally-progressing
+                # modem is never rebooted at startup.
+                if getattr(self.sim_controller, 'is_gpio_mux', False):
+                    try:
+                        present = await self.sim_controller.present_slots()
+                        if present:
+                            logger.info(
+                                "GPIO-mux: SIM(s) already present at startup "
+                                "while modem FAILED/UNKNOWN — replaying as a "
+                                "synthesized insertion (no edge fires for a SIM "
+                                "inserted before the watcher started)",
+                                extra={'interface_number': self.interface_number,
+                                       'mm_state': state,
+                                       'present_slots': sorted(present)})
+                        for slot in sorted(present):
+                            self._on_sim_detect_event(slot, True)
+                    except Exception as e:
+                        logger.debug(
+                            f"GPIO-mux startup SIM-presence replay failed: {e}",
+                            extra={'interface_number': self.interface_number})
         except Exception as e:
             logger.debug(
                 f"Initial state dispatch failed: {e}",
@@ -13944,6 +13978,82 @@ class ModemStateMachine:
                           extra={'interface_number': self.interface_number})
         await self.initialize()
 
+    async def _reacquire_modem_proxy_for_shutdown(self):
+        """Re-bind to this FSM's OWN modem so shutdown() can tear it down.
+
+        shutdown()'s bearer-disconnect and Modem.Enable(false) are gated on
+        self.proxy.  self.proxy is cleared whenever a "modem removed" signal
+        fires or ModemManager restarts (see the on-removal / bus-update
+        paths) -- yet ModemManager can still have the modem CONNECTED and
+        REGISTERED at that instant.  If a `delete interfaces wwan wwanN`
+        lands in that window, shutdown would skip the entire teardown and
+        leave the modem online (mmcli still reports it connected + enabled).
+
+        This re-resolves OUR modem exactly the way the initial scan does: by
+        matching the ModemManager ``Device`` property (the udev-stamped
+        ID_MM_PHYSDEV_UID) against ``modem{N}``.  It is the FSM re-binding to
+        the modem it already owns -- NOT an out-of-band ModemManager poke --
+        so the normal single-owner disconnect+disable sequence still runs
+        through the FSM.
+
+        Best-effort and bounded: on any failure self.proxy stays None and the
+        caller simply finds nothing to disconnect.
+        """
+        if not self.bus:
+            return
+
+        target_uid = f"modem{self.interface_number}"
+
+        # Try the last-known path first, then fall back to a full enumeration
+        # (the object path may have changed across an MM re-enumeration).
+        candidate_paths = []
+        if self.modem_path:
+            candidate_paths.append(self.modem_path)
+        try:
+            msg = Message(
+                destination=MODEM_MANAGER_SERVICE,
+                path=MODEM_MANAGER_PATH,
+                interface=OBJECT_MANAGER_INTERFACE,
+                member="GetManagedObjects")
+            reply = await asyncio.wait_for(
+                self.bus.call(msg), timeout=self._shutdown_disconnect_timeout)
+            if reply.message_type.name == "METHOD_RETURN":
+                for path, interfaces in reply.body[0].items():
+                    if (MODEM_INTERFACE in interfaces
+                            and path not in candidate_paths):
+                        candidate_paths.append(path)
+        except Exception as e:
+            logger.debug(f"Shutdown proxy re-acquire enumerate failed: {e}",
+                        extra={'interface_number': self.interface_number})
+
+        for path in candidate_paths:
+            try:
+                introspect = await self.bus.introspect(
+                    MODEM_MANAGER_SERVICE, path)
+                proxy = self.bus.get_proxy_object(
+                    MODEM_MANAGER_SERVICE, path, introspect)
+                props = proxy.get_interface("org.freedesktop.DBus.Properties")
+                device_v = await asyncio.wait_for(
+                    props.call_get(MODEM_INTERFACE, "Device"),
+                    timeout=self._shutdown_disconnect_timeout)
+                if device_v.value == target_uid:
+                    self.proxy = proxy
+                    self.modem_path = path
+                    logger.info(
+                        "Re-bound to modem for graceful shutdown "
+                        "(proxy had been cleared while still connected)",
+                        extra={'interface_number': self.interface_number,
+                               'modem_path': path})
+                    return
+            except Exception as e:
+                logger.debug(f"Shutdown proxy re-acquire skip {path}: {e}",
+                            extra={'interface_number': self.interface_number})
+
+        logger.info(
+            "Shutdown proxy re-acquire: modem not present — nothing to disconnect",
+            extra={'interface_number': self.interface_number,
+                   'target_uid': target_uid})
+
     async def shutdown(self):
         """Graceful shutdown of the FSM.
 
@@ -14038,6 +14148,16 @@ class ModemStateMachine:
                 and not self._band_clear_reassert_task.done()):
             self._band_clear_reassert_task.cancel()
             self._band_clear_reassert_task = None
+
+        # The bearer-disconnect and Modem.Enable(false) below are BOTH gated
+        # on self.proxy.  If a transient "modem removed" signal or a
+        # ModemManager restart cleared self.proxy while MM still has the modem
+        # CONNECTED, we would otherwise skip the entire teardown and leave the
+        # modem online + registered after delete.  Re-bind to our OWN modem
+        # first (by the same Device==modem{N} identity the scan uses) so the
+        # FSM can finish its own graceful shutdown.
+        if not self.proxy:
+            await self._reacquire_modem_proxy_for_shutdown()
 
         # Force-disconnect the bearer unconditionally — do NOT gate on
         # current_state, because the FSM's internal state may lag the
@@ -14227,6 +14347,8 @@ class ModemStateMachine:
             sysctl restores, netlink watcher tasks)
           * FSM-owned mangle/FORWARD TCPMSS clamp rules (v4 + v6)
           * Sets the wwanN link DOWN so no stale IPs linger
+          * Turns the modem STAT LED OFF so no stale green/signal bars
+            remain after the interface is deleted or disabled
         """
         interface_name = f"wwan{self.interface_number}"
 
@@ -14268,6 +14390,20 @@ class ModemStateMachine:
             await self._set_interface_down()
         except Exception as e:
             logger.warning(f"Set interface down failed: {e}",
+                          extra={'interface_number': self.interface_number})
+
+        # Turn the modem STAT LED OFF.  The signal-strength poll task (the
+        # only thing that lights the LED) was already cancelled by the caller
+        # via _stop_network_interface_monitoring(), so the LED is frozen at
+        # its last value and would otherwise stay lit green after the
+        # interface is deleted / disabled.  Clearing it at this shared
+        # teardown chokepoint gives the operator the correct "no connection"
+        # reading; on the modem-restart caller it simply relights once the
+        # session reconnects.
+        try:
+            await self._clear_signal_led(reason="downstream_teardown")
+        except Exception as e:
+            logger.warning(f"Signal LED clear during teardown failed: {e}",
                           extra={'interface_number': self.interface_number})
 
     async def _enter_airplane_mode(self):
