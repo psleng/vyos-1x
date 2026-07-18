@@ -385,6 +385,11 @@ class ModemStateMachine:
         self._bearer_disconnect_timer = None
         self._registration_debounce_timer = None
         self._ip_monitoring_task = None
+        # Handle for the on-demand ENTER_IDLE bearer-teardown task so a
+        # superseding CONNECT (rapid disconnect->connect stacking) can cancel
+        # it before its unconditional Simple.Disconnect('/') sweep tears down
+        # a bearer the user has meanwhile asked to bring back up.
+        self._ondemand_disconnect_task = None
         self._signal_poll_task = None
         self.usage_monitor_task = None
         # Egress-filter / MSS-clamp state also referenced during teardown
@@ -2792,6 +2797,23 @@ class ModemStateMachine:
                 logger.info("Already in CONNECTED state - connection stable",
                            extra={'interface_number': self.interface_number})
 
+            elif current_fsm_state == ModemState.DISCONNECTING.value:
+                # Reconcile: FSM is DISCONNECTING but MM re-affirms CONNECTED.
+                # A stale/racy bearer-down event fired DISCONNECT during a fast
+                # disconnect->reconnect cycle while the bearer was actually up.
+                # Without this the FSM is stranded in DISCONNECTING -- MM stays
+                # at 11, so no REGISTERED signal arrives to re-kick recovery and
+                # get_bearer_status never reports "connected" again.  Honor an
+                # explicit user disconnect (do not resurrect the bearer).
+                if not self.user_disconnected:
+                    logger.warning(
+                        "Modem CONNECTED while FSM DISCONNECTING -- reconciling "
+                        "back to CONNECTED (stale/racy disconnect)",
+                        extra={'interface_number': self.interface_number})
+                    self.transition(ModemEvent.CONNECTED)
+                    self._safe_create_task(
+                        self._finalize_connected_from_signal())
+
 
         elif mm_state in [-1, 0]:  # FAILED or UNKNOWN
             # Don't trigger anything if this is service-initiated or we're in
@@ -2887,9 +2909,14 @@ class ModemStateMachine:
                 # (get_bearer_status -> "disconnected") while the real bearer
                 # stayed up — mmcli still shows connected and traffic still
                 # flows.  Scheduling the async teardown keeps FSM state and
-                # the live modem in sync.
+                # the live modem in sync.  Keep the task handle so a
+                # superseding CONNECT (rapid disconnect->connect stacking) can
+                # cancel this teardown before its unconditional
+                # Simple.Disconnect('/') sweep drops a bearer the user has
+                # meanwhile asked to bring back up.
                 try:
-                    self._safe_create_task(self._disconnect_bearer())
+                    self._ondemand_disconnect_task = self._safe_create_task(
+                        self._disconnect_bearer())
                 except RuntimeError:
                     # No event loop running (e.g., during tests) - ignore
                     pass
@@ -2908,6 +2935,21 @@ class ModemStateMachine:
                 self.user_disconnected = False
             # Clear queued connect flag — we're executing it now
             self.connect_requested = False
+            # Latest intent wins: a CONNECT supersedes any in-flight on-demand
+            # ENTER_IDLE bearer teardown.  Cancel it so its unconditional
+            # Simple.Disconnect('/') sweep cannot race apply_modem_configuration
+            # and tear down the bearer we are about to (re)establish — the
+            # rapid disconnect->connect stacking hazard.  If the teardown has
+            # already finished this is a harmless no-op and the connect
+            # re-establishes the bearer normally.
+            if (self._ondemand_disconnect_task
+                    and not self._ondemand_disconnect_task.done()):
+                self._ondemand_disconnect_task.cancel()
+                logger.info(
+                    "Cancelled in-flight on-demand disconnect — superseded by "
+                    "CONNECT (rapid disconnect->connect)",
+                    extra={'interface_number': self.interface_number})
+            self._ondemand_disconnect_task = None
 
         # Call original transition logic
         try:
@@ -2943,6 +2985,16 @@ class ModemStateMachine:
                 self._safe_create_task(
                     self._clear_signal_led(reason=f"fsm_state:{new_state}")
                 )
+
+            # Reaching CONNECTED cancels any stale bearer-disconnect debounce
+            # timer left over from a previous cycle.  In a fast dial-on-demand
+            # disconnect->reconnect the timer armed by the disconnect could
+            # otherwise fire AFTER we are connected again and spuriously drive
+            # the FSM into DISCONNECTING while the bearer is actually up
+            # (get_bearer_status then never reports "connected" again).
+            if (new_state == ModemState.CONNECTED.value
+                    and old_state != ModemState.CONNECTED.value):
+                self._cancel_disconnect_timer()
 
             # Log detailed failure info when entering FAILED state
             if new_state == ModemState.FAILED.value and old_state != ModemState.FAILED.value:
@@ -14602,6 +14654,23 @@ class ModemStateMachine:
                             # Restore bearer path so signal monitoring
                             # and IP config continue to work.
                             self.bearer_path = saved_bearer_path
+
+                            # Reconcile FSM state with reality.  We reached
+                            # here from DISCONNECTING (a stale/racy bearer-down
+                            # that fired DISCONNECT during a fast
+                            # disconnect->reconnect cycle) but the bearer is in
+                            # fact up.  Returning while still in DISCONNECTING
+                            # strands the FSM there forever: MM stays at 11 so
+                            # no later REGISTERED signal re-kicks recovery, and
+                            # get_bearer_status never reports "connected" again.
+                            # Drive the FSM back to CONNECTED and restore the
+                            # connected-state monitoring the disconnect tore
+                            # down.
+                            if (self.machine.current_state
+                                    == ModemState.DISCONNECTING.value):
+                                self.transition(ModemEvent.CONNECTED)
+                                self._safe_create_task(
+                                    self._finalize_connected_from_signal())
                             return
 
                         # Bearer is disconnected but MM still reports

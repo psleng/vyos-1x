@@ -1850,10 +1850,17 @@ class InterfaceConfig(ServiceInterface):
                 ModemState.CONNECTED.value,
             }
             status = "connected" if current_state in bearer_up_states else "disconnected"
-            logger.info("Bearer status polled",
-                       extra={'interface_number': self.interface_number,
-                              'bearer_status': status,
-                              'fsm_state': current_state})
+            # DEBUG, not INFO: this is a hot poll path — dial-on-demand callers
+            # (and is_connected(), which routes through here) can call it many
+            # times per second.  At INFO every poll writes a journald record on
+            # the FSM's single asyncio event loop; under constant polling that
+            # synchronous log I/O floods the journal and delays MM signal
+            # handlers / timers, widening the very race windows that can strand
+            # the FSM in DISCONNECTING.  Keep the poll cheap.
+            logger.debug("Bearer status polled",
+                        extra={'interface_number': self.interface_number,
+                               'bearer_status': status,
+                               'fsm_state': current_state})
             return status
         except Exception as e:
             logger.error("Bearer status check failed",

@@ -113,6 +113,7 @@ class StateTransitionManager:
                 StateTransition("CONNECTED", "DISCONNECTING", "DISCONNECT", "User or system disconnect"),
                 StateTransition("USAGE_MONITORING", "DISCONNECTING", "DISCONNECT", "Disconnect from monitoring"),
                 StateTransition("DISCONNECTING", "DISCONNECTED", "DISCONNECTED", "Disconnection completed"),
+                StateTransition("DISCONNECTING", "CONNECTED", "CONNECTED", "Reconcile: bearer verified still up (stale/racy disconnect)"),
                 StateTransition("DISCONNECTING", "CONFIGURING", "CONFIG_UPDATE", "Recovery: reconfigure after bearer loss"),
                 StateTransition("CONNECTED", "REGISTERED_IDLE", "ENTER_IDLE", "On-demand disconnect: drop bearer, keep registration"),
                 StateTransition("USAGE_MONITORING", "REGISTERED_IDLE", "ENTER_IDLE", "On-demand disconnect from monitoring"),
