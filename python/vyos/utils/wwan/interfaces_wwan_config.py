@@ -1848,6 +1848,7 @@ class InterfaceConfig(ServiceInterface):
             )
             bearer_up_states = {
                 ModemState.CONNECTED.value,
+                ModemState.USAGE_MONITORING.value,
             }
             status = "connected" if current_state in bearer_up_states else "disconnected"
             # DEBUG, not INFO: this is a hot poll path — dial-on-demand callers

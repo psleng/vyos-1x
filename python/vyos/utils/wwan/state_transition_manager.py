@@ -102,6 +102,7 @@ class StateTransitionManager:
                 StateTransition("CONNECTING", "CONNECTED", "CONNECTED", "Connection established successfully"),
                 StateTransition("CONNECTED", "USAGE_MONITORING", "START_USAGE_MONITORING", "Start data usage monitoring"),
                 StateTransition("REGISTERED_IDLE", "CONNECTING", "CONNECT", "D-Bus connect from on-demand idle"),
+                StateTransition("DISCONNECTED", "CONNECTING", "CONNECT", "Watchdog reconnect from registered-but-disconnected state"),
                 # Watchdog reconcile: MM reports the bearer already up while the
                 # FSM is parked idle / disconnected (a missed CONNECTED signal
                 # or an out-of-band bearer).  Re-sync straight to CONNECTED
