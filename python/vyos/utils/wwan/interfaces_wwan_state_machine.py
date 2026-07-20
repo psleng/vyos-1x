@@ -677,29 +677,21 @@ class ModemStateMachine:
         self._band_clear_reassert_task = None
         self._in_band_clear_reassert = False
 
-        # Active-SIM removal watchdog (GPIO-mux).  When the active slot's SIM is
-        # physically pulled, the GPIO SIM_DETECT edge is authoritative, so we
-        # start the orderly failover immediately (the executor disconnects and
-        # disables the current SIM before switching).  We do NOT wait for the
-        # modem to drift into FAILED — some modems (e.g. Telit LE910C4) cache
-        # the SIM session and only drop to SEARCHING, which never triggers
-        # failover.  This watchdog is the bounded backstop: if the proactive
-        # failover did not take and the modem has not returned to CONNECTED with
-        # the slot still empty after the grace window, it forces the failover.
+        # Active-SIM removal confirmation (GPIO-mux).  A SIM_DETECT edge is a
+        # hardware indication, not proof that the card was physically pulled:
+        # contact noise, a pull-up/IO-rail transient, or a stale edge can all
+        # momentarily report absent while the modem still uses the SIM.  Treat
+        # the edge as provisional and require the slot to remain absent for the
+        # full grace window before starting orderly failover.  We still cannot
+        # wait indefinitely for ModemManager to reach FAILED — some modems
+        # cache the SIM session and remain CONNECTED/SEARCHING after removal.
         self._active_sim_removal_watchdog_task = None
-        self._active_sim_removal_grace_seconds = 30
-        # "Nasty user" rate-limit for the active-SIM removal trigger.  The
-        # failover cooldown (_is_failover_allowed) only advances when a failover
-        # actually FIRES — but on a single-SIM box (no present alternate) the
-        # executor returns "no alternative SIM" *before* recording anything, so
-        # a user rapidly yanking the only card (slower than the 750 ms GPIO
-        # coalesce window, so each cycle survives) would re-run the executor on
-        # every pull.  This debounce gates the active-removal trigger itself:
-        # ignore a fresh attempt if one fired within the window, regardless of
-        # outcome.  Independent of (and additional to) the real failover
-        # cooldown, scoped only to this GPIO removal path.
-        self._last_active_sim_removal_attempt_ts = 0.0
-        self._active_sim_removal_debounce_seconds = 10
+        self._active_sim_removal_watchdog_slot = None
+        # The GPIO layer already applies 20 ms hardware debounce, a 750 ms
+        # settle window, a final physical-level read, and 250 ms verification
+        # polling.  Two additional seconds confirms sustained absence without
+        # turning a real SIM failover into a 30-second outage.
+        self._active_sim_removal_grace_seconds = 2
 
         # FAILED-state investigation debounce — the same pre-existing FAILED
         # condition can be observed by two independent startup paths:
@@ -2613,10 +2605,6 @@ class ModemStateMachine:
         self._record_bearer_up('modem_state_connected')
         self._ensure_usage_monitoring_started('handle_modem_event')
 
-        # Connection is stable — stand down any pending active-SIM removal
-        # watchdog (the modem recovered on its own).
-        self._cancel_active_sim_removal_watchdog()
-
         # Start connectivity monitoring (ping tests) if configured
         self._safe_create_task(self.start_connectivity_monitoring())
 
@@ -3248,6 +3236,7 @@ class ModemStateMachine:
                 self._previous_config = self.config.copy()
             self.config = config
             self._admin_disabled = True
+            self._cancel_active_sim_removal_watchdog()
             if not was_disabled:
                 logger.info("Interface administratively disabled",
                            extra={'interface_number': self.interface_number})
@@ -7412,48 +7401,52 @@ class ModemStateMachine:
         model is already updated by the watcher; this only decides whether
         any action is warranted.
 
-        Policy (GPIO-mux):
-          * REMOVED — record only.  We do NOT proactively act: the modem
-            tears the network down in its own orderly way and we evaluate
-            failover once it actually reaches FAILED.
+                Policy (GPIO-mux):
+                    * REMOVED — treat as provisional and arm a sustained-absence
+                        confirmation.  One edge never proves physical removal.
           * INSERTED — a SIM became active in the live path or a primary
             returned; hand off to the async insertion handler.
         """
         try:
             if not self.sim_controller.is_gpio_mux:
                 return
+            if getattr(self, '_admin_disabled', False):
+                logger.debug(
+                    "SIM_DETECT event recorded but ignored while interface "
+                    "is administratively disabled",
+                    extra={'interface_number': self.interface_number,
+                           'slot': slot, 'present': present})
+                return
             if not present:
                 selected = (self.current_active_sim
                             or (self.config or {}).get('primary_sim_slot', 1))
                 if slot == selected:
-                    # The ACTIVE SIM was physically pulled.  GPIO SIM_DETECT is
-                    # authoritative — we already know the modem will lose this
-                    # SIM, so there is no reason to wait for it to drift into
-                    # FAILED first (some modems, e.g. Telit LE910C4, cache the
-                    # session and only drop to SEARCHING, which never triggers
-                    # failover).  Proactively start the orderly failover now:
-                    # the executor performs the graceful teardown of the
-                    # current SIM (disconnect → disable) before switching the
-                    # mux and bringing up the alternate.  The bounded watchdog
-                    # is still armed as a backstop in case this proactive
-                    # attempt is gated (e.g. a switch already in progress).
-                    logger.info("SIM_DETECT removed on active slot — starting "
-                                "orderly failover immediately",
-                                extra={'interface_number': self.interface_number,
-                                       'slot': slot})
+                    # Do not equate one GPIO indication with a physical pull.
+                    # Confirm sustained absence first; insertion cancels this
+                    # task immediately.  If the line stays absent for the full
+                    # window, the confirmation task runs the normal orderly
+                    # failover even if modem firmware cached the old SIM.
+                    logger.warning(
+                        "SIM_DETECT reports active slot %d absent — waiting "
+                        "%ds for sustained-removal confirmation",
+                        slot, self._active_sim_removal_grace_seconds,
+                        extra={'interface_number': self.interface_number,
+                               'slot': slot,
+                               'confirmation_seconds':
+                                   self._active_sim_removal_grace_seconds})
                     self._arm_active_sim_removal_watchdog(slot)
-                    self._safe_create_task(
-                        self._handle_active_sim_removal(slot),
-                        name='active_sim_removal_failover')
                 else:
                     logger.info("SIM_DETECT removed on non-active slot — "
                                 "recorded; no action",
                                 extra={'interface_number': self.interface_number,
                                        'slot': slot})
                 return
-            # A SIM came back — cancel any pending removal watchdog before
-            # handling the insertion.
-            self._cancel_active_sim_removal_watchdog()
+            # Cancel absence confirmation only when the SAME active slot came
+            # back.  Inserting an alternate SIM while the active slot remains
+            # absent must leave confirmation armed so it can fail over to the
+            # newly available card when the grace window expires.
+            if slot == self._active_sim_removal_watchdog_slot:
+                self._cancel_active_sim_removal_watchdog()
             self._safe_create_task(
                 self._handle_sim_detect_insertion(slot),
                 name='sim_detect_insertion')
@@ -7462,108 +7455,10 @@ class ModemStateMachine:
                         extra={'interface_number': self.interface_number,
                                'slot': slot})
 
-    async def _handle_active_sim_removal(self, slot: int):
-        """Proactively fail over when the active slot's SIM is pulled.
-
-        Fired immediately from ``_on_sim_detect_event`` on a GPIO SIM_DETECT
-        *removal* of the active slot.  Cancels the failed-state retry (a SIM
-        event supersedes it) and runs the standard missing-SIM failover, which
-        gracefully tears down the current SIM before switching to the
-        alternate.  Self-gates: the executor skips when no present alternate
-        exists or a switch is already in progress, so this is safe to call
-        unconditionally.  The watchdog remains armed as a backstop.
-
-        Rate-limited by ``_active_sim_removal_debounce_seconds`` so a user
-        rapidly cycling the SIM tray cannot spin the failover executor on every
-        pull (the real failover cooldown does not advance when there is no
-        present alternate to switch to).
-        """
-        try:
-            if self._sim_switch_in_progress or self._sim_failover_in_progress:
-                logger.debug("Active-SIM removal: switch/failover already in "
-                            "progress — deferring to it",
-                            extra={'interface_number': self.interface_number,
-                                   'slot': slot})
-                return
-
-            # Nasty-user debounce: collapse a rapid eject/insert/eject burst
-            # into at most one failover attempt per debounce window.
-            now = time.time()
-            since_last = now - self._last_active_sim_removal_attempt_ts
-            if since_last < self._active_sim_removal_debounce_seconds:
-                logger.info("Active-SIM removal ignored — within debounce window "
-                           "(rapid SIM cycling)",
-                           extra={'interface_number': self.interface_number,
-                                  'slot': slot,
-                                  'since_last_seconds': round(since_last, 1),
-                                  'debounce_seconds':
-                                      self._active_sim_removal_debounce_seconds})
-                return
-            self._last_active_sim_removal_attempt_ts = now
-
-            self._cancel_failed_retry()  # SIM event supersedes retry
-            await self._handle_sim_missing_failover()
-        except Exception as e:
-            logger.error(f"Active-SIM removal failover error: {e}",
-                        extra={'interface_number': self.interface_number,
-                               'slot': slot})
-
-    async def _check_active_sim_removal(self) -> bool:
-        """Polling safety net: catch an active-SIM removal the edge watcher missed.
-
-        The GPIO SIM_DETECT *edge* watcher (``_on_sim_detect_event``) is the
-        primary, instant trigger for active-SIM removal.  This is the polling
-        counterpart of ``_check_sim_insertion``: a dropped/coalesced edge (e.g.
-        a very fast eject, or a watcher hiccup) could leave the presence model
-        showing the active slot empty without the proactive failover ever
-        having fired.  Called once per signal-monitor iteration while CONNECTED,
-        it re-checks GPIO presence and, if the active slot is reliably empty,
-        starts the same orderly failover.  Self-gating + idempotent: returns
-        early when a switch/failover is already running, and the failover
-        executor is itself reentrancy-guarded, so repeated calls are harmless.
-
-        Returns True when it initiated a failover, else False.
-        """
-        try:
-            if not self.sim_controller.is_gpio_mux:
-                return False
-            if self._sim_switch_in_progress or self._sim_failover_in_progress:
-                return False
-            # An active-SIM removal watchdog already armed means the edge path
-            # fired — let it / the proactive failover run; don't double up.
-            if (self._active_sim_removal_watchdog_task is not None
-                    and not self._active_sim_removal_watchdog_task.done()):
-                return False
-
-            active = (self.current_active_sim
-                      or (self.config or {}).get('primary_sim_slot', 1))
-
-            # Only act on a TRUSTWORTHY "empty" reading: presence must be known
-            # for the active slot and the model reliable, otherwise a transient
-            # GPIO read glitch could masquerade as a removal.
-            if not self.sim_controller.has_reliable_presence():
-                return False
-            if not self.sim_controller.slot_presence_known(active):
-                return False
-            if await self.sim_controller.is_present(active):
-                return False
-
-            logger.warning("Active SIM detected absent by polling safety net "
-                          "(missed SIM_DETECT edge) — starting orderly failover",
-                          extra={'interface_number': self.interface_number,
-                                 'slot': active,
-                                 'fsm_state': self.machine.current_state})
-            self._arm_active_sim_removal_watchdog(active)
-            await self._handle_active_sim_removal(active)
-            return True
-        except Exception as e:
-            logger.debug(f"Active-SIM removal poll error: {e}",
-                        extra={'interface_number': self.interface_number})
-            return False
-
     def _arm_active_sim_removal_watchdog(self, slot: int):
-        """Arm (or re-arm) the bounded active-SIM removal failover watchdog."""
+        """Arm (or re-arm) sustained active-SIM absence confirmation."""
         self._cancel_active_sim_removal_watchdog()
+        self._active_sim_removal_watchdog_slot = slot
         self._active_sim_removal_watchdog_task = self._safe_create_task(
             self._active_sim_removal_failover_watchdog(slot),
             name='active_sim_removal_watchdog')
@@ -7571,23 +7466,29 @@ class ModemStateMachine:
     def _cancel_active_sim_removal_watchdog(self):
         """Cancel a pending active-SIM removal watchdog (if any)."""
         task = self._active_sim_removal_watchdog_task
-        if task and not task.done():
+        try:
+            current = asyncio.current_task()
+        except RuntimeError:
+            current = None
+        # A confirmed-removal task can trigger a state transition whose
+        # teardown calls this method.  Never make that task cancel itself in
+        # the middle of the failover it just started.
+        if task and task is not current and not task.done():
             task.cancel()
         self._active_sim_removal_watchdog_task = None
+        self._active_sim_removal_watchdog_slot = None
 
     async def _active_sim_removal_failover_watchdog(self, slot: int):
-        """Backstop failover when the active SIM is pulled but nothing recovers.
+        """Confirm sustained active-SIM absence before failover.
 
-        Armed from ``_on_sim_detect_event`` on a GPIO SIM_DETECT *removal* of
-        the active slot, alongside the immediate proactive failover.  GPIO
-        presence is authoritative, so if after a short grace window the modem
-        has not recovered to CONNECTED and the proactive failover did not take
-        (e.g. it was gated by a switch that was already in progress and then
-        aborted), and the slot is still empty, we run the standard missing-SIM
-        failover instead of letting the modem re-scan the absent SIM
-        indefinitely.
+        A falling detect edge alone can be noise or a supply transient.  Only
+        if the final-sampled presence model remains absent for the full grace
+        window do we run the normal missing-SIM failover.  Modem CONNECTED is
+        useful diagnostic context but not a veto after sustained absence:
+        Telit firmware may cache a removed SIM and stay connected/searching.
         """
         grace = max(1, int(self._active_sim_removal_grace_seconds))
+        this_task = asyncio.current_task()
         try:
             await asyncio.sleep(grace)
 
@@ -7595,36 +7496,46 @@ class ModemStateMachine:
             if self._sim_switch_in_progress or self._sim_failover_in_progress:
                 return
 
-            # The modem recovered on its own (SIM reinserted, transient glitch).
-            if self.machine.current_state in (ModemState.CONNECTED.value,
-                                              ModemState.USAGE_MONITORING.value):
-                logger.debug("Active-SIM removal watchdog: modem recovered to "
-                            "CONNECTED — no failover needed",
-                            extra={'interface_number': self.interface_number,
-                                   'slot': slot})
+            selected = (self.current_active_sim
+                        or (self.config or {}).get('primary_sim_slot', 1))
+            if slot != selected:
+                logger.debug(
+                    "SIM_DETECT removal confirmation obsolete — active slot "
+                    "changed from %d to %d",
+                    slot, selected,
+                    extra={'interface_number': self.interface_number,
+                           'slot': slot, 'active_slot': selected})
                 return
 
-            # GPIO is authoritative: if the SIM is physically back, stand down.
+            # A return edge updates the final-sampled presence model and also
+            # cancels this task.  Re-check anyway to close the expiry race.
             if await self.sim_controller.is_present(slot):
-                logger.debug("Active-SIM removal watchdog: SIM present again — "
-                            "no failover needed",
-                            extra={'interface_number': self.interface_number,
-                                   'slot': slot})
+                logger.info(
+                    "SIM_DETECT active-slot absence cleared within %ds — "
+                    "ignoring transient removal indication",
+                    grace,
+                    extra={'interface_number': self.interface_number,
+                           'slot': slot, 'confirmation_seconds': grace})
                 return
 
-            logger.warning("Active SIM physically removed and modem did not "
-                          "reach FAILED within grace window — forcing "
-                          "missing-SIM failover evaluation",
-                          extra={'interface_number': self.interface_number,
-                                 'slot': slot,
-                                 'grace_seconds': grace,
-                                 'fsm_state': self.machine.current_state})
+            logger.warning(
+                "SIM_DETECT active slot %d remained absent for %ds — "
+                "confirmed removal; starting orderly failover evaluation "
+                "(modem state=%s)",
+                slot, grace, self.machine.current_state,
+                extra={'interface_number': self.interface_number,
+                       'slot': slot, 'confirmation_seconds': grace,
+                       'fsm_state': self.machine.current_state})
             self._cancel_failed_retry()  # SIM event supersedes retry
             await self._handle_sim_missing_failover()
         except asyncio.CancelledError:
             raise
         finally:
-            self._active_sim_removal_watchdog_task = None
+            # Do not erase a newer confirmation task that may have been armed
+            # after an insert/remove cycle while this one was unwinding.
+            if self._active_sim_removal_watchdog_task is this_task:
+                self._active_sim_removal_watchdog_task = None
+                self._active_sim_removal_watchdog_slot = None
 
     async def _handle_sim_detect_insertion(self, slot: int):
         """React to a SIM being inserted (GPIO-mux), per the design model.
@@ -12802,16 +12713,6 @@ class ModemStateMachine:
                         await self.signal_tracker.update(
                             signal_dbm, signal_detail or {})
 
-                    # Polling safety net: catch an active-SIM removal that the
-                    # GPIO SIM_DETECT edge watcher may have missed (fast eject /
-                    # coalesced edge).  Runs before the signal-loss evaluation
-                    # so a yanked SIM fails over immediately rather than waiting
-                    # for the weak-signal window.
-                    if await self._check_active_sim_removal():
-                        # Failover initiated — stop polling this (now stale)
-                        # session; monitoring restarts on the next CONNECTED.
-                        return
-
                     # Signal-loss SIM failover evaluation
                     await self._evaluate_signal_loss_failover(
                         signal_dbm, signal_detail)
@@ -13945,8 +13846,12 @@ class ModemStateMachine:
 
                 # Physical SIM identity — start from cache, refresh from D-Bus
                 cached = self.sim_slot_info_cache.get(slot_num, {})
-                # SIM presence source of truth: on GPIO-mux boards the board
-                # SIM_DETECT lines are authoritative.  ModemManager only ever
+                # Physical-presence indication: on GPIO-mux boards the board
+                # SIM_DETECT lines are the only view of the inactive slot.
+                # They are final-sampled and debounced, but remain a hardware
+                # indication rather than infallible truth (contact/rail noise
+                # can temporarily disagree with a live active SIM).
+                # ModemManager only ever
                 # sees the currently-muxed slot, and on modems with a SIMDET
                 # quirk (e.g. Telit LE910C4) it can report the active card as
                 # "missing" while its identity is still readable — so MM must
@@ -14347,6 +14252,8 @@ class ModemStateMachine:
                            'task_attr': task_attr, 'reason': reason})
             if task is not current:
                 setattr(self, task_attr, None)
+                if task_attr == '_active_sim_removal_watchdog_task':
+                    self._active_sim_removal_watchdog_slot = None
 
         if not cancelled:
             return
