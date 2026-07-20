@@ -380,6 +380,7 @@ def set_current_default(version_name: str, root_dir: str = '') -> None:
     vars_file = f'{root_dir}/{CFG_VYOS_VARS}'
     vars_current = vars_read(vars_file)
     vars_current['current'] = gen_version_uuid(version_name)
+    vars_current['default'] = gen_version_uuid(version_name)
     vars_write(vars_file, vars_current)
 
 def set_factory_default(version_name: str, root_dir: str = '') -> None:
