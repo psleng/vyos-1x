@@ -120,6 +120,9 @@ def verify(https):
     # check if /etc/nginx/saml.conf exists
     https['saml_conf_exist'] = os.path.exists('/etc/nginx/saml.conf')
 
+    # check if /etc/nginx/cloud.conf exists
+    https['cloud_conf_exist'] = os.path.exists('/etc/nginx/cloud.conf')
+
     # Check if server port is already in use by a different application
     listen_address = ['0.0.0.0']
     port = int(https['port'])
