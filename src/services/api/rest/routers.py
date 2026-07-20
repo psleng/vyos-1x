@@ -28,6 +28,7 @@ from threading import Lock
 from typing import Union
 from typing import Callable
 from typing import TYPE_CHECKING
+from urllib.parse import quote
 
 from fastapi import Depends
 from fastapi import Query
@@ -990,9 +991,6 @@ async def auth_op(data: AuthModel):
     op = data.op
     service = data.service
 
-    if service != 'saml':
-        return error(400, f"'{service}' is not a supported auth service")
-
     state = SessionState()
     session = state.session
     env = session.get_session_env()
@@ -1004,44 +1002,82 @@ async def auth_op(data: AuthModel):
     finally:
         lock.release()
 
-    base_url = f'https://127.0.0.1:{port}/sso/saml/v2'
+    if service == 'saml':
+        base_url = f'https://127.0.0.1:{port}/sso/saml/v2'
 
-    try:
-        if op == 'login':
-            payload = {'hostname': data.hostname, 'relay_state': data.relay_state or ''}
-            req = await run_in_threadpool(
-                requests.post,
-                f'{base_url}/login/web',
-                json=payload,
-                timeout=10,
-                verify=False,
-            )
-            req.raise_for_status()
-            return success(req.json().get('data'))
-        elif op == 'validate':
-            payload = {'session': data.session, 'secrete': data.secret}
-            req = await run_in_threadpool(
-                requests.post,
-                f'{base_url}/validate',
-                json=payload,
-                timeout=10,
-                verify=False,
-            )
-            req.raise_for_status()
-            return success(req.json().get('data'))
-        else:
-            return error(400, f"'{op}' is not a valid operation")
-    except requests.exceptions.Timeout:
-        return error(500, 'SAML SP timed out')
-    except requests.exceptions.HTTPError as e:
         try:
-            detail = e.response.json().get('data', {}).get('error', str(e))
+            if op == 'login':
+                payload = {
+                    'hostname': data.hostname,
+                    'relay_state': data.relay_state or '',
+                }
+                req = await run_in_threadpool(
+                    requests.post,
+                    f'{base_url}/login/web',
+                    json=payload,
+                    timeout=10,
+                    verify=False,
+                )
+                req.raise_for_status()
+                return success(req.json().get('data'))
+            elif op == 'validate':
+                payload = {'session': data.session, 'secrete': data.secret}
+                req = await run_in_threadpool(
+                    requests.post,
+                    f'{base_url}/validate',
+                    json=payload,
+                    timeout=10,
+                    verify=False,
+                )
+                req.raise_for_status()
+                return success(req.json().get('data'))
+            else:
+                return error(400, f"'{op}' is not a valid operation")
+        except requests.exceptions.Timeout:
+            return error(500, 'SAML SP timed out')
+        except requests.exceptions.HTTPError as e:
+            try:
+                detail = e.response.json().get('data', {}).get('error', str(e))
+            except Exception:
+                detail = str(e)
+            return error(502, f'SAML SP: {detail}')
         except Exception:
-            detail = str(e)
-        return error(502, f'SAML SP: {detail}')
-    except Exception:
-        LOG.critical(traceback.format_exc())
-        return error(500, 'An internal error occurred. Check the logs for details.')
+            LOG.critical(traceback.format_exc())
+            return error(500, 'An internal error occurred. Check the logs for details.')
+    elif service == 'cloud':
+        base_url = f'https://127.0.0.1:{port}/perlecloud'
+
+        try:
+            if op == 'jwks':
+                req = await run_in_threadpool(
+                    requests.get,
+                    f'{base_url}/.well-known/jwks.json',
+                    timeout=10,
+                    verify=False,
+                )
+                req.raise_for_status()
+                return success(req.json())
+            elif op == 'validate':
+                sid = quote(data.sid or '', safe='')
+                req = await run_in_threadpool(
+                    requests.get,
+                    f'{base_url}/sessions/{sid}',
+                    timeout=10,
+                    verify=False,
+                )
+                req.raise_for_status()
+                return success(req.json().get('active', False))
+            else:
+                return error(400, f"'{op}' is not a valid operation")
+        except requests.exceptions.Timeout:
+            return error(500, 'PerleCLOUD authentication API timed out')
+        except requests.exceptions.HTTPError as e:
+            return error(502, f'PerleCLOUD authentication API: {e}')
+        except Exception:
+            LOG.critical(traceback.format_exc())
+            return error(500, 'An internal error occurred. Check the logs for details.')
+    else:
+        return error(400, f"'{service}' is not a supported auth service")
 
 
 def rest_init(app: 'FastAPI'):
