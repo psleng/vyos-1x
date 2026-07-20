@@ -367,6 +367,10 @@ Depends:
 # For web interface
   flask-react-web,
 # End web interface
+# For email client 
+  msmtp,
+  msmtp-mta,
+# End  email client
 ## End Configuration mode
 ## Operational mode
 # Used for hypervisor model in "run show version"

@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<interfaceDefinition>
+  <node name="generate">
+    <children>
+      <node name="test-email">
+        <properties>
+          <help>Send a system test notification email to all enabled recipients</help>
+        </properties>
+        <!-- Pathway A: Executed when user hits enter right at 'generate test-email' -->
+        <command>${vyos_op_scripts_dir}/generate_test_email.py</command>
+        <children>
+          <tagNode name="message">
+            <properties>
+              <help>Optional custom email message text sentence</help>
+            </properties>
+            <!-- Pathway B: Executed when user appends custom single/double quoted text, { } are needed -->
+            <command>${vyos_op_scripts_dir}/generate_test_email.py "${4}"</command>
+          </tagNode>
+        </children>
+      </node>
+    </children>
+  </node>
+</interfaceDefinition>
+
