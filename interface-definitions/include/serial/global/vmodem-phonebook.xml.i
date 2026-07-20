@@ -1,7 +1,7 @@
 <!-- include start from serial/global/vmodem-phonebook.xml.i -->
-<node name="vmodem">
+<node name="virtual-modem">
   <properties>
-    <help>Phone number to host mapping</help>
+    <help>Virtual modem phone number to host mapping</help>
   </properties>
   <children>
     <tagNode name="directory-entry">
