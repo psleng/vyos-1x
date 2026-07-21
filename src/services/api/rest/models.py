@@ -355,6 +355,7 @@ class AuthModel(ApiModel):
     session: Optional[StrictStr] = None
     secret: Optional[StrictStr] = None
     sid: Optional[StrictStr] = None
+    sids: Optional[List[StrictStr]] = None
 
     @model_validator(mode='after')
     def check_required_fields(self) -> Self:
@@ -369,6 +370,8 @@ class AuthModel(ApiModel):
                 raise ValueError("Field 'secret' is required when op is 'validate'")
         if self.service == 'cloud' and self.op == 'validate' and not self.sid:
             raise ValueError("Field 'sid' is required when op is 'validate'")
+        if self.service == 'cloud' and self.op == 'validate_batch' and not self.sids:
+            raise ValueError("Field 'sids' is required when op is 'validate_batch'")
         return self
 
     class Config:
@@ -376,11 +379,12 @@ class AuthModel(ApiModel):
             'example': {
                 'key': 'id_key',
                 'service': 'saml | cloud',
-                'op': 'login | validate | jwks',
+                'op': 'login | validate | validate_batch | jwks',
                 'hostname': 'device hostname or IP',
                 'relay_state': 'https://redirect-after-auth',
                 'session': 'session token',
                 'secret': 'session secret',
                 'sid': 'PerleCLOUD proxy session ID',
+                'sids': ['PerleCLOUD proxy session IDs'],
             }
         }

@@ -1067,6 +1067,16 @@ async def auth_op(data: AuthModel):
                 )
                 req.raise_for_status()
                 return success(req.json().get('active', False))
+            elif op == 'validate_batch':
+                req = await run_in_threadpool(
+                    requests.post,
+                    f'{base_url}/sessions/batch',
+                    json=data.sids,
+                    timeout=10,
+                    verify=False,
+                )
+                req.raise_for_status()
+                return success(req.json())
             else:
                 return error(400, f"'{op}' is not a valid operation")
         except requests.exceptions.Timeout:
