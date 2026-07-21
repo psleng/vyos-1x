@@ -92,9 +92,6 @@ async def main(interface='wwan0',timeout=30, connect_timeout=30, client=None):
                 print(await client.get_bearer_status(int(interface[4:])))
                 last_tx = 0
                 last_active = int(time.time())
-                install_nft_rules = subprocess.run(["/usr/lib/python3/dist-packages/vyos/utils/wwan/dial_on_demand/install-wwan-nft-rules.sh", interface], capture_output=True)
-                print(install_nft_rules.stdout)
-                print(f"idle-wwan-watcher: Installing nfqueue rules for {interface}")
                 break
     if close_client:
         await client.close()
