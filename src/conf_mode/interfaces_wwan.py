@@ -251,6 +251,14 @@ def get_config(config=None):
     # is_bond_member, is_mirror_intf, qos, etc.
     ifname, wwan = get_interface_dict(conf, base)
 
+    # Configd-compatible scripts must create their sole Config instance in
+    # get_config().  Capture whether a deleted interface was the final WWAN
+    # node while that proposed config tree is still available, then carry the
+    # result to apply() instead of opening a second configuration session.
+    wwan['_last_wwan'] = (
+        'deleted' in wwan and not conf.exists(base)
+    )
+
     # ── Live-tree intent flags ───────────────────────────────────────
     # get_interface_dict() merges XML <defaultValue> tags into the parsed
     # dict regardless of whether the user actually configured the parent
@@ -919,11 +927,10 @@ def apply(wwan):
     interface_number = int(match.group(1)) if match else 0
 
     if 'deleted' in wwan:
-        # Interface node is gone from the CLI tree.  Detect whether this is
-        # the LAST wwan interface *before* touching any services: the
-        # session/proposed config tree already reflects the deletion, so an
-        # absent `interfaces wwan` node means nothing cellular is left.
-        last_wwan = not Config().exists(['interfaces', 'wwan'])
+        # Interface node is gone from the CLI tree.  get_config() already
+        # checked the session/proposed tree using this script's sole Config
+        # instance, before any services were touched.
+        last_wwan = wwan.get('_last_wwan', False)
 
         # Fully tear down THIS interface on the FSM side: shut the state
         # machine down (drops the bearer, deregisters from the network,
