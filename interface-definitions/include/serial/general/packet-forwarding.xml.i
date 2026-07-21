@@ -26,7 +26,7 @@
             <help>Delay sending between messages</help>
             <valueHelp>
               <format>u32:0-65535</format>
-              <description>Packet Size in milliseconds</description>
+              <description>Delay in milliseconds</description>
             </valueHelp>
             <constraint>
               <validator name="numeric" argument="--range 0-65535"/>
