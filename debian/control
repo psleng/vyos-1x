@@ -24,7 +24,8 @@ Build-Depends:
   python3-certbot-nginx,
   python3-pam,
   python3-dbus,
-  python3-dbus-next | python3-pip,
+  python3-dbus-next (>= 0.2.3),
+  python3-automaton (>= 2.1.0),
   python3-pyroute2,
   python3-voluptuous,
 # For generating command definitions
@@ -100,7 +101,6 @@ Depends:
   python3-voluptuous,
   python3-xmltodict,
   python3-zmq,
-## Note: python3-dbus-next is installed via pip from requirements.txt
 ## End of Python libraries
 ## Basic System services and utilities
   coreutils,
@@ -371,7 +371,7 @@ Depends:
   python3-pip,
   python3-venv,
 # End web interface
-# For email client 
+# For email client
   msmtp,
   msmtp-mta,
 # End  email client
