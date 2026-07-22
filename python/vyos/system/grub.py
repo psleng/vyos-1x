@@ -53,7 +53,6 @@ TMPL_GRUB_COMMON: str = 'grub/grub_common.j2'
 # default boot options
 # PERLE - initramfs will run ip-config and dropbear unless we disable early ip and networking in the kernel
 BOOT_OPTS_STEM: str = 'boot=live rootdelay=5 ip=none nonetworking noautologin net.ifnames=0 biosdevname=0 vyos-union=/boot/'
-PLATFORM = platform.machine()
 
 # prepare regexes
 REGEX_GRUB_VARS: str = r'^set (?P<variable_name>\w+)=[\'"]?(?P<variable_value>.*)(?<![\'"])[\'"]?$'
@@ -409,11 +408,10 @@ def common_write(root_dir: str = '', grub_common: dict[str, str] = {}) -> None:
         root_dir (str, optional): an optional path to the root directory.
         Defaults to empty.
     """
-    if PLATFORM == "x86_64":
-        if not root_dir:
-            root_dir = disk.find_persistence()
-        common_config = f'{root_dir}/{CFG_VYOS_COMMON}'
-        render(common_config, TMPL_GRUB_COMMON, grub_common)
+    if not root_dir:
+        root_dir = disk.find_persistence()
+    common_config = f'{root_dir}/{CFG_VYOS_COMMON}'
+    render(common_config, TMPL_GRUB_COMMON, grub_common)
 
 
 def create_structure(root_dir: str = '') -> None:
