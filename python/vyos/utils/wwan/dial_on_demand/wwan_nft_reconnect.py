@@ -15,10 +15,7 @@ import argparse
 from collections import deque
 
 from vyos.utils.wwan.wwan_client import (  # noqa: E402
-    WWANClient,
-    WWANError,
-    WWANConfigError,
-    WWANConnectionError,
+    WWANClient
 )
 
 COOLDOWN = 60           # seconds between connection attempts
