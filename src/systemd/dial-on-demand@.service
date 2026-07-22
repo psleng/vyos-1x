@@ -1,0 +1,13 @@
+[Unit]
+Description=WWAN Dial On Demand
+After=ModemManager.service
+Requires=ModemManager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -u -m vyos.utils.wwan.dial_on_demand.dial_on_demand_controller %i
+Restart=on-success
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
