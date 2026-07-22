@@ -202,6 +202,8 @@ def watch_pins(
     debounce_us: Optional[int] = 20_000,
     settle_ms: Optional[int] = 750,
     coalesce: bool = True,
+    initial_levels: Optional[dict[str, int]] = None,
+    verify_interval_ms: Optional[int] = None,
 ):
     """
     Yield ``(name, level, timestamp_ns)`` tuples for edge events on the
@@ -222,6 +224,14 @@ def watch_pins(
     a shutdown handler; the iterator returns cleanly and releases the
     GPIO requests when it becomes readable.
 
+    ``initial_levels`` may contain a caller's immediately preceding samples.
+    They are reconciled with the levels read after the watcher acquires its
+    long-lived GPIO request, so a transition in the sample/watch setup gap is
+    not lost.
+
+    ``verify_interval_ms`` enables low-rate level verification through the
+    held request so a missed return edge cannot leave stale state indefinitely.
+
     Pass ``settle_ms=0, coalesce=False`` for fire-fast mode (every
     kernel-debounced edge is emitted immediately).
     """
@@ -231,6 +241,8 @@ def watch_pins(
         debounce_us=debounce_us,
         settle_ms=settle_ms,
         coalesce=coalesce,
+        initial_levels=initial_levels,
+        verify_interval_ms=verify_interval_ms,
     )
 
 
@@ -240,6 +252,8 @@ def watch_sim_detect(
     stop_fd: Optional[int] = None,
     debounce_us: Optional[int] = 20_000,
     settle_ms: Optional[int] = 750,
+    initial_levels: Optional[dict[str, int]] = None,
+    verify_interval_ms: Optional[int] = 250,
 ):
     """
     Convenience wrapper around :func:`watch_pins` for SIM-detect events.
@@ -266,6 +280,8 @@ def watch_sim_detect(
         debounce_us=debounce_us,
         settle_ms=settle_ms,
         coalesce=True,
+        initial_levels=initial_levels,
+        verify_interval_ms=verify_interval_ms,
     ):
         # libgpiod already inverts the raw electrical level when
         # active_low=True, so ``level`` here is the *logical* state.
@@ -346,23 +362,3 @@ def serial_port_supported_protocols(port: str) -> list:
     calling :func:`serial_protocol`.
     """
     return _b.serial_port_supported_protocols(port)
-
-
-def verify_serial_bindings(*, strict: bool = True) -> dict:
-    """
-    Assert that every port whose pinmap entry declares a ``dt_node``
-    resolves to that device-tree node via ``/sys/class/tty/<N>/device/of_node``.
-
-    This is the bridge between the pinmap (which controls the
-    transceiver) and the kernel's ``/dev/ttySN`` numbering (which the
-    application opens). Without this check a typo in the pinmap's
-    ``tty`` value would silently re-wire the wrong UART to the wrong
-    transceiver.
-
-    Call once at FSM/daemon startup. ``strict=True`` (default) raises
-    ``RuntimeError`` on the first mismatch; ``strict=False`` returns a
-    ``{port: 'ERROR: ...'}`` dict so callers can log every problem at
-    once. Soft-skips on build hosts / CI where ``/sys/class/tty`` is
-    absent.
-    """
-    return _b.verify_serial_bindings(strict=strict)

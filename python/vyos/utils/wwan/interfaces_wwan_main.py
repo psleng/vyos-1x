@@ -50,9 +50,21 @@ class ModemManagerMonitor:
         self._name_owner_bus = None
         self._last_mm_owner = ''
         self._reconnect_lock = asyncio.Lock()
+        self._last_reconnected_owner = ''
+        self._fsm_reconnect_required = False
+        self._restart_exhaustion_backoff = 60
+        # G1 -- wedged-but-running MM detection.  `systemctl is-active` only
+        # proves the PROCESS is up; an MM whose D-Bus has gone unresponsive
+        # still reads 'active' yet answers no method calls, and is invisible
+        # everywhere except a CONNECTED interface's ping.  Probe MM's D-Bus
+        # each cycle; after this many CONSECUTIVE unanswered probes treat MM
+        # as wedged and drive the same recovery as a hard crash.  Conservative
+        # threshold -- a too-eager MM restart can cascade.
+        self._mm_dbus_miss_count = 0
+        self._mm_dbus_miss_threshold = 4
 
     async def monitor_modemmanager(self):
-        """Monitor ModemManager and restart if it crashes"""
+        """Monitor MM process, D-Bus responsiveness, and pending FSM rebinds."""
         self.monitoring = True
         logger.info("ModemManager monitoring started",
                    extra={'max_attempts': self.max_restart_attempts})
@@ -60,20 +72,63 @@ class ModemManagerMonitor:
         while self.monitoring:
             try:
                 # Check if ModemManager is still running
-                result = subprocess.run(
+                result = await asyncio.to_thread(
+                    subprocess.run,
                     ["systemctl", "is-active", "ModemManager"],
                     capture_output=True,
-                    text=True
+                    text=True,
+                    timeout=10,
                 )
 
                 if result.returncode != 0 or result.stdout.strip() != "active":
-                    logger.error("ModemManager has crashed or stopped!")
+                    logger.error("ModemManager has crashed or stopped "
+                                "(systemd reports inactive)")
+                    self._mm_dbus_miss_count = 0  # crash path owns recovery
                     await self.handle_modemmanager_crash()
-                else:
+                elif await self._probe_mm_dbus_responsive():
+                    # Process up AND answering D-Bus -- genuinely healthy.
+                    if self._mm_dbus_miss_count:
+                        logger.info(
+                            "ModemManager D-Bus responsive again after "
+                            "%d missed probe(s)", self._mm_dbus_miss_count,
+                            extra={'mm_dbus_miss_count':
+                                   self._mm_dbus_miss_count})
+                        self._mm_dbus_miss_count = 0
+                    if self._fsm_reconnect_required:
+                        logger.warning(
+                            "ModemManager is healthy but FSM rebind is still "
+                            "pending; retrying reconnect",
+                            extra={'current_owner':
+                                   self._last_mm_owner or '(unknown)'})
+                        await self._reconnect_after_restart(
+                            trigger='health_poll_pending_rebind')
                     # Reset restart attempts if ModemManager is running fine
-                    if self.restart_attempts > 0:
+                    if (self.restart_attempts > 0
+                            and not self._fsm_reconnect_required):
                         logger.info("ModemManager is stable again, resetting restart counter")
                         self.restart_attempts = 0
+                else:
+                    # Process is 'active' but did NOT answer D-Bus -- a wedged
+                    # MM looks exactly like this.  Count consecutive misses and
+                    # only escalate once we are confident (not a transient
+                    # blip / mid-restart).
+                    self._mm_dbus_miss_count += 1
+                    logger.warning(
+                        "ModemManager is 'active' but did not answer D-Bus "
+                        "(missed probe %d/%d) -- possible wedged ModemManager",
+                        self._mm_dbus_miss_count, self._mm_dbus_miss_threshold,
+                        extra={'mm_dbus_miss_count': self._mm_dbus_miss_count,
+                               'mm_dbus_miss_threshold':
+                                   self._mm_dbus_miss_threshold})
+                    if self._mm_dbus_miss_count >= self._mm_dbus_miss_threshold:
+                        logger.error(
+                            "ModemManager wedged: 'active' but unresponsive on "
+                            "D-Bus for %d consecutive probes -- forcing restart",
+                            self._mm_dbus_miss_count,
+                            extra={'mm_dbus_miss_count':
+                                   self._mm_dbus_miss_count})
+                        self._mm_dbus_miss_count = 0
+                        await self.handle_modemmanager_crash()
 
                 # Check every 10 seconds
                 await asyncio.sleep(10)
@@ -82,13 +137,52 @@ class ModemManagerMonitor:
                 logger.error(f"Error monitoring ModemManager: {e}")
                 await asyncio.sleep(5)
 
+    async def _probe_mm_dbus_responsive(self, timeout: float = 8.0) -> bool:
+        """Bounded probe: does ModemManager actually answer on D-Bus?
+
+        A wedged-but-running MM passes `systemctl is-active` but never replies
+        to method calls. One bounded GetManagedObjects on the dedicated watch
+        bus (or service-bus fallback) tells us whether MM itself is alive,
+        independent of FSM-bus replacement. Returns True when no bus exists
+        yet so early startup cannot manufacture a false wedge.
+        """
+        # Probe on the dedicated long-lived NameOwner watch bus whenever it is
+        # available. The service/FSM bus is intentionally replaced during MM
+        # recovery; probing that transient bus would misdiagnose "FSM rebind
+        # still pending" as "MM itself is wedged" and cause a needless second
+        # restart. Fall back only when the watch could not be established.
+        bus = self._name_owner_bus or getattr(self.service_manager, 'bus', None)
+        if bus is None:
+            return True
+        try:
+            from dbus_next import Message  # pylint: disable=import-error
+            msg = Message(
+                destination="org.freedesktop.ModemManager1",
+                path="/org/freedesktop/ModemManager1",
+                interface="org.freedesktop.DBus.ObjectManager",
+                member="GetManagedObjects")
+            reply = await asyncio.wait_for(bus.call(msg), timeout=timeout)
+            return (reply is not None
+                    and reply.message_type.name == "METHOD_RETURN")
+        except Exception as e:
+            logger.debug(f"ModemManager D-Bus probe failed: {e}")
+            return False
+
     async def handle_modemmanager_crash(self):
-        """Handle ModemManager crash by attempting to restart it"""
+        """Recover an inactive or D-Bus-unresponsive ModemManager instance."""
         if self.restart_attempts >= self.max_restart_attempts:
-            logger.error("ModemManager restart attempts exhausted",
-                        extra={'restart_attempt': self.restart_attempts,
-                               'max_attempts': self.max_restart_attempts})
-            await self.service_manager.shutdown()
+            # Never destroy ConfigServiceManager here. shutdown() clears all
+            # FSM/interface dictionaries, making later MM recovery impossible
+            # without another config commit. This is an unattended remote
+            # unit: cool down, reset the attempt window, and keep trying.
+            logger.critical(
+                "ModemManager restart attempts exhausted; preserving FSMs and "
+                "retrying after cooldown",
+                extra={'restart_attempt': self.restart_attempts,
+                       'max_attempts': self.max_restart_attempts,
+                       'backoff_seconds': self._restart_exhaustion_backoff})
+            await asyncio.sleep(self._restart_exhaustion_backoff)
+            self.restart_attempts = 0
             return
 
         self.restart_attempts += 1
@@ -110,16 +204,8 @@ class ModemManagerMonitor:
         if await self.restart_modemmanager():
             logger.info("ModemManager restarted successfully",
                        extra={'restart_attempt': self.restart_attempts})
-
-            # Wait for it to be available on D-Bus
-            bus = await self.wait_for_modemmanager_dbus()
-            if bus:
-                logger.info("ModemManager is back online, updating service manager")
-                # Update the service manager's bus connection
-                await self.service_manager.update_bus_connection(bus)
-            else:
-                logger.error("ModemManager restarted but not available on D-Bus",
-                           extra={'restart_attempt': self.restart_attempts})
+            self._fsm_reconnect_required = True
+            await self._reconnect_after_restart(trigger='active_restart')
         else:
             logger.error("Failed to restart ModemManager",
                         extra={'restart_attempt': self.restart_attempts})
@@ -177,11 +263,13 @@ class ModemManagerMonitor:
         if name != "org.freedesktop.ModemManager1":
             return
         if not new_owner:
-            # Bare disappearance: the systemctl poll owns the "MM stays down"
-            # case (it actively restarts MM).  Just note the loss here.
+            # Bare disappearance: the active monitor owns restart/retry. Mark
+            # the FSM rebind pending so the health loop completes it once MM's
+            # replacement ObjectManager answers.
             logger.warning("ModemManager bus name owner lost",
                            extra={'old_owner': old_owner or '(none)'})
             self._last_mm_owner = ''
+            self._fsm_reconnect_required = True
             return
         if new_owner == self._last_mm_owner:
             return  # no real change
@@ -189,29 +277,86 @@ class ModemManagerMonitor:
             "ModemManager (re)appeared on D-Bus — triggering FSM reconnect",
             extra={'old_owner': old_owner or '(none)', 'new_owner': new_owner})
         self._last_mm_owner = new_owner
-        asyncio.create_task(self._reconnect_after_restart())
+        self._fsm_reconnect_required = True
+        asyncio.create_task(self._reconnect_after_restart(
+            trigger='name_owner_changed', expected_owner=new_owner))
 
-    async def _reconnect_after_restart(self):
+    @staticmethod
+    async def _get_mm_owner_on_bus(bus) -> str:
+        """Return MM's unique D-Bus owner on *bus*, or '' if unavailable."""
+        try:
+            msg = Message(
+                destination="org.freedesktop.DBus",
+                path="/org/freedesktop/DBus",
+                interface="org.freedesktop.DBus",
+                member="GetNameOwner",
+                signature="s",
+                body=["org.freedesktop.ModemManager1"])
+            reply = await asyncio.wait_for(bus.call(msg), timeout=5.0)
+            if reply.message_type.name == "METHOD_RETURN" and reply.body:
+                return str(reply.body[0])
+        except Exception:
+            pass
+        return ''
+
+    async def _reconnect_after_restart(self, trigger='unknown',
+                                        expected_owner=''):
         """Rebuild FSM proxies and re-initialize after MM (re)appears.
 
         Guarded so overlapping NameOwnerChanged signals (down→up often arrives
         as two events) and a racing systemctl-poll recovery cannot drive two
         concurrent reconnects.
         """
-        if self._reconnect_lock.locked():
-            logger.info("Reconnect already in progress, skipping duplicate")
-            return
         async with self._reconnect_lock:
-            # The bus name can be claimed slightly before MM's ObjectManager
-            # is responsive; wait for it to actually answer before reconnect.
-            bus = await ModemManagerMonitor.wait_for_modemmanager_dbus()
-            if not bus:
+            bus = None
+            try:
+                # The bus name can be claimed slightly before MM's
+                # ObjectManager is responsive; wait for a real method reply.
+                bus = await ModemManagerMonitor.wait_for_modemmanager_dbus()
+                if not bus:
+                    logger.error(
+                        "ModemManager reconnect could not obtain a responsive "
+                        "ObjectManager; rebind remains pending",
+                        extra={'trigger': trigger,
+                               'expected_owner': expected_owner or '(unknown)'})
+                    self._fsm_reconnect_required = True
+                    return False
+
+                actual_owner = await self._get_mm_owner_on_bus(bus)
+                if (actual_owner
+                        and actual_owner == self._last_reconnected_owner):
+                    logger.info(
+                        "FSMs already rebound to this ModemManager owner; "
+                        "skipping duplicate reconnect",
+                        extra={'trigger': trigger,
+                               'owner': actual_owner})
+                    self._fsm_reconnect_required = False
+                    bus.disconnect()
+                    return True
+
+                logger.info(
+                    "Reconnecting FSMs to fresh ModemManager instance",
+                    extra={'trigger': trigger,
+                           'expected_owner': expected_owner or '(unknown)',
+                           'actual_owner': actual_owner or '(unknown)',
+                           'previous_owner':
+                               self._last_reconnected_owner or '(none)'})
+                await self.service_manager.update_bus_connection(bus)
+                self._last_reconnected_owner = actual_owner or expected_owner
+                self._fsm_reconnect_required = False
+                logger.info(
+                    "FSM reconnect to ModemManager completed",
+                    extra={'trigger': trigger,
+                           'owner':
+                               self._last_reconnected_owner or '(unknown)'})
+                return True
+            except Exception as e:
+                self._fsm_reconnect_required = True
                 logger.error(
-                    "ModemManager name appeared but ObjectManager never became "
-                    "responsive; leaving recovery to the systemctl poll")
-                return
-            logger.info("Reconnecting FSMs to fresh ModemManager instance")
-            await self.service_manager.update_bus_connection(bus)
+                    f"FSM reconnect after ModemManager restart failed: {e}",
+                    extra={'trigger': trigger,
+                           'expected_owner': expected_owner or '(unknown)'})
+                return False
 
     def disconnect_name_owner_watch(self):
         """Tear down the dedicated NameOwnerChanged watch bus."""
@@ -233,10 +378,12 @@ class ModemManagerMonitor:
         """Check if ModemManager is running and start it if necessary"""
         try:
             # Check if ModemManager service is active
-            result = subprocess.run(
+            result = await asyncio.to_thread(
+                subprocess.run,
                 ["systemctl", "is-active", "ModemManager"],
                 capture_output=True,
-                text=True
+                text=True,
+                timeout=10,
             )
 
             if result.returncode == 0 and result.stdout.strip() == "active":
@@ -249,6 +396,43 @@ class ModemManagerMonitor:
         except Exception as e:
             logger.error(f"Error checking/starting ModemManager: {e}")
             return False
+
+    @staticmethod
+    async def stop_modemmanager():
+        """Stop the ModemManager system service.
+
+        This manager owns ModemManager's lifecycle: it is the sole starter
+        of MM (see check_and_start_modemmanager, run on our own startup), so
+        MM must not be left running once we are gone.  On a standalone
+        `systemctl stop`/`restart igos-wwan-manager` (the system staying up)
+        nothing else would stop MM, so we stop it here.
+
+        NOT used on a full-system reboot/poweroff: there systemd stops MM
+        right after us via the unit's `After=ModemManager.service` ordering,
+        and our own graceful bearer disconnect needs MM alive until we exit.
+
+        Runs on the teardown path — bounded by the caller and must never
+        raise.  The blocking `systemctl` call is offloaded to a thread with
+        its own timeout so it cannot stall the event loop or wedge exit.
+        """
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                ["systemctl", "stop", "ModemManager"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except Exception as e:  # noqa: BLE001 -- best-effort teardown
+            logger.error(f"Error stopping ModemManager: {e}")
+            return False
+
+        if result.returncode == 0:
+            logger.info("ModemManager stopped (manager owns its lifecycle)")
+            return True
+        logger.warning(
+            f"ModemManager stop had issues: {result.stderr.strip()}")
+        return False
 
     @staticmethod
     async def restart_modemmanager():
@@ -265,16 +449,21 @@ class ModemManagerMonitor:
             # `systemctl stop` + cleanup sleep below are pure waste -- we
             # are about to start it fresh, there is nothing to stop and
             # nothing to drain.  Skipping them shaves ~2s off cold boot.
-            is_active = subprocess.run(
+            active_result = await asyncio.to_thread(
+                subprocess.run,
                 ["systemctl", "is-active", "--quiet", "ModemManager"],
-            ).returncode == 0
+                timeout=10,
+            )
+            is_active = active_result.returncode == 0
 
             if is_active:
                 # First try to stop it cleanly
-                stop_result = subprocess.run(
+                stop_result = await asyncio.to_thread(
+                    subprocess.run,
                     ["systemctl", "stop", "ModemManager"],
                     capture_output=True,
-                    text=True
+                    text=True,
+                    timeout=15,
                 )
 
                 if stop_result.returncode == 0:
@@ -309,12 +498,14 @@ class ModemManagerMonitor:
             # operation.
             logger.info("Re-triggering udev for USB devices before MM start")
             try:
-                subprocess.run(
+                await asyncio.to_thread(
+                    subprocess.run,
                     ["udevadm", "trigger", "--action=change",
                      "--subsystem-match=usb"],
                     capture_output=True, text=True, timeout=10,
                 )
-                subprocess.run(
+                await asyncio.to_thread(
+                    subprocess.run,
                     ["udevadm", "settle", "--timeout=10"],
                     capture_output=True, text=True, timeout=15,
                 )
@@ -322,10 +513,12 @@ class ModemManagerMonitor:
                 logger.warning(f"udevadm trigger/settle failed: {exc}")
 
             # Start ModemManager
-            start_result = subprocess.run(
+            start_result = await asyncio.to_thread(
+                subprocess.run,
                 ["systemctl", "start", "ModemManager"],
                 capture_output=True,
-                text=True
+                text=True,
+                timeout=15,
             )
 
             if start_result.returncode == 0:
@@ -563,6 +756,31 @@ async def main():
             sys.stdout.flush()
             sys.stderr.flush()
             os._exit(0)
+        elif stop_event.is_set():
+            # Standalone `systemctl stop`/`restart igos-wwan-manager`: a
+            # SIGTERM with the system staying UP (the reboot/poweroff branch
+            # above already handled the system_is_stopping() case).  This
+            # manager owns ModemManager's lifecycle — it is the only thing
+            # that starts MM — so it must not leave MM orphaned behind it.
+            # Stop MM now, AFTER the orderly bearer disconnect (which needs
+            # MM alive) and the service-bus teardown (so MM's exit fires no
+            # live FSM signal handler), mirroring the GPIO-reset ordering
+            # rationale above.
+            #
+            # Gated on stop_event so a crash / `Restart=on-failure` — where
+            # this finally runs with no signal delivered — leaves MM up for
+            # the auto-restarted instance to reuse via
+            # check_and_start_modemmanager().  On an explicit `restart` MM is
+            # bounced together with us and re-established by the new instance;
+            # that is consistent with this service owning MM's life.
+            logger.info("Manager stopping — stopping ModemManager")
+            try:
+                await asyncio.wait_for(
+                    ModemManagerMonitor.stop_modemmanager(), timeout=12.0)
+            except asyncio.TimeoutError:
+                logger.error("ModemManager stop timed out")
+            except Exception as e:  # noqa: BLE001 -- best-effort cleanup
+                logger.error(f"Error stopping ModemManager: {e}")
         logger.info("WWAN Interface Manager stopped")
 
 if __name__ == "__main__":
