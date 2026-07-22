@@ -325,7 +325,7 @@ def start_nfqueue(nfqueue):
     nfqueue.run(block=False)
 
 
-async def main(interface='wwan0', timeout=30, connect_timeout=30, loop=None, client=None):
+async def main(interface='wwan0', connect_timeout=30, loop=None, client=None):
 
     queue_num = get_interface_queue_num(interface)
     modem_index = get_all_wwan_options()
@@ -382,19 +382,16 @@ async def main(interface='wwan0', timeout=30, connect_timeout=30, loop=None, cli
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(prog="nfqueue-bound-monitor", description="binds wwanX to nfqueue", epilog="Test")
-    parser.add_argument('interface',nargs="?", default="wwan0")
+    parser.add_argument('params',help="colon separated parameter string")
     args = parser.parse_args()
+    params = args.params
+    items = params.split(':')
+    if len(items) > 2:
+        raise ValueError("Too many arguments for this function")
+    interface, timeout = items
 
-    print(args.interface)
-    interface = args.interface
-    timeout = 30
-    connect_timeout = 30
-    if ":" in args.interface:
-        interface = args.interface.split(":")[0]
-        timeout = args.interface.split(":")[1]
-        connect_timeout = args.interface.split(":")[2]
     loop = event_loop(None)
     try:
-        loop.run_until_complete(main(interface=interface, timeout=timeout, connect_timeout=connect_timeout, loop=loop))
+        loop.run_until_complete(main(interface=interface, connect_timeout=timeout, loop=loop))
     finally:
         loop.close()

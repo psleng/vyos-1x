@@ -46,8 +46,7 @@ def is_modem_connected(modem_id):
             return "connected" in line.lower()
     return False
 
-async def main(interface='wwan0',timeout=30, connect_timeout=30, client=None):
-
+async def main(interface='wwan0',timeout=30, client=None):
 
     print(interface)
     print(timeout)
@@ -56,7 +55,6 @@ async def main(interface='wwan0',timeout=30, connect_timeout=30, client=None):
     last_tx = get_tx_bytes(interface)
     last_active = int(time.time())
 
-    modem_mapping = get_modem_mapping()
     close_client = False
     #poll
     if client is None:
@@ -96,14 +94,12 @@ async def main(interface='wwan0',timeout=30, connect_timeout=30, client=None):
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(prog="idle-wwan-watcher", description="Watches wwan for inactivity", epilog="Test")
-    parser.add_argument('interface',nargs="?", default="wwan0")
-    parser.add_argument('timeout',nargs="?", default=60, type=int)
+    parser.add_argument('params',help="colon separated parameter string")
     args = parser.parse_args()
-    interface = args.interface
-    timeout = args.timeout
-    if ":" in args.interface:
-        interface = args.interface.split(":")[0]
-        timeout = args.interface.split(":")[1]
-        connect_timeout = args.interface.split(":")[2]
+    params = args.params
+    items = params.split(':')
+    if len(items) > 2:
+        raise ValueError("Too many arguments for this function")
+    interface, timeout = items
 
-    asyncio.run(main(interface=interface, timeout=timeout, connect_timeout=connect_timeout))
+    asyncio.run(main(interface=interface, timeout=timeout))
