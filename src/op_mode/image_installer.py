@@ -35,6 +35,7 @@ from os import sync
 
 # PSL - access to additional routines
 from shutil import move
+import platform
 # PSL - access to additional routines
 
 from json import loads
@@ -156,6 +157,7 @@ DIR_DST_ROOT: str = f'{DIR_INSTALLATION}/disk_dst'
 DIR_KERNEL_SRC: str = '/boot'
 FILE_ROOTFS_SRC: str = '/usr/lib/live/mount/medium/live/filesystem.squashfs'
 ISO_DOWNLOAD_PATH: str = ''
+PLATFORM = platform.machine()
 
 external_download_script: str = f'{base_dir}/simple-download.py'
 external_latest_image_url_script: str = f'{base_dir}/latest-image-url.py'
@@ -519,7 +521,7 @@ def setup_grub(root_dir: str) -> None:
     Args:
         root_dir (str): a path to the root of target filesystem
     """
-    print('Installing GRUB configuration files')
+    print(f"Installing GRUB configuration files for platform: {PLATFORM}")
     grub_cfg_main = f'{root_dir}/{grub.GRUB_DIR_MAIN}/grub.cfg'
     grub_cfg_vars = f'{root_dir}/{grub.CFG_VYOS_VARS}'
     grub_cfg_modules = f'{root_dir}/{grub.CFG_VYOS_MODULES}'
@@ -528,7 +530,10 @@ def setup_grub(root_dir: str) -> None:
 
     # create new files
     render(grub_cfg_main, grub.TMPL_GRUB_MAIN, {})
-    grub.common_write(root_dir)
+    # add intel UGA and COMx serial drivers if x86 platform
+    if PLATFORM == "x86_64":
+        grub.common_write(root_dir)
+
     grub.vars_write(grub_cfg_vars, DEFAULT_BOOT_VARS)
     grub.modules_write(grub_cfg_modules, [])
     grub.write_cfg_ver(1, root_dir)
