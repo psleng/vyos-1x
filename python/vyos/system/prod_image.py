@@ -4,7 +4,6 @@
 
 import os
 import argparse
-import platform
 from pathlib import Path
 from shutil import copy, copytree, rmtree
 
@@ -32,7 +31,7 @@ SRC_DTB = f"{ISO}/boot/dtb"
 LIVE = f"{ISO}/live"
 BOOT = f"{TARGET_P2}/boot"
 DST_DTB = f"{TARGET_P2}/boot/dtb"
-PLATFORM = platform.machine()
+
 
 # -------------------------------
 # Utility Functions
@@ -51,7 +50,7 @@ def safe_rmtree(path: Path):
 # GRUB Setup
 # -------------------------------
 def setup_grub(root_dir: str) -> None:
-    log(f"Installing GRUB configuration files for platform: {PLATFORM}")
+    log('Installing GRUB configuration files')
 
     grub_cfg_main = f'{root_dir}/{grub.GRUB_DIR_MAIN}/grub.cfg'
     grub_cfg_vars = f'{root_dir}/{grub.CFG_VYOS_VARS}'
@@ -59,10 +58,7 @@ def setup_grub(root_dir: str) -> None:
     grub_cfg_menu = f'{root_dir}/{grub.CFG_VYOS_MENU}'
 
     render(grub_cfg_main, grub.TMPL_GRUB_MAIN, {})
-    # add intel UGA and COMx serial drivers if x86 platform
-    if PLATFORM == "x86_64":
-        grub.common_write(root_dir)
-
+    grub.common_write(root_dir)
     grub.vars_write(grub_cfg_vars, DEFAULT_BOOT_VARS)
     grub.modules_write(grub_cfg_modules, [])
     grub.write_cfg_ver(1, root_dir)
