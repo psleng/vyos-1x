@@ -31,10 +31,14 @@ is ``generic``) does not raise.
 from __future__ import annotations
 
 import datetime
+import logging
 import os
 import time
 from dataclasses import dataclass
 from typing import Dict, Iterable, Iterator, Optional, Tuple
+
+
+logger = logging.getLogger(__name__)
 
 
 # NOTE on persistence
@@ -276,6 +280,8 @@ class Board:
         debounce_us: Optional[int] = 20_000,
         settle_ms: Optional[int] = 750,
         coalesce: bool = True,
+        initial_levels: Optional[Dict[str, int]] = None,
+        verify_interval_ms: Optional[int] = None,
     ) -> Iterator[Tuple[str, int, int]]:
         """
         Yield ``(name, level, timestamp_ns)`` tuples for edge events on the
@@ -300,6 +306,18 @@ class Board:
         ``os.pipe()``) that, when made readable, causes the iterator to
         return cleanly and release all GPIO requests.
 
+        ``initial_levels`` optionally supplies the caller's last sampled
+        logical level for each pin.  The watcher reconciles those values with
+        the level read through its newly acquired long-lived request, closing
+        the otherwise unavoidable gap between an initial sample and edge-watch
+        setup without emitting duplicate initial-state events.
+
+        ``verify_interval_ms`` optionally re-reads every watched line through
+        the already-held GPIO request.  This is a low-rate safety net for a
+        return edge suppressed by hardware debounce or otherwise missed; it
+        produces an event only when the sampled logical state differs from the
+        last emitted state.
+
         Pass ``settle_ms=0`` and ``coalesce=False`` for fire-fast mode
         (every kernel-debounced edge is emitted immediately).
         """
@@ -323,6 +341,23 @@ class Board:
             )
 
         requests = []  # list[(req, {line: name})]
+        request_for_name = {}  # name -> (request, line offset)
+        # pin name -> (last_seen_level, monotonic deadline)
+        pending: Dict[str, Tuple[int, float]] = {}
+        # pin name -> last level we actually yielded (or caller sampled)
+        last_emitted: Dict[str, int] = {
+            name: 1 if level else 0
+            for name, level in (initial_levels or {}).items()
+            if name in eff_settle_ms
+        }
+        verify_interval = (
+            max(0, int(verify_interval_ms)) / 1000.0
+            if verify_interval_ms is not None else 0.0
+        )
+        next_verify = (
+            time.monotonic() + verify_interval
+            if verify_interval > 0 else None
+        )
         try:
             for bank, lines in by_bank.items():
                 cfg = {}
@@ -346,6 +381,25 @@ class Board:
                     config=cfg,
                 )
                 requests.append((req, lines))
+                for line, name in lines.items():
+                    request_for_name[name] = (req, line)
+                    current = (
+                        1 if req.get_value(line) == gpiod.line.Value.ACTIVE
+                        else 0
+                    )
+                    if name not in last_emitted:
+                        # Generic callers did not provide an earlier sample;
+                        # establish a baseline without manufacturing an edge.
+                        last_emitted[name] = current
+                    elif current != last_emitted[name]:
+                        # The line changed between the caller's initial sample
+                        # and acquisition of this request.  Reconcile it after
+                        # the same quiet period used for ordinary edges.
+                        pending[name] = (
+                            current,
+                            time.monotonic()
+                            + eff_settle_ms[name] / 1000.0,
+                        )
 
             sel = selectors.DefaultSelector()
             for req, lines in requests:
@@ -353,20 +407,19 @@ class Board:
             if stop_fd is not None:
                 sel.register(stop_fd, selectors.EVENT_READ, None)
 
-            # pin name -> (last_seen_level, monotonic deadline)
-            pending: Dict[str, Tuple[int, float]] = {}
-            # pin name -> last level we actually yielded
-            last_emitted: Dict[str, int] = {}
-
             rising = gpiod.EdgeEvent.Type.RISING_EDGE
 
             while True:
-                # Block until the next deadline (or forever if nothing pending)
+                # Block until the next settle/verification deadline (or
+                # forever when neither feature has work pending).
                 now = time.monotonic()
-                if pending:
+                deadlines = [d for _, d in pending.values()]
+                if next_verify is not None:
+                    deadlines.append(next_verify)
+                if deadlines:
                     timeout = max(
                         0.0,
-                        min(d for _, d in pending.values()) - now,
+                        min(deadlines) - now,
                     )
                 else:
                     timeout = None
@@ -394,10 +447,66 @@ class Board:
                 now = time.monotonic()
                 expired = [n for n, (_, d) in pending.items() if d <= now]
                 for name in expired:
-                    level, _ = pending.pop(name)
-                    if last_emitted.get(name) != level:
-                        last_emitted[name] = level
-                        yield name, level, time.monotonic_ns()
+                    edge_level, _ = pending.pop(name)
+                    final_level = edge_level
+                    try:
+                        req, line = request_for_name[name]
+                        final_level = (
+                            1
+                            if req.get_value(line)
+                            == gpiod.line.Value.ACTIVE
+                            else 0
+                        )
+                    except Exception as exc:  # noqa: BLE001 -- edge fallback
+                        logger.warning(
+                            "GPIO final-level sample failed for %s; using "
+                            "last edge level %d: %s",
+                            name, edge_level, exc,
+                        )
+
+                    if final_level != edge_level:
+                        logger.info(
+                            "GPIO settle corrected stale edge for %s: "
+                            "edge_level=%d final_level=%d",
+                            name, edge_level, final_level,
+                        )
+
+                    if last_emitted.get(name) != final_level:
+                        last_emitted[name] = final_level
+                        yield name, final_level, time.monotonic_ns()
+
+                # 3. Low-rate level verification catches a transition whose
+                # edge was suppressed/lost.  Feed a changed sample through the
+                # same settle window as an edge; cancel a pending transition if
+                # the line has already returned to the emitted baseline.
+                now = time.monotonic()
+                if next_verify is not None and now >= next_verify:
+                    for name, (req, line) in request_for_name.items():
+                        try:
+                            sampled = (
+                                1
+                                if req.get_value(line)
+                                == gpiod.line.Value.ACTIVE
+                                else 0
+                            )
+                        except Exception as exc:  # noqa: BLE001 -- keep watch alive
+                            logger.warning(
+                                "GPIO periodic sample failed for %s: %s",
+                                name, exc,
+                            )
+                            continue
+
+                        if sampled == last_emitted.get(name):
+                            pending.pop(name, None)
+                            continue
+
+                        existing = pending.get(name)
+                        if existing is None or existing[0] != sampled:
+                            pending[name] = (
+                                sampled,
+                                now + eff_settle_ms[name] / 1000.0,
+                            )
+                    next_verify = now + verify_interval
         finally:
             for req, _ in requests:
                 try:

@@ -481,20 +481,38 @@ class GpioMuxSimController(SimController):
     def _watch_run(self):
         """Thread body: yield debounced detect events to the FSM loop."""
         try:
+            initial_levels = {
+                pin: int(bool(self._present.get(slot, False)))
+                for pin, slot in self._pin_slot.items()
+                if slot in self._known_slots
+            }
             for pin_name, event, _ts in self._hw.watch_sim_detect(
-                    self.modem_name, stop_fd=self._stop_r):
+                    self.modem_name, stop_fd=self._stop_r,
+                    initial_levels=initial_levels):
                 slot = self._pin_slot.get(pin_name)
                 if slot is None:
                     continue
                 present = (event == "INSERTED")
+                previous = self._present.get(slot)
+                if previous is not None and previous == present:
+                    logger.debug(
+                        "Ignoring duplicate GPIO-mux SIM-detect state: "
+                        "pin=%s slot=%d event=%s level=%d",
+                        pin_name, slot, event, int(present),
+                        extra={'interface_number': self.fsm.interface_number})
+                    continue
                 # Update the presence model from the watcher thread.  Dict
                 # item assignment is atomic under CPython, and the FSM only
                 # ever reads this map, so no lock is needed.
                 self._present[slot] = present
                 self._known_slots.add(slot)
-                logger.info("GPIO-mux SIM-detect event",
-                            extra={'interface_number': self.fsm.interface_number,
-                                   'slot': slot, 'event': event})
+                logger.info(
+                    "GPIO-mux SIM-detect event: pin=%s slot=%d event=%s "
+                    "level=%d",
+                    pin_name, slot, event, int(present),
+                    extra={'interface_number': self.fsm.interface_number,
+                           'pin': pin_name, 'slot': slot, 'event': event,
+                           'level': int(present)})
                 if self._loop is not None:
                     self._loop.call_soon_threadsafe(
                         self.fsm._on_sim_detect_event, slot, present)

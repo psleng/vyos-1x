@@ -23,7 +23,7 @@ import uuid
 from dbus_next import Variant  # pylint: disable=import-error
 from dbus_next.service import ServiceInterface, method, signal  # pylint: disable=import-error
 from dbus_next.errors import DBusError  # pylint: disable=import-error
-from vyos.utils.wwan.interfaces_wwan_state_machine import ModemStateMachine
+from vyos.utils.wwan.interfaces_wwan_state_machine import ModemStateMachine, WWAN_PERSIST_DIR
 from vyos.utils.wwan.interfaces_wwan_config import InterfaceConfig
 from vyos.utils.wwan.wwan_logging import setup_logging
 
@@ -461,6 +461,30 @@ class ConfigServiceManager:
             except Exception as e:
                 logger.error(f"Error shutting down FSM during removal: {e}",
                            extra={'interface_number': interface_number})
+
+        # Purge this interface's persisted per-SIM data-usage counters -- the
+        # per-interface persisted-state sibling of the config cache removed
+        # above.  The file lives under /config (WWAN_PERSIST_DIR) so it
+        # normally rides across reboots/upgrades for billing; we clear it ONLY
+        # here in the explicit-delete path.  remove_interface() is reached
+        # solely via the RemoveInterface D-Bus call, whereas a reboot /
+        # service-stop runs fsm.shutdown() directly (see
+        # ConfigServiceManager.shutdown) and must KEEP the counters -- so this
+        # is the correct, delete-only home.  Done AFTER fsm.shutdown() so the
+        # usage-monitor task is already cancelled and cannot re-create the
+        # file.  Best-effort: never block interface removal.
+        usage_file = f"{WWAN_PERSIST_DIR}/wwan{interface_number}_usage.json"
+        for path in (usage_file, usage_file + '.tmp'):
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+                    logger.info("Cleared persisted data-usage on delete",
+                               extra={'interface_number': interface_number,
+                                      'usage_file': path})
+            except Exception as e:
+                logger.error(f"Error clearing usage file during removal: {e}",
+                           extra={'interface_number': interface_number,
+                                  'usage_file': path})
 
         # Unexport the D-Bus object
         self.bus.unexport(object_path)

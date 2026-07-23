@@ -61,12 +61,36 @@ def _ensure_manager_running():
     therefore must tolerate the bus name not being on the bus yet --
     that retry is implemented in `_apply_via_dbus`.
 
-    Once running, the manager owns its own lifecycle and the graceful
-    teardown sequence on interface deletion -- we never stop it from
-    conf_mode.  On a reboot with no wwan configured, conf_mode simply
-    does not start the manager, so MM also stays down.
+    While at least one wwan interface is configured the manager owns its
+    own lifecycle.  When the LAST wwan interface is deleted, conf_mode
+    stops the manager (which in turn stops ModemManager) via
+    `_stop_manager_and_modemmanager()`; see apply().  On a reboot with no
+    wwan configured, conf_mode simply does not start the manager, so MM
+    also stays down.
     """
     call(f'systemctl start {manager_unit}')
+
+
+def _stop_manager_and_modemmanager():
+    """Stop the WWAN manager service and ModemManager.
+
+    Invoked when the last `interfaces wwan` node is deleted.  Stopping the
+    manager unit delivers SIGTERM, which runs the manager's graceful
+    shutdown -- disconnect any remaining bearers, deregister from the
+    network, tear down downstream LAN state -- and, because the manager is
+    the sole owner of ModemManager's lifecycle, stops ModemManager as its
+    final step.
+
+    Order matters: the manager MUST be stopped first.  Its crash monitor
+    polls ModemManager every ~10s and restarts it if it disappears, so
+    stopping ModemManager on its own would not stick.  ModemManager is then
+    stopped again explicitly as a backstop -- if the manager had already
+    crashed it never got the chance to stop MM, and MM left running keeps
+    the modem attached.  `systemctl stop` on an inactive unit is a harmless
+    no-op, so the redundant call is safe.
+    """
+    call(f'systemctl stop {manager_unit}')
+    call(f'systemctl stop {service_name}')
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -226,6 +250,14 @@ def get_config(config=None):
     # Interface.update(): address_old, eui64_old, mac_old, is_bridge_member,
     # is_bond_member, is_mirror_intf, qos, etc.
     ifname, wwan = get_interface_dict(conf, base)
+
+    # Configd-compatible scripts must create their sole Config instance in
+    # get_config().  Capture whether a deleted interface was the final WWAN
+    # node while that proposed config tree is still available, then carry the
+    # result to apply() instead of opening a second configuration session.
+    wwan['_last_wwan'] = (
+        'deleted' in wwan and not conf.exists(base)
+    )
 
     # ── Live-tree intent flags ───────────────────────────────────────
     # get_interface_dict() merges XML <defaultValue> tags into the parsed
@@ -895,31 +927,42 @@ def apply(wwan):
     interface_number = int(match.group(1)) if match else 0
 
     if 'deleted' in wwan:
-        # Interface node is gone from the CLI tree — fully tear down on
-        # the FSM side: shut the state machine down, unexport the D-Bus
-        # object, and delete the persisted config cache so a later
-        # service restart will NOT replay a stale configuration.
+        # Interface node is gone from the CLI tree.  get_config() already
+        # checked the session/proposed tree using this script's sole Config
+        # instance, before any services were touched.
+        last_wwan = wwan.get('_last_wwan', False)
+
+        # Fully tear down THIS interface on the FSM side: shut the state
+        # machine down (drops the bearer, deregisters from the network,
+        # tears down downstream LAN state), unexport its D-Bus object, and
+        # delete the persisted config cache so a later service start will
+        # NOT replay a stale configuration.
         #
-        # NOTE: we intentionally do NOT stop the manager service or
-        # ModemManager here, even when this is the last wwan interface.
-        # The manager owns the graceful teardown sequence (drop bearer,
-        # release session, unmanage the modem) and stopping it mid-flight
-        # would skip that.  At next boot, with no wwan configured, the
-        # conf_mode replay simply will not start the manager -- so the
-        # "no config => no MM running" goal is met on reboot, while a
-        # live `delete` still gets a clean teardown.
         # Ensure the manager is available so RemoveInterface can succeed even
         # if this commit path is the first WWAN action after a service crash.
         _ensure_manager_running()
         removed = asyncio.run(_remove_via_dbus(interface_number))
         if not removed:
-            # Do not block commit, but ensure stale persisted state does not
-            # resurrect when the interface is recreated later.
+            # Manager unreachable (crashed / not yet up): the D-Bus
+            # RemoveInterface handler -- which is what purges this interface's
+            # persisted state (config cache AND data-usage counters) -- never
+            # ran.  Clean both up locally so a later recreate starts clean.
+            # When RemoveInterface DID run, the manager already removed these
+            # itself, so we skip the redundant local delete.
             _remove_local_wwan_cache(interface_number)
+            _remove_persisted_usage(interface_number)
 
         if interface_exists(ifname):
             w = WWANIf(ifname)
             w.remove()
+
+        # If that was the last wwan interface, bring cellular fully down:
+        # stop the WWAN manager service, which runs its own graceful
+        # teardown and then stops ModemManager.  This is what guarantees the
+        # network connection actually drops and no ModemManager is left
+        # running once the last interface is gone.
+        if last_wwan:
+            _stop_manager_and_modemmanager()
 
         return None
 
@@ -1080,6 +1123,33 @@ def _remove_local_wwan_cache(interface_number):
             pass
         except Exception as exc:
             print(f'Warning: failed to remove WWAN cache {path}: {exc}')
+
+
+def _remove_persisted_usage(interface_number):
+    """Fallback cleanup of persisted per-SIM data-usage counters.
+
+    The PRIMARY purge happens inside the manager's `remove_interface` (the
+    D-Bus RemoveInterface handler), right beside the config-cache removal, so
+    it is co-located with the FSM teardown.  This local delete is only used
+    when that D-Bus call could NOT be reached (manager crashed / not yet up),
+    mirroring how `_remove_local_wwan_cache` backstops the /run config cache.
+
+    Only ever runs on an explicit `delete interfaces wwan wwanN` (never on a
+    reboot/upgrade, which replay the config), so billing counters still
+    survive restarts while an operator-initiated removal starts clean.  The
+    file lives under /config (WWAN_PERSIST_DIR in
+    interfaces_wwan_state_machine.py).  Best-effort: a missing file is fine and
+    any error is a warning so it never blocks the commit.
+    """
+    base = f'/config/wwan/wwan{interface_number}_usage.json'
+    for path in (base, base + '.tmp'):
+        try:
+            os.unlink(path)
+            print(f'WWAN interface {interface_number}: cleared data-usage {path}')
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            print(f'Warning: failed to clear WWAN data-usage {path}: {exc}')
 
 
 # ---------------------------------------------------------------------------
