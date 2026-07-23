@@ -819,10 +819,13 @@ def show_op(data: ShowModel):
 
     op = data.op
     path = data.path
+    format = data.format
 
     try:
         if op == 'show':
-            res = session.show(path)
+            res = session.show(path, json=(format == 'json'))
+            if format == 'json':
+                res = json.loads(res)
         else:
             return error(400, f"'{op}' is not a valid operation")
     except ConfigSessionError as e:
