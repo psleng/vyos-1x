@@ -131,10 +131,19 @@ def main():
     Path(f'{TARGET_P2}/persistence.conf').write_text('/ union\n')
 
     # copy DTBs
-    log("Copying DTB files")
-    copytree(f"{SRC_DTB}/ti",
-             f"{DST_DTB}/ti",
-             dirs_exist_ok=True)
+    dtb_src = Path(SRC_DTB)
+    if dtb_src.exists() and any(dtb_src.rglob("*.dtb*")):
+        log("Copying DTB files")
+        copytree(dtb_src,
+                 DST_DTB,
+                 dirs_exist_ok=True)
+    else:
+        log("ERROR: No DTB files found in source to copy!")
+        if dtb_src.exists():
+            contents = [p.name for p in dtb_src.iterdir()]
+            log(f"ERROR: No .dtb/.dtbo files found in {dtb_src.resolve()}! Folder contents: {contents or 'Empty'}")
+        else:
+            log(f"ERROR: Source folder {dtb_src.resolve()} does not exist!")
 
     # copy main image
     copy_image(version, BOOT)
