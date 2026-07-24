@@ -238,7 +238,7 @@ class GenerateModel(ApiModel):
 
 class ShowModel(ApiModel):
     op: StrictStr
-    format: Optional[StrictStr]
+    format: Optional[StrictStr] = None
     path: List[StrictStr]
 
     class Config:
