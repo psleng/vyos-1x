@@ -1101,12 +1101,12 @@ def install_image() -> None:
                      f"{DIR_DST_ROOT}/boot/dtb",
                      dirs_exist_ok=True)
         else:
-            log("ERROR: No DTB files found in source to copy!")
+            print(f"ERROR: No DTB files found in source to copy!")
             if dtb_src.exists():
                 contents = [p.name for p in dtb_src.iterdir()]
-                log(f"ERROR: No .dtb/.dtbo files found in {dtb_src.resolve()}! Folder contents: {contents or 'Empty'}")
+                print(f"ERROR: No .dtb/.dtbo files found in {dtb_src.resolve()}! Folder contents: {contents or 'Empty'}")
             else:
-                log(f"ERROR: Source folder {dtb_src.resolve()} does not exist!")
+                print(f"ERROR: Source folder {dtb_src.resolve()} does not exist!")
 
         # copy saved config data and SSH keys
         # owner restored on copy of config data by chmod_2775, above
@@ -1425,12 +1425,12 @@ def add_image(image_path: str, vrf: str = None, username: str = '',
                      f"{root_dir}/boot/dtb",
                      dirs_exist_ok=True)
         else:
-            log("ERROR: No DTB files found in source to copy!")
+            print(f"ERROR: No DTB files found in source to copy!")
             if dtb_src.exists():
                 contents = [p.name for p in dtb_src.iterdir()]
-                log(f"ERROR: No .dtb/.dtbo files found in {dtb_src.resolve()}! Folder contents: {contents or 'Empty'}")
+                print(f"ERROR: No .dtb/.dtbo files found in {dtb_src.resolve()}! Folder contents: {contents or 'Empty'}")
             else:
-                log(f"ERROR: Source folder {dtb_src.resolve()} does not exist!")
+                print(f"ERROR: Source folder {dtb_src.resolve()} does not exist!")
 
         # unmount an ISO and cleanup
         cleanup([str(iso_path)])
