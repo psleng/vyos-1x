@@ -184,7 +184,7 @@
                 <description>2G GSM/GPRS/EDGE only</description>
               </valueHelp>
               <constraint>
-                <regex>^(auto|lte|5g|5g-only|3g|2g)$</regex>
+                <regex>^(auto|lte|5g-only|5g|3g|2g)$</regex>
               </constraint>
               <constraintErrorMessage>Network mode must be auto, lte, 5g, 5g-only, 3g, or 2g</constraintErrorMessage>
             </properties>
@@ -325,7 +325,7 @@
                         <description>Dual-stack IPv4 and IPv6</description>
                       </valueHelp>
                       <constraint>
-                        <regex>^(ipv4|ipv6|ipv4v6)$</regex>
+                        <regex>^(ipv4v6|ipv4|ipv6)$</regex>
                       </constraint>
                       <constraintErrorMessage>PDP type must be ipv4, ipv6, or ipv4v6</constraintErrorMessage>
                     </properties>
@@ -444,7 +444,7 @@
                             <description>Switch to backup SIM and stay there</description>
                           </valueHelp>
                           <constraint>
-                            <regex>^(none|disable|sim-failover|sim-failover-sticky)$</regex>
+                            <regex>^(none|disable|sim-failover-sticky|sim-failover)$</regex>
                           </constraint>
                           <constraintErrorMessage>Action must be none, disable, sim-failover, or sim-failover-sticky</constraintErrorMessage>
                         </properties>
@@ -572,13 +572,13 @@
                         <properties>
                           <help>RSRP threshold for LTE/5G-NR (3GPP coverage metric)</help>
                           <valueHelp>
-                            <format>u32:-140--44</format>
-                            <description>RSRP in dBm</description>
+                            <format>s32:-140--44</format>
+                            <description>RSRP in dBm (integer only, no unit suffix)</description>
                           </valueHelp>
                           <constraint>
                             <validator name="numeric" argument="--range -140--44"/>
                           </constraint>
-                          <constraintErrorMessage>RSRP threshold must be -140 to -44 dBm</constraintErrorMessage>
+                          <constraintErrorMessage>RSRP threshold must be an integer from -140 to -44 (do not append dBm)</constraintErrorMessage>
                         </properties>
                         <defaultValue>-113</defaultValue>
                       </leafNode>
@@ -586,13 +586,13 @@
                         <properties>
                           <help>RSSI threshold for 2G/3G (legacy wideband metric)</help>
                           <valueHelp>
-                            <format>u32:-120--50</format>
-                            <description>RSSI in dBm</description>
+                            <format>s32:-120--50</format>
+                            <description>RSSI in dBm (integer only, no unit suffix)</description>
                           </valueHelp>
                           <constraint>
                             <validator name="numeric" argument="--range -120--50"/>
                           </constraint>
-                          <constraintErrorMessage>RSSI threshold must be -120 to -50 dBm</constraintErrorMessage>
+                          <constraintErrorMessage>RSSI threshold must be an integer from -120 to -50 (do not append dBm)</constraintErrorMessage>
                         </properties>
                         <defaultValue>-93</defaultValue>
                       </leafNode>
@@ -775,13 +775,13 @@
                     <properties>
                       <help>RSRP boundary for LTE/5G-NR (3GPP coverage metric)</help>
                       <valueHelp>
-                        <format>u32:-140--44</format>
-                        <description>RSRP in dBm</description>
+                        <format>s32:-140--44</format>
+                        <description>RSRP in dBm (integer only, no unit suffix)</description>
                       </valueHelp>
                       <constraint>
                         <validator name="numeric" argument="--range -140--44"/>
                       </constraint>
-                      <constraintErrorMessage>RSRP threshold must be -140 to -44 dBm</constraintErrorMessage>
+                      <constraintErrorMessage>RSRP threshold must be an integer from -140 to -44 (do not append dBm)</constraintErrorMessage>
                     </properties>
                     <defaultValue>-105</defaultValue>
                   </leafNode>
@@ -789,13 +789,13 @@
                     <properties>
                       <help>RSSI boundary for 2G/3G (legacy wideband metric)</help>
                       <valueHelp>
-                        <format>u32:-120--50</format>
-                        <description>RSSI in dBm</description>
+                        <format>s32:-120--50</format>
+                        <description>RSSI in dBm (integer only, no unit suffix)</description>
                       </valueHelp>
                       <constraint>
                         <validator name="numeric" argument="--range -120--50"/>
                       </constraint>
-                      <constraintErrorMessage>RSSI threshold must be -120 to -50 dBm</constraintErrorMessage>
+                      <constraintErrorMessage>RSSI threshold must be an integer from -120 to -50 (do not append dBm)</constraintErrorMessage>
                     </properties>
                     <defaultValue>-85</defaultValue>
                   </leafNode>
@@ -1160,7 +1160,7 @@
                     <description>Switch to backup SIM and stay there</description>
                   </valueHelp>
                   <constraint>
-                    <regex>^(none|disable|sim-failover|sim-failover-sticky)$</regex>
+                    <regex>^(none|disable|sim-failover-sticky|sim-failover)$</regex>
                   </constraint>
                   <constraintErrorMessage>Action must be none, disable, sim-failover, or sim-failover-sticky</constraintErrorMessage>
                 </properties>
