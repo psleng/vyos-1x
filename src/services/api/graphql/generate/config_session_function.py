@@ -21,10 +21,13 @@ def load_config_file(fileName: str):
     pass
 def add_system_image(location: str):
     pass
+def set_cellular_firmware(location: str):
+    pass
 def delete_system_image(name: str):
     pass
 
 mutations = {'save_config_file': save_config_file,
              'load_config_file': load_config_file,
              'add_system_image': add_system_image,
+             'set_cellular_firmware': set_cellular_firmware,
              'delete_system_image': delete_system_image}

@@ -44,6 +44,14 @@ connect
 disconnect
   └── interface <wwanN>                                    # tear down WWAN bearer
 
+execute
+  └── wwan
+        └── stop-manager                                  # stop the WWAN manager service
+
+set
+  └── wwan
+        └── firmware <archive>                            # install firmware from a ZIP archive
+
 generate
   └── interfaces
         └── wwan <wwanN>
@@ -509,6 +517,59 @@ igos@igos:~$ disconnect interface wwan0
 
 ---
 
+## Execute Commands
+
+### `execute wwan stop-manager`
+
+Stop the WWAN manager service.
+
+```
+igos@igos:~$ execute wwan stop-manager
+```
+
+**Script:** `wwan.py execute_stop_manager`
+
+**Behavior:**
+- Stops the `igos-wwan-manager.service` systemd unit
+- Intended for controlled shutdown or troubleshooting of the WWAN manager
+- Does not change the syntax or behavior of the other WWAN operational commands
+
+---
+
+## Set Commands
+
+### `set wwan firmware <archive>`
+
+Set the WWAN modem firmware from a ZIP archive.
+
+```
+igos@igos:~$ set wwan firmware TC_LN920_HW_1.1_40.00.004_STREAM.zip
+```
+
+**Script:** `wwan.py set_firmware --archive="$4"`
+
+**Behavior:**
+- Requires a valid `.zip` archive containing exactly one supported firmware
+  package type:
+  - UXFP: contains one `.bin` stream file
+  - TFL: contains one `information.contents` manifest
+- Rejects archives that contain both package types, multiple matching package
+  files, or neither supported package type
+- Displays the installed modem model, firmware revision, and hardware revision
+- Verifies that the firmware update tool selected for the detected package
+  (`uxfp` or `tfl`) is installed
+- For UXFP packages, extracts the `.bin` stream file
+- For TFL packages, extracts the complete archive and uses the directory
+  containing `information.contents` as the firmware package directory
+- Extracts firmware into an automatically removed temporary directory
+- Stops and verifies `igos-wwan-manager.service` and `ModemManager`
+- For TFL packages, loads and verifies the `qcserial` kernel module and
+  validates the extracted package with `tfl <package-directory> --dry-run`
+- Installs UXFP firmware with `uxfp --file <binary-file>`
+- Installs TFL firmware with `tfl <package-directory>`
+
+---
+
 ## SMS Commands
 
 ### `generate interfaces wwan <wwanN> sms number <phone> message <text>`
@@ -749,9 +810,11 @@ an HTTPS POST body, use `syslog-identifier igos-wwan-alertbus-json` and parse
 | `op-mode-definitions/clear-sms.xml.in` | XML: `clear interfaces wwan … sms` and `data-usage` commands |
 | `op-mode-definitions/connect.xml.in` | XML: `connect interface` (shared with PPPoE/SSTPC) |
 | `op-mode-definitions/disconnect.xml.in` | XML: `disconnect interface` (shared with PPPoE/SSTPC) |
+| `op-mode-definitions/wwan.xml.in` | XML: `stop wwan manager` and `set firmware` commands |
 | `src/op_mode/show_wwan.py` | Python: status, hardware, sim, signal, detail, clear data-usage handlers |
 | `src/op_mode/wwan_sms.py` | Python: send, list, read, delete SMS handlers |
 | `src/op_mode/connect_disconnect.py` | Python: connect/disconnect handler (shared) |
+| `src/op_mode/wwan.py` | Python: stop WWAN manager and set modem firmware handlers |
 | `python/vyos/utils/wwan/wwan_client.py` | Python: `WWANClientSync` D-Bus client library |
 | `python/vyos/utils/wwan/alert_adapters.py` | Python: AlertBus subscriber adapters (REST/MQTT/SNMP skeletons) |
 | `python/vyos/utils/wwan/interfaces_wwan_config.py` | Python: D-Bus service — per-interface methods |
@@ -779,6 +842,8 @@ an HTTPS POST body, use `syslog-identifier igos-wwan-alertbus-json` and parse
 | `show interfaces wwan wwan0 event-log link` | Link-state events only |
 | `connect interface wwan0` | Bring up WWAN bearer |
 | `disconnect interface wwan0` | Tear down WWAN bearer |
+| `execute wwan stop-manager` | Stop the WWAN manager service |
+| `set wwan firmware file.zip` | Set WWAN Modem Firmware |
 | `generate interfaces wwan wwan0 sms number '+15551234567' message 'hello'` | Send an SMS |
 | `clear interfaces wwan wwan0 sms` | Clear all SMS messages |
 | `clear interfaces wwan wwan0 sms message 3` | Clear SMS message #3 |

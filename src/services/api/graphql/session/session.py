@@ -137,6 +137,17 @@ class Session:
 
         return res
 
+    def set_cellular_firmware(self):
+        session = self._session
+        data = self._data
+
+        try:
+            res = session.set_cellular_firmware(data['location'])
+        except Exception as error:
+            raise error
+
+        return res
+
     def delete_system_image(self):
         session = self._session
         data = self._data

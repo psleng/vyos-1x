@@ -56,6 +56,11 @@ INSTALL_IMAGE = [
     '--no-prompt',
     '--image-path',
 ]
+SET_CELLULAR_FIRMWARE = [
+    '/usr/libexec/vyos/op_mode/wwan.py',
+    'set_firmware',
+    '--archive',
+]
 IMPORT_PKI = ['/opt/vyatta/bin/vyatta-op-cmd-wrapper', 'import']
 IMPORT_PKI_NO_PROMPT = [
     '/usr/libexec/vyos/op_mode/pki.py',
@@ -405,6 +410,10 @@ class ConfigSession(object):
 
     def install_image(self, url):
         out = self.__run_command(INSTALL_IMAGE + [url])
+        return out
+
+    def set_cellular_firmware(self, location):
+        out = self.__run_command(SET_CELLULAR_FIRMWARE + [location])
         return out
 
     def remove_image(self, name):
