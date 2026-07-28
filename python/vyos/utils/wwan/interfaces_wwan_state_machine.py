@@ -18852,8 +18852,13 @@ class ModemStateMachine:
                 # Add IPv6 address with /128 — point-to-point link to carrier;
                 # the full carrier prefix may be bridged to a downstream LAN
                 # interface via 'ipv6-bridging' (see _bridging_apply_all).
+                # nodad: DAD is meaningless on a point-to-point carrier link
+                # (the router owns this address), and on a NOARP raw_ip wwan
+                # interface the DAD NS is undeliverable — it surfaces as a
+                # dropped TX frame and risks a spurious 'dadfailed' if the
+                # carrier reflects it. Matches the other v6-add paths.
                 result = await asyncio.create_subprocess_exec(
-                    'ip', '-6', 'addr', 'add', f"{ipv6_addr}/128", 'dev', interface_name,
+                    'ip', '-6', 'addr', 'add', f"{ipv6_addr}/128", 'dev', interface_name, 'nodad',
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
                 )
