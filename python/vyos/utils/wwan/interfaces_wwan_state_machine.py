@@ -18143,6 +18143,14 @@ class ModemStateMachine:
         return {
             f"/proc/sys/net/ipv6/conf/{wwan}/accept_ra":         "0",
             f"/proc/sys/net/ipv6/conf/{wwan}/autoconf":          "0",
+            f"/proc/sys/net/ipv6/conf/{wwan}/addr_gen_mode":     "3",
+            # DAD is pointless on a point-to-point /64-per-UE cellular link, and
+            # its Neighbor Solicitation is undeliverable on a NOARP raw_ip
+            # device (surfaces as a dropped TX frame + risks a spurious
+            # 'dadfailed'). Disable it so the stable-privacy link-local from
+            # addr_gen_mode=3 comes up clean — mirrors the 'nodad' on the /128.
+            f"/proc/sys/net/ipv6/conf/{wwan}/accept_dad":        "0",
+            f"/proc/sys/net/ipv6/conf/{wwan}/dad_transmits":     "0",
             f"/proc/sys/net/ipv6/conf/{wwan}/accept_ra_defrtr":  "0",
             f"/proc/sys/net/ipv6/conf/{wwan}/accept_ra_pinfo":   "0",
             f"/proc/sys/net/ipv6/conf/{wwan}/accept_ra_rtr_pref": "0",
@@ -18703,8 +18711,15 @@ class ModemStateMachine:
             ipv6_routed = False
 
 
-            # Ensure interface is UP before applying IP configuration
-            # Routes cannot be installed on a DOWN interface (causes "Nexthop has invalid gateway")
+            # Force WWAN IPv6 posture before any address is installed and
+            # before we raise the link. This keeps the FSM as sole owner of
+            # RA/SLAAC behavior and sets addr_gen_mode=3 so the upcoming UP
+            # transition can generate a deterministic link-local on raw_ip.
+            await self._harden_wwan_ipv6_sysctls()
+
+            # Ensure interface is UP before applying IP configuration.
+            # Routes cannot be installed on a DOWN interface
+            # ("Nexthop has invalid gateway").
             result = await asyncio.create_subprocess_exec(
                 'ip', 'link', 'set', 'dev', interface_name, 'up',
                 stdout=asyncio.subprocess.PIPE,
@@ -18717,12 +18732,6 @@ class ModemStateMachine:
             else:
                 logger.info(f"Interface {interface_name} set UP for IP configuration",
                            extra={'interface_number': self.interface_number})
-
-            # Force-disable kernel RA/SLAAC autoconfiguration on wwan
-            # before any address is installed. The modem already gave us
-            # full IPv6 config via Ip6Config — a carrier RA on the bearer
-            # must NOT race the FSM's address/route/DNS plumbing.
-            await self._harden_wwan_ipv6_sysctls()
 
             # ── Source address enforcement: capture old IPs before clearing ──
             old_ipv4 = self._current_bearer_ipv4

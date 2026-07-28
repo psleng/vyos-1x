@@ -35,8 +35,38 @@
           #include <include/interface/vrf.xml.i>
           #include <include/interface/mirror.xml.i>
           #include <include/interface/ipv4-options.xml.i>
-          #include <include/interface/ipv6-options.xml.i>
-          #include <include/interface/ipv6-options-with-nd.xml.i>
+          <!-- ── IPv6 options (WWAN-specific) ──────────────────────────────
+               Reconstructed from include/interface/ipv6-options.xml.i and
+               ipv6-options-with-nd.xml.i but WITHOUT the host-SLAAC address
+               modes: `address autoconf`, `address eui64` and
+               `address interface-identifier`.  The Telit modem terminates
+               3GPP SLAAC internally and never relays a Router Advertisement
+               onto wwanN, so host SLAAC can never complete; the WWAN FSM
+               installs the carrier /128 from ModemManager Ip6Config and is
+               the sole owner of all RA/SLAAC/DAD sysctls (see
+               _harden_wwan_ipv6_sysctls).  Exposing those nodes would
+               advertise a capability the hardware cannot deliver. -->
+          <node name="ipv6">
+            <properties>
+              <help>IPv6 routing parameters</help>
+            </properties>
+            <children>
+              #include <include/interface/adjust-mss.xml.i>
+              #include <include/interface/base-reachable-time.xml.i>
+              #include <include/interface/disable-forwarding.xml.i>
+              #include <include/interface/ipv6-accept-dad.xml.i>
+              #include <include/interface/ipv6-dup-addr-detect-transmits.xml.i>
+              #include <include/interface/source-validation.xml.i>
+              <node name="address">
+                <properties>
+                  <help>IPv6 address configuration modes</help>
+                </properties>
+                <children>
+                  #include <include/interface/ipv6-address-no-default-link-local.xml.i>
+                </children>
+              </node>
+            </children>
+          </node>
           <!-- ── IPv6 management-address (FSM-stamped <prefix>::1 on wwanN) ── -->
           <!--
             Extends the standard `ipv6` node above with a `management-address`
