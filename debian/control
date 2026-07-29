@@ -416,6 +416,9 @@ Depends:
 # For apn functionality
   apnscripts,
 # End apn functionality
+# For wwan-on-demand functionality
+  python-netfilterqueue,
+# End wwan-on-demand functionality
 ## TPM tools
   cryptsetup,
   tpm2-tools,
