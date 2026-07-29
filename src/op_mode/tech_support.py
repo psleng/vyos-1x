@@ -80,9 +80,26 @@ def _get_interrupts():
     return (interrupts, softirqs)
 
 def _get_partitions():
+    from vyos.utils.process import rc_cmd
+
     # XXX: as of parted 3.5, --json is completely broken
     # and cannot be used (outputs malformed JSON syntax)
-    res = cmd(f"parted --list")
+    #
+    # This runs during tech-support collection, which is most often invoked
+    # exactly when storage is misbehaving, so it must never stall or abort the
+    # whole report because of a bad disk:
+    #   --script : non-interactive, so a device whose GPT does not span the
+    #              disk (image flashed onto a larger medium) or is corrupt
+    #              cannot block forever on a "Fix/Ignore?" prompt
+    #   timeout  : bound a physically failing device that stalls I/O
+    #   rc_cmd   : tolerate a non-zero exit (blank/corrupt/absent disk) — it
+    #              becomes a warning plus partial output instead of raising
+    #              and aborting the entire tech-support archive
+    code, res = rc_cmd("timeout -k 5 15 parted --script --list")
+    if code != 0:
+        Warning("Partition information may be incomplete "
+                "(parted timed out or exited non-zero)")
+        res = res or "parted --list did not complete"
 
     return res
 
