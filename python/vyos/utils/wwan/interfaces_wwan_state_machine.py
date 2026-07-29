@@ -9461,6 +9461,26 @@ class ModemStateMachine:
                                   (self._mode_mask_to_names(a), self._mode_mask_to_names(p))
                                   for a, p in supported]})
 
+            # Fallback visibility (general case, not 5G-specific): the operator's
+            # explicit restriction is honoured whenever the modem ADVERTISES a
+            # matching tuple in SupportedModes.  When it does NOT, the scorer
+            # above picks the closest supported tuple instead -- that is the
+            # intended fallback, but the operator must be able to SEE that their
+            # requested RAT set was widened/changed.  This logger drops the
+            # `extra` dict, so the requested-vs-applied detail goes in the
+            # message itself.
+            if not is_auto and allowed != desired_bits:
+                logger.warning(
+                    "network-mode '%s' not fully supported by this modem - "
+                    "requested RAT %s has no exactly-matching supported tuple; "
+                    "falling back to closest supported (allowed=%s, preferred=%s)"
+                    % (network_mode,
+                       self._mode_mask_to_names(desired_bits),
+                       self._mode_mask_to_names(allowed),
+                       self._mode_mask_to_names(preferred)),
+                    extra={'interface_number': self.interface_number,
+                           'network_mode': network_mode})
+
             try:
                 # Skip the write if the modem is already in the chosen mode.
                 current_modes_variant = await props.call_get(MODEM_INTERFACE, "CurrentModes")
@@ -9489,10 +9509,25 @@ class ModemStateMachine:
                                   'preferred': self._mode_mask_to_names(preferred)})
 
             except Exception as mode_e:
-                logger.info("Network mode configuration not supported by this modem or driver",
-                           extra={'interface_number': self.interface_number,
-                                  'error': str(mode_e),
-                                  'mode': network_mode})
+                # The modem advertised this tuple in SupportedModes but rejected
+                # the actual write (e.g. Telit FN920C04 advertises NR-only /
+                # 'allowed: 5g' yet returns QMI (25) DeviceUnsupported when it is
+                # set).  Per design we honour the operator's explicit request and
+                # do NOT silently work around a modem that accepts-then-lies --
+                # but the failure MUST be visible.  This logger drops the `extra`
+                # dict, so put the real error (type + message) in the log line
+                # itself, at WARNING, and note the modem is left on its prior mode.
+                logger.warning(
+                    "Network mode write rejected by modem/driver - requested "
+                    "'%s' (allowed=%s, preferred=%s) NOT applied; modem left on "
+                    "its prior mode: %s: %s"
+                    % (network_mode,
+                       self._mode_mask_to_names(allowed),
+                       self._mode_mask_to_names(preferred),
+                       type(mode_e).__name__, mode_e),
+                    extra={'interface_number': self.interface_number,
+                           'error': str(mode_e),
+                           'mode': network_mode})
 
         except Exception as e:
             logger.error(f"Network mode configuration error: {e}",
@@ -18108,6 +18143,14 @@ class ModemStateMachine:
         return {
             f"/proc/sys/net/ipv6/conf/{wwan}/accept_ra":         "0",
             f"/proc/sys/net/ipv6/conf/{wwan}/autoconf":          "0",
+            f"/proc/sys/net/ipv6/conf/{wwan}/addr_gen_mode":     "3",
+            # DAD is pointless on a point-to-point /64-per-UE cellular link, and
+            # its Neighbor Solicitation is undeliverable on a NOARP raw_ip
+            # device (surfaces as a dropped TX frame + risks a spurious
+            # 'dadfailed'). Disable it so the stable-privacy link-local from
+            # addr_gen_mode=3 comes up clean — mirrors the 'nodad' on the /128.
+            f"/proc/sys/net/ipv6/conf/{wwan}/accept_dad":        "0",
+            f"/proc/sys/net/ipv6/conf/{wwan}/dad_transmits":     "0",
             f"/proc/sys/net/ipv6/conf/{wwan}/accept_ra_defrtr":  "0",
             f"/proc/sys/net/ipv6/conf/{wwan}/accept_ra_pinfo":   "0",
             f"/proc/sys/net/ipv6/conf/{wwan}/accept_ra_rtr_pref": "0",
@@ -18668,8 +18711,15 @@ class ModemStateMachine:
             ipv6_routed = False
 
 
-            # Ensure interface is UP before applying IP configuration
-            # Routes cannot be installed on a DOWN interface (causes "Nexthop has invalid gateway")
+            # Force WWAN IPv6 posture before any address is installed and
+            # before we raise the link. This keeps the FSM as sole owner of
+            # RA/SLAAC behavior and sets addr_gen_mode=3 so the upcoming UP
+            # transition can generate a deterministic link-local on raw_ip.
+            await self._harden_wwan_ipv6_sysctls()
+
+            # Ensure interface is UP before applying IP configuration.
+            # Routes cannot be installed on a DOWN interface
+            # ("Nexthop has invalid gateway").
             result = await asyncio.create_subprocess_exec(
                 'ip', 'link', 'set', 'dev', interface_name, 'up',
                 stdout=asyncio.subprocess.PIPE,
@@ -18682,12 +18732,6 @@ class ModemStateMachine:
             else:
                 logger.info(f"Interface {interface_name} set UP for IP configuration",
                            extra={'interface_number': self.interface_number})
-
-            # Force-disable kernel RA/SLAAC autoconfiguration on wwan
-            # before any address is installed. The modem already gave us
-            # full IPv6 config via Ip6Config — a carrier RA on the bearer
-            # must NOT race the FSM's address/route/DNS plumbing.
-            await self._harden_wwan_ipv6_sysctls()
 
             # ── Source address enforcement: capture old IPs before clearing ──
             old_ipv4 = self._current_bearer_ipv4
@@ -18817,8 +18861,13 @@ class ModemStateMachine:
                 # Add IPv6 address with /128 — point-to-point link to carrier;
                 # the full carrier prefix may be bridged to a downstream LAN
                 # interface via 'ipv6-bridging' (see _bridging_apply_all).
+                # nodad: DAD is meaningless on a point-to-point carrier link
+                # (the router owns this address), and on a NOARP raw_ip wwan
+                # interface the DAD NS is undeliverable — it surfaces as a
+                # dropped TX frame and risks a spurious 'dadfailed' if the
+                # carrier reflects it. Matches the other v6-add paths.
                 result = await asyncio.create_subprocess_exec(
-                    'ip', '-6', 'addr', 'add', f"{ipv6_addr}/128", 'dev', interface_name,
+                    'ip', '-6', 'addr', 'add', f"{ipv6_addr}/128", 'dev', interface_name, 'nodad',
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
                 )
