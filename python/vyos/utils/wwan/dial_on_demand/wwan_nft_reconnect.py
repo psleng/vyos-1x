@@ -7,12 +7,9 @@
 
 from netfilterqueue import NetfilterQueue
 import subprocess
-import time
-import os
 import re
 import asyncio
 import argparse
-from collections import deque
 
 from vyos.utils.wwan.wwan_client import (  # noqa: E402
     WWANClient
