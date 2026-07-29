@@ -14,6 +14,7 @@
 # License along with this library.  If not, see <http://www.gnu.org/licenses/>.
 
 from vyos.ifconfig.interface import Interface
+from vyos.ifconfig.interface import link_local_prefix
 
 @Interface.register
 class WWANIf(Interface):
@@ -84,6 +85,25 @@ class WWANIf(Interface):
         if getattr(self, '_fsm_owns_ipv6_posture', False):
             return None
         return super().set_ipv6_dad_messages(dad)
+
+    def add_ipv6_eui64_address(self, prefix):
+        # ROOT-CAUSE fix for the stale MAC-derived link-local on wwanN.
+        # The generic Interface.update() unconditionally ADDS an EUI-64
+        # link-local (fe80::<eui64-from-MAC>/64) via an explicit `ip -6 addr
+        # add` unless 'no-default-link-local' is configured. That address is
+        # installed by MAC, independently of the kernel's addr_gen_mode, which
+        # is why it survived every sysctl/udev attempt to suppress it. On the
+        # FSM-owned wwan netdev the kernel already generates a stable-privacy
+        # link-local (addr_gen_mode=3, set in _harden_wwan_ipv6_sysctls); the
+        # extra MAC-based address is stale (the qmi_wwan MAC is random per
+        # boot) and, being on a NOARP raw_ip device, its DAD Neighbor
+        # Solicitation is undeliverable and surfaces as a dropped TX frame.
+        # Suppress ONLY the default link-local add while the FSM owns posture;
+        # an explicit `ipv6 address eui64 <global-prefix>` is still honored.
+        if getattr(self, '_fsm_owns_ipv6_posture', False) and \
+                prefix == link_local_prefix:
+            return None
+        return super().add_ipv6_eui64_address(prefix)
 
     def update(self, config, defer_admin_up=False):
         '''Perform interface setup for wwan
