@@ -5,6 +5,12 @@
   </properties>
   <children>
     #include <include/serial/service/utils/serial-buffering.xml.i>
+    <leafNode name="serial-buffering">
+      <properties>
+        <help>Enable serial buffering [trueport lite only]</help>
+        <valueless/>
+      </properties>
+    </leafNode>
     #include <include/serial/service/utils/idle-timeout.xml.i>
     #include <include/serial/service/utils/keepalive.xml.i>
     #include <include/serial/service/utils/session-timeout.xml.i>
@@ -23,6 +29,23 @@
       <children>
         #include <include/serial/service/utils/multihost.xml.i>
         #include <include/serial/service/utils/send-description.xml.i>
+        <node name="remote">
+          <properties>
+            <help>Remote host connection settings</help>
+          </properties>
+          <children>
+            <node name="backup">
+              <properties>
+                <help>Backup host connection settings [trueport lite only]</help>
+              </properties>
+            </node>
+            <node name="multi-host">
+              <properties>
+                <help>Multi-host connection settings [trueport lite only]</help>
+              </properties>
+            </node>
+          </children>
+        </node>
       </children>
     </node>
     <node name="server">
