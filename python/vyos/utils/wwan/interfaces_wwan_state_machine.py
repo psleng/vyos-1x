@@ -3454,6 +3454,7 @@ class ModemStateMachine:
         self._current_bearer_ipv6_prefix = None  # e.g. '64' — length of the carrier prefix
         self._ipv6_egress_filter_active = False  # True when ip6tables whitelist chain is installed
         self._ipv4_egress_filter_active = False  # True when iptables whitelist chain is installed
+        self._output_hygiene_active = False      # True when the OUTPUT egress-hygiene drops (v6 mcast + v4 mcast/bcast) are installed
         self._fsm_mss_clamp_v4_active = False    # FSM-owned mangle/FORWARD TCPMSS rule (v4)
         self._fsm_mss_clamp_v6_active = False    # FSM-owned mangle/FORWARD TCPMSS rule (v6)
 
@@ -16430,6 +16431,8 @@ class ModemStateMachine:
         # Remove IPv6 egress prefix filter (interface is going down)
         interface_name = f"wwan{self.interface_number}"
         await self._remove_ipv6_egress_filter(interface_name)
+        # Remove the carrier-cert egress-hygiene drop (MLD/RS/RA/IGMP).
+        await self._remove_wwan_output_hygiene(interface_name)
         # Remove IPv4 source whitelist + FSM-wide MSS clamp.
         await self._remove_ipv4_egress_filter(interface_name)
         await self._remove_fsm_mss_clamp(interface_name)
@@ -17444,6 +17447,118 @@ class ModemStateMachine:
         await self._run_ipcmd('ip6tables', '-X', chain)
         self._ipv6_egress_filter_active = False
         logger.info("IPv6 egress filter removed from %s", interface_name,
+                    extra={'interface_number': self.interface_number})
+
+    # ── Carrier-certification egress hygiene (locally-generated multicast) ─
+    #
+    # A 3GPP PDN bearer is a point-to-point, unicast-only link: there is no
+    # on-link multicast router, and the bearer carries no IP multicast. Linux
+    # nevertheless treats wwanN as an ordinary multicast-capable router
+    # interface and emits MLD reports (it joins ff02::2 as a forwarding router
+    # plus a solicited-node group per address), Router Solicitations, IPv4
+    # IGMP, and — if any host service is running — link-scoped chatter such as
+    # mDNS (ff02::fb / 224.0.0.251), LLMNR (ff02::1:3 / 224.0.0.252) and SSDP
+    # (ff02::c / 239.255.255.250). Carrier certification (Verizon/AT&T)
+    # captures the uplink and FAILS a device that transmits any of this. The
+    # kernel generates the housekeeping regardless of IFF_MULTICAST / sysctl,
+    # so the only reliable suppression is a netfilter OUTPUT drop, which runs
+    # before the packet reaches the qmi_wwan driver.
+    #
+    # Belt-and-braces: explicit ICMPv6 TYPE drops (MLD/RS/RA) for clear
+    # per-type counters, PLUS a destination-scoped catch-all that drops ALL
+    # remaining IPv6 multicast (ff00::/8) and IPv4 multicast/broadcast
+    # (224.0.0.0/4, 255.255.255.255). An explicit allowlist RETURNs the two
+    # things that legitimately use multicast on the bearer, so the catch-all
+    # never breaks them:
+    #   - NDP / proxy-NDP    -> NS/NA (ICMPv6 types 135/136)  RETURN
+    #   - DHCPv6 / DHCPv6-PD -> UDP to [ff02::1:2]:547         RETURN
+    # Unicast (DNS, NTP, HTTPS, ICMPv6 echo, PMTUD errors) is never matched.
+    # Installed BEFORE `ip link set up` (in _apply_bearer_ip_configuration)
+    # so nothing leaks even at bring-up; removed on bearer-down.
+
+    def _output_hygiene_chain_name(self, interface_name):
+        """ip6tables chain for the wwan OUTPUT multicast-housekeeping drop."""
+        return f"{interface_name.upper()}_OUT_HYGIENE"  # <= 28 chars
+
+    async def _install_wwan_output_hygiene(self, interface_name):
+        """Drop locally-generated multicast/broadcast housekeeping on wwanN.
+
+        IPv6 (jumped chain): RETURN NDP NS/NA and DHCPv6(-PD); DROP MLD/RS/RA
+        by type; DROP every other IPv6 multicast (ff00::/8).
+        IPv4 (plain OUTPUT): DROP IGMP, all multicast (224.0.0.0/4) and the
+        limited broadcast (255.255.255.255).
+
+        Idempotent: the v6 chain is (re)created empty and fully repopulated on
+        every call; the v4 rules and the OUTPUT jump are delete-then-insert so
+        a stale rule from a prior service run can never accumulate.
+        """
+        chain = self._output_hygiene_chain_name(interface_name)
+        # ICMPv6 types dropped by their own rule (clear per-type counters):
+        # 130 MLD query, 131 MLDv1 report, 132 MLDv1 done, 143 MLDv2 report,
+        # 133 router solicitation, 134 router advertisement.
+        icmp6_drop_types = ('130', '131', '132', '143', '133', '134')
+        # IPv4 plain-OUTPUT drops. -I OUTPUT 1 is LIFO, so listing IGMP last
+        # leaves the final order IGMP, 224.0.0.0/4, 255.255.255.255.
+        ipv4_drops = (('-d', '255.255.255.255'),
+                      ('-d', '224.0.0.0/4'),
+                      ('-p', 'igmp'))
+        if self._output_hygiene_active:
+            await self._run_ipcmd('ip6tables', '-F', chain)
+        else:
+            # Create the chain, then flush so a restart-without-teardown (chain
+            # survived in the kernel) can never double the appended rules.
+            await self._run_ipcmd('ip6tables', '-N', chain)
+            await self._run_ipcmd('ip6tables', '-F', chain)
+            # single OUTPUT jump for v6 (delete any stale one first)
+            await self._run_ipcmd('ip6tables', '-D', 'OUTPUT',
+                                  '-o', interface_name, '-j', chain)
+            await self._run_ipcmd('ip6tables', '-I', 'OUTPUT', '1',
+                                  '-o', interface_name, '-j', chain)
+            # IPv4 plain-OUTPUT drops (delete stale, insert at top)
+            for match in ipv4_drops:
+                await self._run_ipcmd('iptables', '-D', 'OUTPUT',
+                                      '-o', interface_name, *match, '-j', 'DROP')
+                await self._run_ipcmd('iptables', '-I', 'OUTPUT', '1',
+                                      '-o', interface_name, *match, '-j', 'DROP')
+            self._output_hygiene_active = True
+        # ── v6 chain body — order matters: allowlist RETURNs before catch-all ─
+        # Keep NDP neighbor solicitation/advertisement (gateway reachability).
+        await self._run_ipcmd('ip6tables', '-A', chain,
+                              '-p', 'icmpv6', '--icmpv6-type', '135', '-j', 'RETURN')
+        await self._run_ipcmd('ip6tables', '-A', chain,
+                              '-p', 'icmpv6', '--icmpv6-type', '136', '-j', 'RETURN')
+        # Keep DHCPv6 / DHCPv6-PD client->server (dhcp6c) to [ff02::1:2]:547.
+        await self._run_ipcmd('ip6tables', '-A', chain,
+                              '-p', 'udp', '-d', 'ff02::1:2', '--dport', '547',
+                              '-j', 'RETURN')
+        # Drop MLD/RS/RA by explicit type (per-type counters = cert evidence).
+        for t in icmp6_drop_types:
+            await self._run_ipcmd('ip6tables', '-A', chain,
+                                  '-p', 'icmpv6', '--icmpv6-type', t, '-j', 'DROP')
+        # Catch-all: every remaining IPv6 multicast (mDNS/LLMNR/SSDP/...).
+        await self._run_ipcmd('ip6tables', '-A', chain,
+                              '-d', 'ff00::/8', '-j', 'DROP')
+        logger.info("WWAN egress hygiene installed on %s (drop outbound MLD/RS/RA, "
+                    "all IPv6 mcast ff00::/8, IPv4 mcast/bcast; keep NDP + DHCPv6-PD)",
+                    interface_name,
+                    extra={'interface_number': self.interface_number})
+
+    async def _remove_wwan_output_hygiene(self, interface_name):
+        """Remove the OUTPUT hygiene chain (v6) and the IPv4 drop rules."""
+        if not self._output_hygiene_active:
+            return
+        chain = self._output_hygiene_chain_name(interface_name)
+        await self._run_ipcmd('ip6tables', '-D', 'OUTPUT',
+                              '-o', interface_name, '-j', chain)
+        await self._run_ipcmd('ip6tables', '-F', chain)
+        await self._run_ipcmd('ip6tables', '-X', chain)
+        for match in (('-p', 'igmp'),
+                      ('-d', '224.0.0.0/4'),
+                      ('-d', '255.255.255.255')):
+            await self._run_ipcmd('iptables', '-D', 'OUTPUT',
+                                  '-o', interface_name, *match, '-j', 'DROP')
+        self._output_hygiene_active = False
+        logger.info("WWAN egress hygiene removed from %s", interface_name,
                     extra={'interface_number': self.interface_number})
 
     # ── IPv4 egress source whitelist ────────────────────────────────────
@@ -18716,6 +18831,11 @@ class ModemStateMachine:
             # RA/SLAAC behavior and sets addr_gen_mode=3 so the upcoming UP
             # transition can generate a deterministic link-local on raw_ip.
             await self._harden_wwan_ipv6_sysctls()
+
+            # Carrier-certification egress hygiene: drop locally-generated
+            # IPv6 MLD/RS/RA and IPv4 IGMP on wwanN BEFORE the link comes up,
+            # so none of that housekeeping ever reaches the modem / uplink.
+            await self._install_wwan_output_hygiene(interface_name)
 
             # Ensure interface is UP before applying IP configuration.
             # Routes cannot be installed on a DOWN interface
