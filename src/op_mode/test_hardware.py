@@ -239,6 +239,126 @@ def pin_pulse(args) -> None:
     print(f'OK: pulsed {args.name} for {args.ms} ms')
 
 
+# --- rtc --------------------------------------------------------------------
+#
+# The RV-3028 backup switchover mode is a one-time, non-volatile setting stored
+# in the RTC's own EEPROM (it survives power loss and eMMC reflashes), so it is
+# normally written once at manufacturing -- NOT at boot. These out-of-band
+# commands exist as a field/repair escape hatch (e.g. after an RTC swap).
+#
+# Param index 2 is RTC_PARAM_BACKUP_SWITCH_MODE in the kernel UAPI; the values
+# are the UAPI RTC_BSM_* codes as exposed by `hwclock --param-get/--param-set`.
+_RTC_PARAM_BSM = 2
+_RTC_BSM_MODES = {
+    'disabled': 0,  # RTC_BSM_DISABLED
+    'direct-switching': 1,  # RTC_BSM_DIRECT (DSM)
+    'level-switching': 2,  # RTC_BSM_LEVEL  (LSM) -- production default
+}
+_RTC_BSM_NAMES = {v: k for k, v in _RTC_BSM_MODES.items()}
+_RTC_BSM_NAMES[3] = 'standby'  # RTC_BSM_STANDBY (report-only)
+
+
+def _find_rv3028() -> str:
+    """Return the ``/dev/rtcN`` of the RV-3028, or ``''`` if not present.
+
+    Keys off the driver name in sysfs, so it never assumes ``rtc0`` and never
+    touches a different RTC chip on boards that expose more than one.
+    """
+    import glob
+    import os
+
+    for name_path in sorted(glob.glob('/sys/class/rtc/rtc*/name')):
+        try:
+            with open(name_path) as f:
+                name = f.read().strip().lower()
+        except OSError:
+            continue
+        if 'rv3028' in name:
+            dev = '/dev/' + os.path.basename(os.path.dirname(name_path))
+            if os.path.exists(dev):
+                return dev
+    return ''
+
+
+def _rv3028_or_die() -> str:
+    dev = _find_rv3028()
+    if not dev:
+        # The driver is built as a module and may not be auto-bound; try loading
+        # it once, then rescan. Harmless where the chip is absent (no device
+        # node appears), so non-RV-3028 platforms fail gracefully below.
+        import subprocess
+
+        subprocess.run(
+            ['modprobe', 'rtc-rv3028'],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        dev = _find_rv3028()
+    if not dev:
+        _die(
+            'no RV-3028 RTC on this board '
+            '(this command applies to Perle am64x hardware)'
+        )
+    return dev
+
+
+def _rtc_get_bsm(dev: str) -> int:
+    import re
+    import subprocess
+
+    r = subprocess.run(
+        ['hwclock', '-f', dev, '--param-get', str(_RTC_PARAM_BSM)],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        _die(
+            f'could not read RTC backup mode from {dev}: '
+            f'{(r.stderr or r.stdout).strip()}'
+        )
+    m = re.search(r'set to\s+(0x[0-9a-fA-F]+|\d+)', r.stdout)
+    if not m:
+        _die(f'could not parse RTC backup mode (hwclock: {r.stdout.strip()!r})')
+    tok = m.group(1)
+    return int(tok, 16) if tok.lower().startswith('0x') else int(tok)
+
+
+def rtc_show(args) -> None:
+    dev = _rv3028_or_die()
+    val = _rtc_get_bsm(dev)
+    name = _RTC_BSM_NAMES.get(val, f'unknown({val})')
+    fmt = '{:<14}{:<18}{}'
+    print(fmt.format('DEVICE', 'BACKUP-MODE', 'VALUE'))
+    print(fmt.format(dev, name, val))
+
+
+def rtc_backup_mode(args) -> None:
+    import subprocess
+
+    dev = _rv3028_or_die()
+    target = _RTC_BSM_MODES[args.mode]
+    if _rtc_get_bsm(dev) == target:
+        print(f'OK: {dev} backup-mode already {args.mode} ({target}); no change')
+        return
+    r = subprocess.run(
+        ['hwclock', '-f', dev, '--param-set', f'{_RTC_PARAM_BSM}={target}'],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        _die(
+            f'failed to set RTC backup mode on {dev}: '
+            f'{(r.stderr or r.stdout).strip()}'
+        )
+    new = _rtc_get_bsm(dev)
+    if new != target:
+        _die(
+            f'RTC backup mode did not persist on {dev} '
+            f'(wanted {target}, read {new})'
+        )
+    print(f'OK: {dev} backup-mode -> {args.mode} ({target})')
+
+
 # --- arg dispatch -----------------------------------------------------------
 
 def main() -> None:
@@ -289,6 +409,14 @@ def main() -> None:
     s.add_argument('--name', required=True)
     s.add_argument('--ms', default='200')
     s.add_argument('--asserted', default='1')
+
+    # rtc — RV-3028 backup switchover mode (out-of-band)
+    s = sub.add_parser('rtc_show')
+    s.set_defaults(fn=rtc_show)
+
+    s = sub.add_parser('rtc_backup_mode')
+    s.set_defaults(fn=rtc_backup_mode)
+    s.add_argument('--mode', required=True, choices=sorted(_RTC_BSM_MODES))
 
     args = p.parse_args()
     args.fn(args)
