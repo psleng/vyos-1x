@@ -742,14 +742,15 @@ class ModemStateMachine:
         self._bridging_radvd = BridgingRadvdManager(self.interface_number)
 
         # ── IPv6 management-address (FSM-stamped <prefix>::host-id on wwanN) ──
-        # Default-on whenever the bearer has IPv6 and ip-passthrough is not
-        # set.  Stamps a stable host address inside the carrier prefix on
-        # the WWAN interface itself and installs an FSM-owned ip6tables
-        # drop chain so all inbound to that address is dropped except for
-        # user-permitted ports / sources.  Refreshed from raw_config in
-        # _load_configuration().
+        # OPT-IN: stamped only when the user creates the `ipv6 management-address`
+        # node (conf-mode then emits enabled=True).  Defaults OFF here so an
+        # absent/old raw_config key leaves wwanN address-only instead of silently
+        # stamping the address.  When enabled, stamps a stable host address inside
+        # the carrier prefix on wwanN and installs an FSM-owned ip6tables drop
+        # chain (all inbound to that address dropped except user-permitted ports /
+        # sources).  Refreshed from raw_config in _load_configuration().
         self._mgmt_addr_config = {
-            'enabled': True, 'host_id': '::1',
+            'enabled': False, 'host_id': '::1',
             'permit_tcp': [], 'permit_udp': [], 'permit_source': [],
         }
         self._mgmt_addr_applied = None       # currently-applied address string
@@ -3532,10 +3533,12 @@ class ModemStateMachine:
                        self._bridging_reconciliation_interval,
                        extra={'interface_number': self.interface_number})
 
-        # IPv6 management-address (FSM-stamped <prefix>::host-id on wwanN)
+        # IPv6 management-address (FSM-stamped <prefix>::host-id on wwanN).
+        # OPT-IN: fall back to DISABLED when the key is absent (old config /
+        # edge case) so the feature is never silently default-on.
         self._mgmt_addr_config = self.parsed_config.raw_config.get(
             'ipv6_management_address',
-            {'enabled': True, 'host_id': '::1',
+            {'enabled': False, 'host_id': '::1',
              'permit_tcp': [], 'permit_udp': [], 'permit_source': []},
         )
         if self._mgmt_addr_config.get('enabled'):
