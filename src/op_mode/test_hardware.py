@@ -311,14 +311,15 @@ def _rtc_get_bsm(dev: str) -> int:
         capture_output=True,
         text=True,
     )
-    if r.returncode != 0:
-        _die(
-            f'could not read RTC backup mode from {dev}: '
-            f'{(r.stderr or r.stdout).strip()}'
-        )
-    m = re.search(r'set to\s+(0x[0-9a-fA-F]+|\d+)', r.stdout)
+    # On a successful read hwclock prints e.g. "The RTC parameter 0x2 is set to
+    # 0x2." -- but some util-linux builds emit that line on stderr and/or exit
+    # non-zero even though the value was read fine. Parse the value from either
+    # stream first and only treat a genuinely missing value as a failure, so a
+    # spurious non-zero exit code no longer masks a good read.
+    m = re.search(r'set to\s+(0x[0-9a-fA-F]+|\d+)', f'{r.stdout}\n{r.stderr}')
     if not m:
-        _die(f'could not parse RTC backup mode (hwclock: {r.stdout.strip()!r})')
+        detail = (r.stderr or r.stdout).strip() or f'hwclock exited {r.returncode}'
+        _die(f'could not read RTC backup mode from {dev}: {detail}')
     tok = m.group(1)
     return int(tok, 16) if tok.lower().startswith('0x') else int(tok)
 
@@ -345,16 +346,14 @@ def rtc_backup_mode(args) -> None:
         capture_output=True,
         text=True,
     )
-    if r.returncode != 0:
-        _die(
-            f'failed to set RTC backup mode on {dev}: '
-            f'{(r.stderr or r.stdout).strip()}'
-        )
+    # Confirm by reading the value back instead of trusting hwclock's exit
+    # status, which some util-linux builds set non-zero even on success.
     new = _rtc_get_bsm(dev)
     if new != target:
+        detail = (r.stderr or r.stdout).strip() or f'hwclock exited {r.returncode}'
         _die(
-            f'RTC backup mode did not persist on {dev} '
-            f'(wanted {target}, read {new})'
+            f'failed to set RTC backup mode on {dev} '
+            f'(wanted {target}, read {new}): {detail}'
         )
     print(f'OK: {dev} backup-mode -> {args.mode} ({target})')
 
