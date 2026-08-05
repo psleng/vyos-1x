@@ -22,7 +22,6 @@ shutdown_event = asyncio.Event()
 
 packet_queue = asyncio.Queue(maxsize=1024)
 modem_ready_event = asyncio.Event()
-modem_bringup_started = False
 dhcp_success_event = asyncio.Event()
 renew_dhcp_event = asyncio.Event()
 dhcp_done_event = asyncio.Event()
@@ -67,8 +66,8 @@ def get_modem_mapping():
     return mapping
 
 # async function to delete the nft netfilter queue rules
-async def teardown_nftables(queue):
-    nft_table = f'wwan_raw_{queue}'
+async def teardown_nftables(queue, interface='wwan0'):
+    nft_table = f'{interface}_raw_{queue}'
     proc = await asyncio.create_subprocess_exec("nft", "delete", "table", "inet", nft_table,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE)
@@ -83,51 +82,6 @@ async def teardown_nftables(queue):
         return True
     return False
 
-"""
-async def dhcp_renewer(interface: str):
-    global dhcp_success
-
-    while not shutdown_event.is_set() and not dhcp_success_event.is_set():
-        await renew_dhcp_event.wait()
-        renew_dhcp_event.clear()
-
-        try:
-            # Release
-            proc1 = await asyncio.create_subprocess_exec(
-                "dhclient", "-r", interface
-            )
-            await proc1.wait()
-
-            # Renew
-            proc = await asyncio.create_subprocess_exec(
-            "dhclient", "-v", interface,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT)
-            output = []
-
-            try:
-                while True:
-                    line = await asyncio.wait_for(proc.stdout.readline(), timeout=15)
-                    if not line:
-                        break
-                    decoded = line.decode().strip()
-                    output.append(decoded)
-                    print(decoded)  # optional: live output
-
-                    if "DHCPACK" in decoded:
-                        dhcp_success_event.set()
-                        dhcp_done_event.set()
-                        break
-
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
-            await proc.wait()
-            dhcp_done_event.set()
-
-        except Exception:
-            dhcp_done_event.set()
-"""
 
 def event_loop(loop=None):
     if loop is None:
@@ -187,7 +141,7 @@ class PacketHandler:
             print(f"Packet received and accepting from queue: {pkt}")
             pkt.accept()
 
-        await teardown_nftables(queue_num)
+        await teardown_nftables(queue_num, self.interface)
 
         self.loop.call_soon_threadsafe(shutdown_event.set)
 
@@ -307,7 +261,7 @@ def get_all_wwan_options():
 def get_interface_queue_num(interface):
 
     result = subprocess.run(["nft", "list", "tables"], capture_output=True, text=True, check=True)
-    matches = re.findall(r"table\s+\S+\s+(wwan_raw_\d+)", result.stdout)
+    matches = re.findall(rf"table\s+\S+\s+({interface}_raw_\d+)", result.stdout)
     pattern = r'oifname\s+"(?P<oifname>\S+)"\s+queue\s+to\s+(?P<queue>\d+)'
     for tables in matches:
         table_info = subprocess.run(['nft', 'list', 'table', 'inet', tables], capture_output=True, text=True, check=True)

@@ -3,6 +3,7 @@ import argparse
 from vyos.config import Config
 from pathlib import Path
 import subprocess
+import asyncio
 
 def get_physical_interfaces():
     net_dir = Path("/sys/class/net")
@@ -27,7 +28,7 @@ def get_config():
                               with_recursive_defaults=True)
     return lb
 
-def run_cmd(cmd=''):
+def run_nft_cmd(cmd=''):
     subprocess.run(
         ['nft', '-f', '-'],
         input=cmd,
@@ -35,7 +36,16 @@ def run_cmd(cmd=''):
         check=True
     )
 
-def generate_nft_rules(interface='wwan0'):
+async def async_run_nft_cmd(cmd=''):
+    proc = await asyncio.create_subprocess_exec(
+        "nft", "-f", "-", cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+
+
+async def generate_nft_rules(interface='wwan0'):
     config = get_config()
     print(config)
     matching = {}
@@ -55,11 +65,11 @@ def generate_nft_rules(interface='wwan0'):
     commands = f''''''
     for rule_num in matching:
         basic_nft_commands = f'''
-        add table inet wwan_raw_{rule_num}
-        add chain inet wwan_raw_{rule_num} output {{ type filter hook output priority raw; policy accept; }}
-        add rule inet wwan_raw_{rule_num} output oifname {interface} queue num {rule_num}
-        add chain inet wwan_raw_{rule_num} prerouting {{ type filter hook prerouting priority raw; policy accept; }}
-        add rule inet wwan_raw_{rule_num} prerouting queue num {rule_num}
+        add table inet {interface}_raw_{rule_num}
+        add chain inet {interface}_raw_{rule_num} output {{ type filter hook output priority raw; policy accept; }}
+        add rule inet {interface}_raw_{rule_num} output oifname {interface} queue num {rule_num}
+        add chain inet {interface}_raw_{rule_num} prerouting {{ type filter hook prerouting priority raw; policy accept; }}
+        add rule inet {interface}_raw_{rule_num} prerouting queue num {rule_num}
         '''
         if config.get('rule', {}).get(rule_num, {}).get('failover', {}) is not None:
             failover = True
@@ -67,12 +77,12 @@ def generate_nft_rules(interface='wwan0'):
 
         if failover is False or inbound_interface == 'any':
             physical_interfaces = f"{{ {', '.join(get_physical_interfaces())} }}"
-            commands = f'''add rule inet wwan_raw_{rule_num} prerouting iifname {physical_interfaces} fib daddr oifname "{interface}" queue num {rule_num}
+            commands = f'''add rule inet {interface}_raw_{rule_num} prerouting iifname {physical_interfaces} fib daddr oifname "{interface}" queue num {rule_num}
             '''
         else:
-            commands = f'''add rule inet wwan_raw_{rule_num} prerouting iifname {{ {inbound_interface} }} fib daddr oifname "{interface}" queue num {rule_num}
+            commands = f'''add rule inet {interface}_raw_{rule_num} prerouting iifname {{ {inbound_interface} }} fib daddr oifname "{interface}" queue num {rule_num}
             '''
-        run_cmd(basic_nft_commands + commands)
+        await async_run_nft_cmd(basic_nft_commands + commands)
 
 
 if __name__ == "__main__":
@@ -81,4 +91,4 @@ if __name__ == "__main__":
     parser.add_argument('interface',nargs="?", default="wwan0")
     args = parser.parse_args()
     interface = args.interface
-    generate_nft_rules(interface)
+    asyncio.run(generate_nft_rules(interface))

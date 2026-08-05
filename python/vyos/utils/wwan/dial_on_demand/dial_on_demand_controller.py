@@ -1,16 +1,45 @@
 import vyos.utils.wwan.dial_on_demand.idle_wwan_watcher as idle_wwan_watcher
 import vyos.utils.wwan.dial_on_demand.wwan_nft_reconnect as wwan_nft_reconnect
 import vyos.utils.wwan.dial_on_demand.install_wwan_nft_rules as nft_rules
+import subprocess
+import re
 import argparse
 import asyncio
+import signal
+
+def cleanup(interface='wwan0'):
+    """"""
+    pattern = re.compile(r"^table\s+(\S+)\s+(wwan\d+_raw_\d+)$")
+    result = subprocess.run(
+        ["nft", "list", "tables"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    for line in result.stdout.splitlines():
+        m = pattern.match(line)
+        if not m:
+            continue
+        family = m.group(1)
+        table = m.group(2)
+        subprocess.run(
+            ["nft", "delete", "table", family, table],
+            check=True
+        )
+
 
 
 async def main(interface='wwan0', timeout=30, connect_timeout=30):
     """"""
+    def signal_handler(sig, frame):
+        """"""
+        cleanup(interface=interface)
     print("Start idle wwan watcher task")
+
+    signal.signal(signal.SIGTERM, signal_handler)
     idle_task = await idle_wwan_watcher.main(interface=interface, timeout=timeout)
 
-    nft_rules.generate_nft_rules(interface)
+    rule_task = await nft_rules.generate_nft_rules(interface)
     print("Start wwan reconnect task")
     reconnect_task = await wwan_nft_reconnect.main(interface=interface, connect_timeout=connect_timeout)
 
