@@ -35,8 +35,9 @@ async def main(interface='wwan0', timeout=30, connect_timeout=30):
         """"""
         cleanup(interface=interface)
     print("Start idle wwan watcher task")
+    loop = asyncio.get_event_loop()
+    loop.add_signal_handler(signal.SIGTERM, signal_handler)
 
-    signal.signal(signal.SIGTERM, signal_handler)
     idle_task = await idle_wwan_watcher.main(interface=interface, timeout=timeout)
 
     rule_task = await nft_rules.generate_nft_rules(interface)

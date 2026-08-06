@@ -10,6 +10,7 @@ import subprocess
 import re
 import asyncio
 import argparse
+import signal
 
 from vyos.utils.wwan.wwan_client import (  # noqa: E402
     WWANClient
@@ -301,6 +302,7 @@ async def main(interface='wwan0', connect_timeout=30, loop=None, client=None):
             await handler.setup()
         # Bind to queue number 1
         nfqueue.bind(queue_num, handler.handle_packet)
+        loop.add_signal_handler(signal.SIGTERM, shutdown_event.set)
         #nfqueue.run()
         # Use file descriptor in an async way
         fd = nfqueue.get_fd()
