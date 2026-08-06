@@ -7,9 +7,9 @@
     #include <include/serial/service/utils/keepalive.xml.i>
     #include <include/serial/service/utils/tls-port.xml.i>
     #include <include/serial/service/utils/transmit-string-no-end.xml.i>
-    <leafNode name="echo">
+    <leafNode name="disable-echo">
       <properties>
-        <help>Enable echo characters in command mode</help>
+        <help>Disable echo characters in command mode</help>
         <valueless/>
       </properties>
     </leafNode>
