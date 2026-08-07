@@ -1092,21 +1092,12 @@ def install_image() -> None:
         copy(FILE_ROOTFS_SRC,
              f'{DIR_DST_ROOT}/boot/{image_name}/{image_name}.squashfs')
 
-        # PSL - START copy over all dtb files for arm64 processors
-        dtb_src = Path(f"{DIR_KERNEL_SRC}/dtb")
-        # Check if directory exists AND contains at least one .dtb or .dtbo file
-        if dtb_src.exists() and any(dtb_src.rglob("*.dtb*")):
+        # PSL - copy the whole DTB tree (any vendor subdir: ti/, perle/, ...)
+        if Path(f"{DIR_KERNEL_SRC}/dtb").exists():
             print('Copying DTB files')
-            copytree(dtb_src,
-                     f"{DIR_DST_ROOT}/boot/dtb",
-                     dirs_exist_ok=True)
-        else:
-            print(f"ERROR: No DTB files found in source to copy!")
-            if dtb_src.exists():
-                contents = [p.name for p in dtb_src.iterdir()]
-                print(f"ERROR: No .dtb/.dtbo files found in {dtb_src.resolve()}! Folder contents: {contents or 'Empty'}")
-            else:
-                print(f"ERROR: Source folder {dtb_src.resolve()} does not exist!")
+            copytree(
+                f"{DIR_KERNEL_SRC}/dtb", f"{DIR_DST_ROOT}/boot/dtb", dirs_exist_ok=True
+            )
 
         # copy saved config data and SSH keys
         # owner restored on copy of config data by chmod_2775, above
@@ -1417,20 +1408,12 @@ def add_image(image_path: str, vrf: str = None, username: str = '',
         move(f'{root_dir}/boot/{image_name}/filesystem.squashfs',
              f'{root_dir}/boot/{image_name}/{image_name}.squashfs')
 
-        # PSL - START copy over all dtb files for arm64 processors
-        dtb_src = Path(f"{DIR_ISO_MOUNT}/boot/dtb")
-        if dtb_src.exists() and any(dtb_src.rglob("*.dtb*")):
+        # PSL - copy the whole DTB tree (any vendor subdir: ti/, perle/, ...)
+        if Path(f"{DIR_ISO_MOUNT}/boot/dtb").exists():
             print('Copying DTB files')
-            copytree(dtb_src,
-                     f"{root_dir}/boot/dtb",
-                     dirs_exist_ok=True)
-        else:
-            print(f"ERROR: No DTB files found in source to copy!")
-            if dtb_src.exists():
-                contents = [p.name for p in dtb_src.iterdir()]
-                print(f"ERROR: No .dtb/.dtbo files found in {dtb_src.resolve()}! Folder contents: {contents or 'Empty'}")
-            else:
-                print(f"ERROR: Source folder {dtb_src.resolve()} does not exist!")
+            copytree(
+                f"{DIR_ISO_MOUNT}/boot/dtb", f"{root_dir}/boot/dtb", dirs_exist_ok=True
+            )
 
         # unmount an ISO and cleanup
         cleanup([str(iso_path)])

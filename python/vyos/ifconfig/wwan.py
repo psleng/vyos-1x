@@ -13,9 +13,8 @@
 # You should have received a copy of the GNU Lesser General Public
 # License along with this library.  If not, see <http://www.gnu.org/licenses/>.
 
-import time
 from vyos.ifconfig.interface import Interface
-from vyos.utils.dict import dict_search
+from vyos.ifconfig.interface import link_local_prefix
 
 @Interface.register
 class WWANIf(Interface):
@@ -57,6 +56,55 @@ class WWANIf(Interface):
             return None
         return super().set_admin_state(state)
 
+    # ── FSM-owned IPv6 posture guards ──────────────────────────────
+    # When the WWAN state machine owns the interface it is the sole authority
+    # for RA/SLAAC/DAD sysctls on wwanN (accept_ra / autoconf / accept_dad /
+    # dad_transmits / addr_gen_mode — set in _harden_wwan_ipv6_sysctls). The
+    # generic Interface.update() would otherwise write accept_dad and
+    # dad_transmits from their XML defaultValues (both 1), plus accept_ra /
+    # autoconf, on *every* commit — clobbering the FSM's values. These overrides
+    # suppress exactly those writes while super().update() runs on the
+    # FSM-managed path (_fsm_owns_ipv6_posture); stock behavior is unchanged
+    # when the FSM is not managing the interface.
+    def set_ipv6_accept_ra(self, accept_ra):
+        if getattr(self, '_fsm_owns_ipv6_posture', False):
+            return None
+        return super().set_ipv6_accept_ra(accept_ra)
+
+    def set_ipv6_autoconf(self, autoconf):
+        if getattr(self, '_fsm_owns_ipv6_posture', False):
+            return None
+        return super().set_ipv6_autoconf(autoconf)
+
+    def set_ipv6_dad_accept(self, dad):
+        if getattr(self, '_fsm_owns_ipv6_posture', False):
+            return None
+        return super().set_ipv6_dad_accept(dad)
+
+    def set_ipv6_dad_messages(self, dad):
+        if getattr(self, '_fsm_owns_ipv6_posture', False):
+            return None
+        return super().set_ipv6_dad_messages(dad)
+
+    def add_ipv6_eui64_address(self, prefix):
+        # ROOT-CAUSE fix for the stale MAC-derived link-local on wwanN.
+        # The generic Interface.update() unconditionally ADDS an EUI-64
+        # link-local (fe80::<eui64-from-MAC>/64) via an explicit `ip -6 addr
+        # add` unless 'no-default-link-local' is configured. That address is
+        # installed by MAC, independently of the kernel's addr_gen_mode, which
+        # is why it survived every sysctl/udev attempt to suppress it. On the
+        # FSM-owned wwan netdev the kernel already generates a stable-privacy
+        # link-local (addr_gen_mode=3, set in _harden_wwan_ipv6_sysctls); the
+        # extra MAC-based address is stale (the qmi_wwan MAC is random per
+        # boot) and, being on a NOARP raw_ip device, its DAD Neighbor
+        # Solicitation is undeliverable and surfaces as a dropped TX frame.
+        # Suppress ONLY the default link-local add while the FSM owns posture;
+        # an explicit `ipv6 address eui64 <global-prefix>` is still honored.
+        if getattr(self, '_fsm_owns_ipv6_posture', False) and \
+                prefix == link_local_prefix:
+            return None
+        return super().add_ipv6_eui64_address(prefix)
+
     def update(self, config, defer_admin_up=False):
         '''Perform interface setup for wwan
 
@@ -68,41 +116,14 @@ class WWANIf(Interface):
         conf-mode does not race MM's raw_ip write on (re)connect.
         '''
         self._defer_admin_up = bool(defer_admin_up)
+        # Mark the FSM as sole owner of wwanN IPv6 posture for the duration of
+        # super().update(): the overridden set_ipv6_* setters use this flag to
+        # suppress the generic writes that would otherwise clobber the FSM's
+        # accept_dad / dad_transmits / autoconf / accept_ra (including from XML
+        # defaultValues) on every commit.
+        self._fsm_owns_ipv6_posture = bool(defer_admin_up)
         try:
             super().update(config)
         finally:
             self._defer_admin_up = False
-
-        # PSL: If "ipv6 address autoconf" is set switch to address mode 3,
-        # else use the VyOS default of 1. This enables IPv6 since those
-        # addresses will come from the cell network via the modem.
-        #
-        # addr_gen_mode:
-        #
-        # 0: generate address based on EUI64 (default)
-        # 1: do no generate a link-local address, use EUI64 for addresses
-        #    generated from autoconf
-        # 2: generate stable privacy addresses, using the secret from
-        #    stable_secret (RFC7217)
-        # 3: generate stable privacy addresses, using a random secret if unset
-        #
-        sysfs_agm = f'/proc/sys/net/ipv6/conf/{self.ifname}/addr_gen_mode'
-
-        # Also force mode 1 if ipv6 blocked
-        import vyos.configquery
-        q = vyos.configquery.ConfigTreeQuery()
-        block_ipv6 = q.exists(['firewall', 'ipv6', 'block'])
-
-        if dict_search('ipv6.address.autoconf', config) is None or block_ipv6:
-            addr_gen_mode = '1'
-        else:
-            addr_gen_mode = '3'
-
-        if self._read_sysfs(sysfs_agm) != addr_gen_mode:
-            # Needs update
-            self._write_sysfs(sysfs_agm, addr_gen_mode)
-            if addr_gen_mode == '3' and self.get_admin_state() == 'up':
-                # Have to bounce the iface to get an IPv6 global addr
-                for state in ('down', 'up'):
-                    time.sleep(.1)
-                    self.set_admin_state(state)
+            self._fsm_owns_ipv6_posture = False

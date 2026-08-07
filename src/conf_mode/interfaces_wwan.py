@@ -1014,9 +1014,11 @@ def _is_transient_dbus_error(exc):
     """True when a WWAN D-Bus error means the service has not yet claimed its
     bus name (started but still booting), as opposed to a real method error.
 
-    `systemctl start` returns while the manager is still acquiring
-    `com.igos.IgosModemManager`, so the first call after a fresh start can
-    race the name acquisition.  Callers retry these until their deadline.
+    Used only for method-level errors raised AFTER a successful connect (the
+    whole connect/introspect phase is handled structurally in
+    `_apply_via_dbus` by retrying every `WWANConnectionError`).  If the
+    manager drops off the bus mid-operation, the in-flight method call surfaces
+    one of these name-acquisition strings; retry those until the deadline.
     """
     msg = str(exc)
     return (
@@ -1038,7 +1040,11 @@ async def _apply_via_dbus(interface_number, config, connect_timeout=20.0):
     "name was not provided by any .service files".
     """
     # Import here to avoid hard dependency at module level
-    from vyos.utils.wwan.wwan_client import WWANClient, WWANError
+    from vyos.utils.wwan.wwan_client import (
+        WWANClient,
+        WWANError,
+        WWANConnectionError,
+    )
 
     deadline = time.monotonic() + connect_timeout
     while True:
@@ -1050,11 +1056,32 @@ async def _apply_via_dbus(interface_number, config, connect_timeout=20.0):
                     interface_number, config)
                 print(f'WWAN interface {interface_number}: {result}')
             return
+        except WWANConnectionError as exc:
+            # CONNECT / INTROSPECT phase failure.  `_ensure_manager_running()`
+            # only guarantees `systemctl start` has returned -- the manager may
+            # still be coming up, and EVERY way the connect can lose that race
+            # is transient and self-clears within a fraction of a second:
+            #   * the well-known name is not on the bus yet (ServiceUnknown /
+            #     name "was not provided by any .service files" / NameHasNoOwner);
+            #   * the name is claimed but the object path is not registered yet
+            #     (UnknownObject / "No such object");
+            #   * the object is introspectable but the Control interface is not
+            #     exported yet ("interface not found on this object" -- the
+            #     ~tens-of-ms race actually hit at boot);
+            #   * transport-level races while the bus connection settles.
+            # Retry the WHOLE connect until the deadline rather than trying to
+            # enumerate every possible dbus-next message.
+            if time.monotonic() < deadline:
+                await asyncio.sleep(0.5)
+                continue
+            raise ConfigError(
+                f'WWAN D-Bus configuration failed (service not ready): {exc}'
+            ) from exc
         except WWANError as exc:
-            # WWANError covers both "bus name not on the bus" and
-            # genuine method errors.  Treat name-not-found as transient
-            # only while we are still within the connect timeout; any
-            # other WWANError is a real configuration failure.
+            # A method-level error AFTER a successful connect (e.g.
+            # WWANConfigError = SetConfiguration rejected).  Only the known
+            # name-acquisition-race strings are transient; any other WWANError
+            # is a genuine configuration failure and must surface immediately.
             if _is_transient_dbus_error(exc) and time.monotonic() < deadline:
                 await asyncio.sleep(0.5)
                 continue
