@@ -302,7 +302,7 @@ async def main(interface='wwan0', connect_timeout=30, loop=None, client=None):
             await handler.setup()
         # Bind to queue number 1
         nfqueue.bind(queue_num, handler.handle_packet)
-        loop.add_signal_handler(signal.SIGTERM, shutdown_event.set)
+
         #nfqueue.run()
         # Use file descriptor in an async way
         fd = nfqueue.get_fd()
@@ -312,6 +312,7 @@ async def main(interface='wwan0', connect_timeout=30, loop=None, client=None):
 
         print("Worker task set")
         worker_task = loop.create_task(handler.packet_consumer(queue_num))
+        loop.add_signal_handler(signal.SIGTERM, worker_task.cancel)
 
         # We wait for the worker task to tell us to stop.
         print('worker task created')
