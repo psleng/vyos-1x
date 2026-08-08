@@ -281,16 +281,8 @@ def update_grub(grub_source: Path, target_relpath: str, mount_point: Path,
         target_path = mount_point.joinpath(target_rel)
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
-        print('Computing source checksum ...')
-        source_hash = sha256_file(grub_source)
-
-        target_hash_before = None
-        if target_path.is_file():
-            print('Computing target checksum ...')
-            target_hash_before = sha256_file(target_path)
-            if source_hash == target_hash_before:
-                print('GRUB EFI binary is already up-to-date; no write needed.')
-                return
+        # Pre-write "already up-to-date" checksum comparison intentionally removed
+        # (consistent with the uboot path): manual operation, gated by the prompt.
 
         if not force:
             if not ask_yes_no('Proceed with GRUB EFI update?', default=False):
@@ -304,6 +296,7 @@ def update_grub(grub_source: Path, target_relpath: str, mount_point: Path,
         print('Verifying written data ...')
         target_hash_after = sha256_file(target_path)
 
+    source_hash = sha256_file(grub_source)
     if source_hash != target_hash_after:
         exit('Verification failed: written GRUB EFI binary does not match source')
 
@@ -317,17 +310,10 @@ def update_firmware(image_path: Path, device_path: Path, force: bool = False) ->
     print(f'Target device: {device_path}')
     print(f'Image size   : {image_size} bytes ({image_size / 1024**2:.1f} MiB)')
 
-    print('Computing source checksum ...')
-    source_hash = sha256_file(image_path)
-
-    print('Computing target checksum ...')
-    target_hash_before = sha256_device_prefix(device_path, image_size)
-
-    if source_hash == target_hash_before:
-        print('Firmware is already up-to-date; no write needed.')
-        return
-
-    print('Firmware differs from current boot area.')
+    # Pre-write "already up-to-date" checksum comparison intentionally removed:
+    # U-Boot builds are not byte-reproducible (embedded build timestamp/version),
+    # so it almost never matched and was not a meaningful version gate. This is a
+    # manual operation, gated by the confirmation prompt below.
 
     if not force:
         if not ask_yes_no('Proceed with firmware update?', default=False):
@@ -341,6 +327,7 @@ def update_firmware(image_path: Path, device_path: Path, force: bool = False) ->
         print('Verifying written data ...')
         target_hash_after = sha256_device_prefix(device_path, image_size)
 
+    source_hash = sha256_file(image_path)
     if source_hash != target_hash_after:
         exit('Verification failed: written firmware does not match source image')
 
