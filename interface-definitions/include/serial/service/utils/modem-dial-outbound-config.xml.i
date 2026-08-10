@@ -1,7 +1,7 @@
 <!-- include start from serial/service/utils/modem-dial-outbound-config.xml.i -->
 <leafNode name="phone-number">
   <properties>
-    <help>The phone number to use to dial out</help>
+    <help>The phone number to use to dial out (required)</help>
     <constraint>
       <regex>.{0,31}</regex>
     </constraint>
