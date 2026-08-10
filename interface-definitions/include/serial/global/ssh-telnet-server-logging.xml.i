@@ -78,6 +78,38 @@
             <completionHelp>
               <list>emergency alert critical error warning notice info debug</list>
             </completionHelp>
+            <valueHelp>
+              <format>emergency</format>
+              <description>Emergency messages</description>
+            </valueHelp>
+            <valueHelp>
+              <format>alert</format>
+              <description>Urgent messages</description>
+            </valueHelp>
+            <valueHelp>
+              <format>critical</format>
+              <description>Critical messages</description>
+            </valueHelp>
+            <valueHelp>
+              <format>error</format>
+              <description>Error messages</description>
+            </valueHelp>
+            <valueHelp>
+              <format>warning</format>
+              <description>Warning messages</description>
+            </valueHelp>
+            <valueHelp>
+              <format>notice</format>
+              <description>Messages for further investigation</description>
+            </valueHelp>
+            <valueHelp>
+              <format>info</format>
+              <description>Informational messages</description>
+            </valueHelp>
+            <valueHelp>
+              <format>debug</format>
+              <description>Debug messages</description>
+            </valueHelp>
             <constraint>
               <regex>(emergency|alert|critical|error|warning|notice|info|debug)</regex>
             </constraint>

@@ -86,6 +86,18 @@
             <completionHelp>
               <list>always-on acts-as-dcd acts-as-ri</list>
             </completionHelp>
+            <valueHelp>
+              <format>always-on</format>
+              <description>DTR signal is always on</description>
+            </valueHelp>
+            <valueHelp>
+              <format>acts-as-dcd</format>
+              <description>DTR signal acts as DCD (Data Carrier Detect)</description>
+            </valueHelp>
+            <valueHelp>
+              <format>acts-as-ri</format>
+              <description>DTR signal acts as RI (Ring Indicator)</description>
+            </valueHelp>
             <constraint>
               <regex>(always-on|acts-as-dcd|acts-as-ri)</regex>
             </constraint>
@@ -98,6 +110,18 @@
             <completionHelp>
               <list>always-on acts-as-dcd acts-as-ri</list>
             </completionHelp>
+            <valueHelp>
+              <format>always-on</format>
+              <description>RTS signal is always on</description>
+            </valueHelp>
+            <valueHelp>
+              <format>acts-as-dcd</format>
+              <description>RTS signal acts as DCD (Data Carrier Detect)</description>
+            </valueHelp>
+            <valueHelp>
+              <format>acts-as-ri</format>
+              <description>RTS signal acts as RI (Ring Indicator)</description>
+            </valueHelp>
             <constraint>
               <regex>(always-on|acts-as-dcd|acts-as-ri)</regex>
             </constraint>
@@ -110,6 +134,14 @@
             <completionHelp>
               <list>always-on on-when-host-connect</list>
             </completionHelp>
+            <valueHelp>
+              <format>always-on</format>
+              <description>DCD signal is always on</description>
+            </valueHelp>
+            <valueHelp>
+              <format>on-when-host-connect</format>
+              <description>DCD signal is on when host connects</description>
+            </valueHelp>
             <constraint>
               <regex>(always-on|on-when-host-connect)</regex>
             </constraint>

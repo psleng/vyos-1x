@@ -5,6 +5,14 @@
     <completionHelp>
       <list>none software</list>
     </completionHelp>
+    <valueHelp>
+      <format>none</format>
+      <description>No flow control</description>
+    </valueHelp>
+    <valueHelp>
+      <format>software</format>
+      <description>Software flow control (XON/XOFF)</description>
+    </valueHelp>
     <constraint>
       <regex>(none|software)</regex>
     </constraint>

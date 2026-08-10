@@ -18,6 +18,22 @@
     <completionHelp>
       <list>5 6 7 8</list>
     </completionHelp>
+    <valueHelp>
+      <format>5</format>
+      <description>5 data bits</description>
+    </valueHelp>
+    <valueHelp>
+      <format>6</format>
+      <description>6 data bits</description>
+    </valueHelp>
+    <valueHelp>
+      <format>7</format>
+      <description>7 data bits</description>
+    </valueHelp>
+    <valueHelp>
+      <format>8</format>
+      <description>8 data bits</description>
+    </valueHelp>
     <constraint>
       <regex>(5|6|7|8)</regex>
     </constraint>
@@ -30,6 +46,26 @@
     <completionHelp>
       <list>none odd even mark space</list>
     </completionHelp>
+    <valueHelp>
+      <format>none</format>
+      <description>No parity</description>
+    </valueHelp>
+    <valueHelp>
+      <format>odd</format>
+      <description>Odd parity</description>
+    </valueHelp>
+    <valueHelp>
+      <format>even</format>
+      <description>Even parity</description>
+    </valueHelp>
+    <valueHelp>
+      <format>mark</format>
+      <description>Mark parity</description>
+    </valueHelp>
+    <valueHelp>
+      <format>space</format>
+      <description>Space parity</description>
+    </valueHelp>
     <constraint>
       <regex>(none|odd|even|mark|space)</regex>
     </constraint>
@@ -42,6 +78,14 @@
     <completionHelp>
       <list>1 2</list>
     </completionHelp>
+    <valueHelp>
+      <format>1</format>
+      <description>1 stop bit</description>
+    </valueHelp>
+    <valueHelp>
+      <format>2</format>
+      <description>2 stop bits</description>
+    </valueHelp>
     <constraint>
       <regex>(1|2)</regex>
     </constraint>

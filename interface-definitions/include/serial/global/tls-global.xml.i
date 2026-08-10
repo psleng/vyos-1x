@@ -39,6 +39,22 @@
             <completionHelp>
               <list>any tlsv1.2 tlsv1.2b tlsv1.3</list>
             </completionHelp>
+            <valueHelp>
+              <format>any</format>
+              <description>Any TLS version</description>
+            </valueHelp>
+            <valueHelp>
+              <format>tlsv1.2</format>
+              <description>TLS version 1.2</description>
+            </valueHelp>
+            <valueHelp>
+              <format>tlsv1.2b</format>
+              <description>TLS version 1.2 Suite B</description>
+            </valueHelp>
+            <valueHelp>
+              <format>tlsv1.3</format>
+              <description>TLS version 1.3</description>
+            </valueHelp>
             <constraint>
               <regex>(any|tlsv1.2|tlsv1.2b|tlsv1.3)</regex>
             </constraint>
@@ -51,6 +67,14 @@
             <completionHelp>
               <list>client server</list>
             </completionHelp>
+            <valueHelp>
+              <format>client</format>
+              <description>TLS client role</description>
+            </valueHelp>
+            <valueHelp>
+              <format>server</format>
+              <description>TLS server role</description>
+            </valueHelp>
             <constraint>
               <regex>(client|server)</regex>
             </constraint>
@@ -145,6 +169,18 @@
                 <completionHelp>
                   <list>any aes aes-gcm</list>
                 </completionHelp>
+                <valueHelp>
+                  <format>any</format>
+                  <description>Any encryption algorithm</description>
+                </valueHelp>
+                <valueHelp>
+                  <format>aes</format>
+                  <description>AES encryption</description>
+                </valueHelp>
+                <valueHelp>
+                  <format>aes-gcm</format>
+                  <description>AES-GCM encryption</description>
+                </valueHelp>
                 <constraint>
                   <regex>(any|aes|aes-gcm)</regex>
                 </constraint>
@@ -157,6 +193,30 @@
                 <completionHelp>
                   <list>40 56 64 128 168 256</list>
                 </completionHelp>
+                <valueHelp>
+                  <format>40</format>
+                  <description>40-bit key size</description>
+                </valueHelp>
+                <valueHelp>
+                  <format>56</format>
+                  <description>56-bit key size</description>
+                </valueHelp>
+                <valueHelp>
+                  <format>64</format>
+                  <description>64-bit key size</description>
+                </valueHelp>
+                <valueHelp>
+                  <format>128</format>
+                  <description>128-bit key size</description>
+                </valueHelp>
+                <valueHelp>
+                  <format>168</format>
+                  <description>168-bit key size</description>
+                </valueHelp>
+                <valueHelp>
+                  <format>256</format>
+                  <description>256-bit key size</description>
+                </valueHelp>
                 <constraint>
                   <regex>(40|56|64|128|168|256)</regex>
                 </constraint>
@@ -169,6 +229,30 @@
                 <completionHelp>
                   <list>40 56 64 128 168 256</list>
                 </completionHelp>
+                <valueHelp>
+                  <format>40</format>
+                  <description>40-bit key size</description>
+                </valueHelp>
+                <valueHelp>
+                  <format>56</format>
+                  <description>56-bit key size</description>
+                </valueHelp>
+                <valueHelp>
+                  <format>64</format>
+                  <description>64-bit key size</description>
+                </valueHelp>
+                <valueHelp>
+                  <format>128</format>
+                  <description>128-bit key size</description>
+                </valueHelp>
+                <valueHelp>
+                  <format>168</format>
+                  <description>168-bit key size</description>
+                </valueHelp>
+                <valueHelp>
+                  <format>256</format>
+                  <description>256-bit key size</description>
+                </valueHelp>
                 <constraint>
                   <regex>(40|56|64|128|168|256)</regex>
                 </constraint>
@@ -181,6 +265,30 @@
                 <completionHelp>
                   <list>any rsa edh-rsa edh-dss adh ecdh-ecdsa</list>
                 </completionHelp>
+                <valueHelp>
+                  <format>any</format>
+                  <description>Any key exchange algorithm</description>
+                </valueHelp>
+                <valueHelp>
+                  <format>rsa</format>
+                  <description>RSA key exchange</description>
+                </valueHelp>
+                <valueHelp>
+                  <format>edh-rsa</format>
+                  <description>Ephemeral Diffie-Hellman with RSA</description>
+                </valueHelp>
+                <valueHelp>
+                  <format>edh-dss</format>
+                  <description>Ephemeral Diffie-Hellman with DSS</description>
+                </valueHelp>
+                <valueHelp>
+                  <format>adh</format>
+                  <description>Anonymous Diffie-Hellman</description>
+                </valueHelp>
+                <valueHelp>
+                  <format>ecdh-ecdsa</format>
+                  <description>Elliptic Curve Diffie-Hellman with ECDSA</description>
+                </valueHelp>
                 <constraint>
                   <regex>(any|rsa|edh-rsa|edh-dss|adh|ecdh-ecdsa)</regex>
                 </constraint>
@@ -193,6 +301,26 @@
                 <completionHelp>
                   <list>any sha1 md5 sha256 sha384</list>
                 </completionHelp>
+                <valueHelp>
+                  <format>any</format>
+                  <description>Any HMAC algorithm</description>
+                </valueHelp>
+                <valueHelp>
+                  <format>sha1</format>
+                  <description>SHA-1 HMAC</description>
+                </valueHelp>
+                <valueHelp>
+                  <format>md5</format>
+                  <description>MD5 HMAC</description>
+                </valueHelp>
+                <valueHelp>
+                  <format>sha256</format>
+                  <description>SHA-256 HMAC</description>
+                </valueHelp>
+                <valueHelp>
+                  <format>sha384</format>
+                  <description>SHA-384 HMAC</description>
+                </valueHelp>
                 <constraint>
                   <regex>(any|sha1|md5|sha256|sha384)</regex>
                 </constraint>

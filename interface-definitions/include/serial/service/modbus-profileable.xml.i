@@ -59,6 +59,14 @@
                     <completionHelp>
                       <list>tcp udp</list>
                     </completionHelp>
+                    <valueHelp>
+                      <format>tcp</format>
+                      <description>TCP protocol</description>
+                    </valueHelp>
+                    <valueHelp>
+                      <format>udp</format>
+                      <description>UDP protocol</description>
+                    </valueHelp>
                     <constraint>
                       <regex>(tcp|udp)</regex>
                     </constraint>
@@ -71,6 +79,14 @@
                     <completionHelp>
                       <list>host gateway</list>
                     </completionHelp>
+                    <valueHelp>
+                      <format>host</format>
+                      <description>Host mode</description>
+                    </valueHelp>
+                    <valueHelp>
+                      <format>gateway</format>
+                      <description>Gateway mode</description>
+                    </valueHelp>
                     <constraint>
                       <regex>(host|gateway)</regex>
                     </constraint>
