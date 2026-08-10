@@ -40,6 +40,12 @@
         <help>Send connection status as</help>
       </properties>
       <children>
+        <leafNode name="none">
+          <properties>
+            <help>Suppress connection status</help>
+            <valueless/>
+          </properties>
+        </leafNode>
         <leafNode name="numeric">
           <properties>
             <help>Send connection status as numeric (default)</help>
