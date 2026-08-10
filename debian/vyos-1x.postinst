@@ -54,6 +54,11 @@ fi
 sed -i '/^auth[[:space:]]\+requisite[[:space:]]\+pam_nologin\.so$/s/^/#/' /etc/pam.d/login
 sed -i '/^account[[:space:]]\+required[[:space:]]\+pam_nologin\.so$/s/^/#/' /etc/pam.d/sshd
 
+# Skip MOTD on serial consoles (except ttyS0)
+if ! grep -q 'check-serial-tty.sh' /etc/pam.d/login; then
+    sed -i '0,/pam_motd\.so/{s/\(.*pam_motd\.so\)/session [success=2 default=ignore] pam_exec.so quiet \/usr\/libexec\/vyos\/check-serial-tty.sh\n\1/}' /etc/pam.d/login
+fi
+
 # Add TACACS system users required for TACACS based system authentication
 if ! grep -q '^tacacs' /etc/passwd; then
     # Add the tacacs group and all 16 possible tacacs privilege-level users to
