@@ -26,20 +26,10 @@ def get_pki_certificates():
     conf = config.get_config_dict(base, key_mangling=('-', '_'))
     groups = []
 
-    print(conf.get('certificate', []))
     for group in conf.get('certificate', []):
         groups.append(group)
 
     return groups
-
-if __name__ == "__main__":
-    groups = []
-    if tpm_enabled():
-        groups = get_tpm_list('cert')
-    else:
-        groups = get_pki_certificates()
-
-    print(" ".join(groups))
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
