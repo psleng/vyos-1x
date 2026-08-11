@@ -109,8 +109,8 @@ sync_search = [
         'path': ['service', 'stunnel'],
     },
     {
-        'keys': ['certificate'],
-        'path': ['serial', 'device'],
+        'keys': ['certificate', 'ca_certificate'],
+        'path': ['service', 'serial', 'device'],
     }
 ]
 
@@ -544,15 +544,14 @@ def generate(pki):
         cleanup_system_ca()
 
         if 'ca' in pki:
-            with open(IOLAN_ALL_CA_FILE, "a") as file:
+            with open(IOLAN_ALL_CA_FILE, 'a') as file:
                 for ca, ca_conf in pki['ca'].items():
-                    if 'system_install' in ca_conf:
-                        ca_obj = load_certificate(ca_conf['certificate'])
-                        ca_path = os.path.join(vyos_ca_certificates_dir, f'{ca}.crt')
+                    ca_obj = load_certificate(ca_conf['certificate'])
+                    ca_path = os.path.join(vyos_ca_certificates_dir, f'{ca}.crt')
 
-                        with open(ca_path, 'w') as f:
-                            f.write(encode_certificate(ca_obj))
-                        file.write(encode_certificate(ca_obj))
+                    with open(ca_path, 'w') as f:
+                        f.write(encode_certificate(ca_obj))
+                    file.write(encode_certificate(ca_obj))
 
     # Certbot renewal only needs to re-trigger the services to load up the
     # new PEM file
