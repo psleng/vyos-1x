@@ -47,6 +47,26 @@ def is_modem_connected(modem_id):
     return False
 
 async def main(interface='wwan0',timeout=30, client=None):
+    try:
+        if client is None:
+            client = WWANClient()
+            await client.open()
+            await client.add_interface(int(interface[4:]))
+            await client.set_configuration(int(interface[4:]), {
+                    "connection_mode": "dial-on-demand",
+                    "primary_sim_slot": 1,
+                })
+        await idler(interface=interface, timeout=timeout, client=client)
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        pass
+    finally:
+        if client:
+            await client.close()
+
+
+async def idler(interface='wwan0',timeout=30, client=None):
 
     print(interface)
     print(timeout)
@@ -55,17 +75,7 @@ async def main(interface='wwan0',timeout=30, client=None):
     last_tx = get_tx_bytes(interface)
     last_active = int(time.time())
 
-    close_client = False
     #poll
-    if client is None:
-        client = WWANClient()
-        await client.open()
-        await client.add_interface(int(interface[4:]))
-        config = await client.set_configuration(int(interface[4:]), {
-                "connection_mode": "dial-on-demand",
-                "primary_sim_slot": 1,
-            })
-        close_client = True
 
     while True:
         time.sleep(timeout)
@@ -88,7 +98,7 @@ async def main(interface='wwan0',timeout=30, client=None):
                 last_tx = 0
                 last_active = int(time.time())
                 break
-    if close_client:
+    if client:
         await client.close()
 
 if __name__ == "__main__":

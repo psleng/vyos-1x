@@ -10,7 +10,6 @@ import subprocess
 import re
 import asyncio
 import argparse
-import signal
 
 from vyos.utils.wwan.wwan_client import (  # noqa: E402
     WWANClient
@@ -100,6 +99,7 @@ class PacketHandler:
         self.queue_num = get_interface_queue_num(self.interface)
         self.client = client
         self.tasks = set()
+        self.shutdown = False
         self.close_client_needed = False
         if client is None:
             self.close_client_needed = True
@@ -149,6 +149,9 @@ class PacketHandler:
 
     # packet handler wrapper
     def handle_packet(self, packet):
+        if self.shutdown:
+            packet.accept()
+            return
         packet.retain()
         task = self.loop.create_task(self.handle_packet_async(packet))
         self.tasks.add(task)
@@ -170,6 +173,9 @@ class PacketHandler:
             print(f"packet queued: {packet}")
         except asyncio.QueueFull:
             print("queue full → dropping")
+            packet.drop()
+            return
+        except Exception:
             packet.drop()
             return
 
@@ -290,7 +296,8 @@ async def main(interface='wwan0', connect_timeout=30, loop=None, client=None):
 
     print(queue_num)
     print(modem_index)
-
+    if queue_num is None:
+        return
 
     nfqueue = NetfilterQueue()
     fd = nfqueue.get_fd()
@@ -312,24 +319,19 @@ async def main(interface='wwan0', connect_timeout=30, loop=None, client=None):
 
         print("Worker task set")
         worker_task = loop.create_task(handler.packet_consumer(queue_num))
-        loop.add_signal_handler(signal.SIGTERM, worker_task.cancel)
 
         # We wait for the worker task to tell us to stop.
         print('worker task created')
         await shutdown_event.wait()
-
-        print("worker task cancelled")
-        worker_task.cancel()
-
-        await handler.cleanup_tasks()
         print('finished tasks and closing dbus')
 
         #await handler.removed_event.wait()
         #loop.run_forever()
-    except KeyboardInterrupt:
-        print("Exiting...", flush=True)
     finally:
+        handler.shutdown = True
         loop.remove_reader(fd)
+        worker_task.cancel()
+        await handler.cleanup_tasks()
         nfqueue.unbind()
 
 
