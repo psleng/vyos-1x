@@ -226,7 +226,7 @@
                 <properties>
                   <help>Specify an IPv6 global network prefix that the current device will advertise to the device at the other end of the PPP link</help>
                   <valueHelp>
-                    <format>ipv6</format>
+                    <format>ipv6net</format>
                     <description>IPv6 address</description>
                   </valueHelp>
                   <constraint>
