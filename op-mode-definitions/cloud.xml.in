@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<interfaceDefinition>
+  <node name="show">
+    <children>
+      <node name="service">
+        <properties>
+          <help>Show service information</help>
+        </properties>
+        <children>
+          <node name="cloud">
+            <properties>
+              <help>Show cloud service information</help>
+            </properties>
+            <children>
+              <leafNode name="status">
+                <properties>
+                  <help>Show cloud service status</help>
+                </properties>
+                <command>${vyos_op_scripts_dir}/cloud.py show</command>
+              </leafNode>
+            </children>
+          </node>
+        </children>
+      </node>
+    </children>
+  </node>
+</interfaceDefinition>
