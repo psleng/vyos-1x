@@ -26,9 +26,19 @@ def cleanup(interface='wwan0'):
             check=True
         )
 
-async def shutdown_raise(shutdown_event):
-    await shutdown_event.wait()
-    raise asyncio.CancelledError()
+async def shutdown_raise(shutdown_event, finished_task):
+
+    loop = asyncio.get_event_loop()
+    shutdown_task = loop.create_task(shutdown_event.wait())
+    done, pending = await asyncio.wait(
+        [shutdown_task, finished_task],
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    for task in pending:
+        task.cancel()
+
+    if shutdown_task in done:
+        raise asyncio.CancelledError()
 
 
 async def main(interface='wwan0', timeout=30, connect_timeout=30):
@@ -38,11 +48,12 @@ async def main(interface='wwan0', timeout=30, connect_timeout=30):
     loop.add_signal_handler(signal.SIGTERM, shutdown_event.set)
 
     try:
-        async with asyncio.TaskGroup() as tg:
-            tg.create_task(shutdown_raise(shutdown_event))
-            tg.create_task(idle_wwan_watcher.main(interface=interface, timeout=timeout))
-            tg.create_task(nft_rules.generate_nft_rules(interface))
-            tg.create_task(wwan_nft_reconnect.main(interface=interface, connect_timeout=connect_timeout))
+        idle_task = await loop.create_task(idle_wwan_watcher.main(interface=interface, timeout=timeout))
+        nft_task = await loop.create_task(nft_rules.generate_nft_rules(interface=interface))
+        reconnect_task = loop.create_task(wwan_nft_reconnect.main(interface=interface, connect_timeout=connect_timeout))
+        shutdown_task = loop.create_task(shutdown_raise(shutdown_event, reconnect_task))
+        await asyncio.gather(reconnect_task, shutdown_task)
+
     except asyncio.CancelledError:
         pass
     finally:

@@ -59,8 +59,6 @@ async def main(interface='wwan0',timeout=30, client=None):
         await idler(interface=interface, timeout=timeout, client=client)
     except asyncio.CancelledError:
         pass
-    except Exception:
-        pass
     finally:
         if client:
             await client.close()
@@ -78,7 +76,7 @@ async def idler(interface='wwan0',timeout=30, client=None):
     #poll
 
     while True:
-        time.sleep(timeout)
+        await asyncio.sleep(timeout)
         tx = get_tx_bytes(interface)
         if last_tx != tx:
             print("idle-wwan-watcher: still detecting packets")
