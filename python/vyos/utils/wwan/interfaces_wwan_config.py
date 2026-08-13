@@ -75,6 +75,10 @@ class InterfaceConfig(ServiceInterface):
         # MTU settings — interface-level ceiling/default; per-SIM override in sim_slots
         "mtu": 1420,  # Interface MTU ceiling; also used as fallback when bearer provides none
 
+        # Default route metric for the carrier default route(s) the FSM
+        # installs; 220 keeps cellular below a wired primary (backup role).
+        "default_route_metric": 220,
+
         # APN discovery settings
         "android_apn_discovery": "disabled",
 

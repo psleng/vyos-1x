@@ -18733,16 +18733,26 @@ class ModemStateMachine:
         base = ['ip', '-6'] if family == 6 else ['ip']
         label = f"IPv{family}"
 
+        # Metric for the carrier-assigned default route.  Default 220 keeps
+        # cellular below a wired primary (failover/static metric 1, DHCP
+        # default-route-distance 210) so the modem is a backup path, not the
+        # preferred one; 0 restores the historical always-preferred behaviour.
+        # Configurable via `interfaces wwan wwanN default-route-metric`.
+        metric = (int(self.config.get('default_route_metric', 220))
+                  if self.config else 220)
+
         if gateway:
             # onlink: nexthop is directly reachable on this PtP device even
             # though the host-route addressing leaves no on-link subnet.
             cmd = base + ['route', 'replace', 'default', 'via', gateway,
-                          'dev', interface_name, 'onlink']
+                          'dev', interface_name, 'onlink', 'metric', str(metric)]
             success_msg = (f"{label} default route via {gateway} "
-                           f"dev {interface_name} (onlink)")
+                           f"dev {interface_name} (onlink, metric {metric})")
         else:
-            cmd = base + ['route', 'replace', 'default', 'dev', interface_name]
-            success_msg = f"{label} default route via device {interface_name}"
+            cmd = base + ['route', 'replace', 'default', 'dev', interface_name,
+                          'metric', str(metric)]
+            success_msg = (f"{label} default route via device {interface_name} "
+                           f"(metric {metric})")
 
         result = await asyncio.create_subprocess_exec(
             *cmd,
@@ -18763,7 +18773,7 @@ class ModemStateMachine:
                 f"({stderr.decode().strip()}); falling back to device route",
                 extra={'interface_number': self.interface_number})
             fallback = base + ['route', 'replace', 'default',
-                               'dev', interface_name]
+                               'dev', interface_name, 'metric', str(metric)]
             result = await asyncio.create_subprocess_exec(
                 *fallback,
                 stdout=asyncio.subprocess.PIPE,
@@ -18772,7 +18782,7 @@ class ModemStateMachine:
             _, stderr = await result.communicate()
             if result.returncode == 0:
                 logger.info(f"{label} default route via device {interface_name} "
-                            f"(device-only fallback)",
+                            f"(device-only fallback, metric {metric})",
                            extra={'interface_number': self.interface_number})
                 return True
 

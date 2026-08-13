@@ -34,6 +34,7 @@ interfaces
         ├── connection-mode <always-on|connect-on-demand|dial-on-demand>
         ├── network-mode <auto|lte|5g|5g-only|3g|2g>      # modem-level RAT selection
         ├── network-time                                  # valueless — set system clock from NITZ at registration
+        ├── default-route-metric <0-255>                  # metric for the FSM-installed carrier default route(s) (default: 220; keeps cellular below a wired primary — failover/static=1, DHCP=210)
         │
         ├── ip                                            # IPv4 routing parameters (kernel-level)
         │     ├── adjust-mss <bytes|clamp-mss-to-pmtu>

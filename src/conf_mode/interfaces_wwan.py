@@ -633,6 +633,12 @@ def build_fsm_config(wwan):
         # MTU
         'mtu': _leaf_int(wwan, 'mtu', 1420),
 
+        # Default route metric — metric for the carrier-assigned default
+        # route(s) the FSM installs on wwanN.  Default 220 keeps cellular
+        # below a wired primary (failover/static metric 1, DHCP 210), so the
+        # modem is a backup, not the preferred path.  0 = always-preferred.
+        'default_route_metric': _leaf_int(wwan, 'default_route_metric', 220),
+
         # Enhanced reconnection
         'enhanced_reconnection': enhanced_reconnection,
 
