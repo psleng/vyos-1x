@@ -1420,11 +1420,11 @@ class InterfaceConfig(ServiceInterface):
                 raise ValueError("network_scan_timeout must be between 10 and 300 seconds")
 
         # Validate network mode
-        if 'network_mode' in config and config['network_mode'] not in ['auto', 'lte', '5g', '3g', '2g']:
+        if 'network_mode' in config and config['network_mode'] not in ['auto', 'lte', '5g', '5g-only', '3g', '2g']:
             logger.warning("Invalid network_mode",
                           extra={'interface_number': self.interface_number,
                                  'validation_field': 'network_mode'})
-            raise ValueError("network_mode must be 'auto', 'lte', '5g', '3g', or '2g'")
+            raise ValueError("network_mode must be 'auto', 'lte', '5g', '5g-only', '3g', or '2g'")
 
         # Validate monitoring intervals
         if 'normal_monitoring_interval' in config:

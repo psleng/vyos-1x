@@ -116,8 +116,8 @@ interfaces
         │           ├── connect-retries <count>           #   default: 3
         │           ├── signal-loss-timer <seconds>       #   default: 60
         │           └── signal-threshold
-        │                 ├── rssi <dBm>                   #   default: -93  (2G/3G)
-        │                 └── rsrp <dBm>                   #   default: -113 (LTE/5G)
+        │                 ├── rssi <-120..-50>             #   default: -93  (2G/3G; enter integer only, e.g. -93)
+        │                 └── rsrp <-140..-44>             #   default: -113 (LTE/5G; enter integer only, e.g. -113)
         │
         ├── apn-discovery
         │     └── disable                                #   valueless — disable Android APN DB (enabled by default)
@@ -125,14 +125,14 @@ interfaces
         ├── reconnection
         │     ├── disable-enhanced                        #   valueless — fall back to basic fixed-interval reconnection (enhanced by default)
         │     ├── signal-threshold
-        │     │     ├── rssi <dBm>                        #   default: -85  (2G/3G)
-        │     │     └── rsrp <dBm>                        #   default: -105 (LTE/5G)
+        │     │     ├── rssi <-120..-50>                  #   default: -85  (2G/3G; enter integer only, e.g. -85)
+        │     │     └── rsrp <-140..-44>                  #   default: -105 (LTE/5G; enter integer only, e.g. -105)
         │     ├── retry-interval
         │     │     ├── good-signal <seconds>             #   default: 30
         │     │     └── poor-signal <seconds>             #   default: 120
         │     ├── max-wait-for-signal <seconds>           #   default: 120
         │     ├── signal-check-interval <seconds>         #   default: 10
-        │     └── signal-strength-buffer <dBm>            #   default: 5
+        │     └── signal-strength-buffer <0-20>           #   default: 5 dB (integer)
         │
         ├── interface-management
         │     ├── disable                                 #   valueless — turn off interface management (on by default)

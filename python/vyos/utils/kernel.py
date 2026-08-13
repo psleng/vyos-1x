@@ -92,7 +92,7 @@ def get_module_data(module: str):
         # we just skip them.
         try:
             return read_file(path)
-        except PermissionError:
+        except OSError:
             return None
 
     mod_path = join('/sys/module', module)

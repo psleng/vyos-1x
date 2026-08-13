@@ -130,20 +130,11 @@ def main():
     # persistence config
     Path(f'{TARGET_P2}/persistence.conf').write_text('/ union\n')
 
-    # copy DTBs
-    dtb_src = Path(SRC_DTB)
-    if dtb_src.exists() and any(dtb_src.rglob("*.dtb*")):
+    # copy DTBs (whole tree; any vendor subdir: ti/, perle/, ...). Guarded so a
+    # build without a /boot/dtb (e.g. a non-arm image) is a no-op, not a crash.
+    if Path(SRC_DTB).exists():
         log("Copying DTB files")
-        copytree(dtb_src,
-                 DST_DTB,
-                 dirs_exist_ok=True)
-    else:
-        log("ERROR: No DTB files found in source to copy!")
-        if dtb_src.exists():
-            contents = [p.name for p in dtb_src.iterdir()]
-            log(f"ERROR: No .dtb/.dtbo files found in {dtb_src.resolve()}! Folder contents: {contents or 'Empty'}")
-        else:
-            log(f"ERROR: Source folder {dtb_src.resolve()} does not exist!")
+        copytree(SRC_DTB, DST_DTB, dirs_exist_ok=True)
 
     # copy main image
     copy_image(version, BOOT)
@@ -176,4 +167,3 @@ def main():
 # -------------------------------
 if __name__ == "__main__":
     main()
-
