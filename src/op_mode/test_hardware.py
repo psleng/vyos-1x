@@ -226,6 +226,9 @@ def modem_sim(args) -> None:
 def pin_set(args) -> None:
     try:
         hw.set_pin(args.name, int(args.value))
+    except KeyError as exc:
+        _die(f'{exc.args[0] if exc.args else exc}; '
+             'run `test hardware show pin` for valid pin names')
     except (ValueError, RuntimeError) as exc:
         _die(str(exc))
     print(f'OK: {args.name} = {args.value}')
@@ -234,6 +237,9 @@ def pin_set(args) -> None:
 def pin_pulse(args) -> None:
     try:
         hw.pulse(args.name, ms=int(args.ms), asserted=int(args.asserted))
+    except KeyError as exc:
+        _die(f'{exc.args[0] if exc.args else exc}; '
+             'run `test hardware show pin` for valid pin names')
     except (ValueError, RuntimeError) as exc:
         _die(str(exc))
     print(f'OK: pulsed {args.name} for {args.ms} ms')
