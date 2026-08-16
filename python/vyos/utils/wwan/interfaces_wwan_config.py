@@ -1392,11 +1392,11 @@ class InterfaceConfig(ServiceInterface):
 
         if 'hardware_reset_cooldown' in config:
             cooldown = config['hardware_reset_cooldown']
-            if not isinstance(cooldown, int) or cooldown < 30 or cooldown > 3600:
+            if not isinstance(cooldown, int) or cooldown < 180 or cooldown > 3600:
                 logger.warning("Invalid hardware_reset_cooldown",
                               extra={'interface_number': self.interface_number,
                                      'validation_field': 'hardware_reset_cooldown'})
-                raise ValueError("hardware_reset_cooldown must be between 30 and 3600 seconds")
+                raise ValueError("hardware_reset_cooldown must be between 180 and 3600 seconds")
 
         # Validate timeout settings
         if 'connection_timeout' in config:

@@ -169,7 +169,7 @@ interfaces
         ├── hardware-reset
         │     ├── disable                                 #   valueless — turn off hardware reset (on by default)
         │     ├── max-attempts <count>                    #   default: 3
-        │     └── cooldown <seconds>                      #   default: 300
+        │     └── cooldown <seconds>                      #   default: 300  (range 180-3600)
         │
         ├── failed-retry
         │     ├── disable                                 #   valueless — turn off periodic retry from FAILED state (on by default)

@@ -1672,9 +1672,28 @@ class ModemStateMachine:
         INITIAL_SCAN_INTERVAL = 5   # Start checking every 5 seconds
         MAX_SCAN_INTERVAL = 60      # Maximum 60 seconds between scans
         MAX_FAST_SCANS = 12         # Fast scans for first minute (12 * 5 = 60s)
+        # No-modem hardware-reset escalation.  If ModemManager never exposes
+        # our modem — e.g. it enumerates on USB but its AT/QMI command stack is
+        # wedged so MM cannot classify/probe it — a pure poll loop would wait
+        # forever.  Once the modem has been absent for one configured reset
+        # cooldown (self.reset_cooldown_seconds — the SAME `hardware-reset
+        # cooldown` value that spaces these reboots), escalate to a hardware
+        # reset, gated by the SAME cooldown/max-attempt rules as the recovery
+        # loop (_is_reset_allowed/_record_reset) so it can never reset in a
+        # tight loop.  Generic — applies to every modem, not one model.
+        NO_MODEM_RESET_TIMEOUT = 90.0    # bound the reset call below the 120s
+                                         # scan-stall watchdog (_scan_stall_timeout)
 
         current_interval = INITIAL_SCAN_INTERVAL
         scan_count = 0
+
+        # Earliest monotonic time we may issue the next no-modem escalation
+        # reset.  The initial wait AND the spacing between attempts both use the
+        # configurable reset cooldown (self.reset_cooldown_seconds), so
+        # _is_reset_allowed() is not polled (nor its block-warnings logged) on
+        # every scan iteration.
+        scan_start = time.monotonic()
+        next_escalation_at = scan_start + self.reset_cooldown_seconds
 
         # Capture the bus generation at entry.  If the FSM is re-bound to a
         # fresh ModemManager (update_bus_connection) while this loop is running,
@@ -1699,6 +1718,11 @@ class ModemStateMachine:
                 return
             scan_count += 1
             self._scan_last_progress_at = time.monotonic()
+            # True once ModemManager answers this scan, so a "no modem" result
+            # means the modem is genuinely absent from a RESPONSIVE MM (the
+            # wedge case) rather than a D-Bus/MM error — only the former
+            # escalates to a reset.
+            scan_ok = False
 
             try:
                 msg = Message(
@@ -1721,6 +1745,7 @@ class ModemStateMachine:
                     path for path, interfaces in managed_objects.items()
                     if MODEM_INTERFACE in interfaces
                 ]
+                scan_ok = True  # MM responded; a missing modem below is real
 
                 if paths:
                     logger.debug("Found modem paths during scan",
@@ -1811,6 +1836,75 @@ class ModemStateMachine:
                 logger.error(f"Scan error: {e}",
                             extra={'interface_number': self.interface_number,
                                    'scan_count': scan_count})
+
+            # No-modem hardware-reset escalation — gated EXACTLY like the
+            # recovery loop.  Fires only when MM answered but still exposes no
+            # modem for us, the interface is not admin-disabled, and the modem
+            # has been absent for at least one reset cooldown
+            # (self.reset_cooldown_seconds).  _is_reset_allowed()
+            # enforces hardware_reset_enabled + max_hardware_resets +
+            # reset_cooldown_seconds (shared with every other reset path), so it
+            # can never reset in a tight loop and stops once the shared cap is
+            # hit; the cap clears when the modem finally connects
+            # (_reset_failover_counters).  The board GPIO PERST is the reset
+            # that actually un-wedges a modem whose command stack is hung, so we
+            # prefer it and do NOT let a routine scan restart ModemManager
+            # (allow_nuclear=False).
+            if (scan_ok
+                    and not getattr(self, '_admin_disabled', False)
+                    and time.monotonic() >= next_escalation_at):
+                if self._is_reset_allowed():
+                    logger.warning(
+                        "ModemManager still exposes no modem after %.0fs of "
+                        "scanning — escalating to a gated hardware reset (the "
+                        "modem may be enumerated but unresponsive to probing)",
+                        time.monotonic() - scan_start,
+                        extra={'interface_number': self.interface_number,
+                               'scan_count': scan_count})
+                    # Count the attempt and arm the cooldown up-front so the
+                    # rate limit holds even if the reset call times out/raises.
+                    self._record_reset()
+                    next_escalation_at = (time.monotonic()
+                                          + self.reset_cooldown_seconds)
+                    # Refresh the scan progress stamp so the 120s scan-stall
+                    # watchdog cannot cancel this scan while the (bounded)
+                    # reset runs.
+                    self._scan_last_progress_at = time.monotonic()
+                    reset_ok = False
+                    try:
+                        reset_ok = await asyncio.wait_for(
+                            modem_reset(self.interface_number,
+                                        prefer_hardware=True,
+                                        allow_nuclear=False),
+                            timeout=NO_MODEM_RESET_TIMEOUT)
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "No-modem escalation reset did not complete within "
+                            "%.0fs — will retry after cooldown",
+                            NO_MODEM_RESET_TIMEOUT,
+                            extra={'interface_number': self.interface_number})
+                    except Exception as reset_e:  # noqa: BLE001 -- best-effort
+                        logger.error(
+                            f"No-modem escalation reset failed: {reset_e}",
+                            extra={'interface_number': self.interface_number})
+                    if reset_ok:
+                        # Board reset already waited for re-enumeration, so the
+                        # modem should be visible now — resume fast scanning to
+                        # pick it up on the next pass instead of the backed-off
+                        # interval.
+                        logger.info(
+                            "No-modem escalation reset succeeded; resuming fast "
+                            "scan for the re-enumerated modem",
+                            extra={'interface_number': self.interface_number})
+                        scan_count = 0
+                        current_interval = INITIAL_SCAN_INTERVAL
+                        self._scan_last_progress_at = time.monotonic()
+                        continue
+                else:
+                    # Blocked (disabled / max attempts / cooldown).  Re-check no
+                    # more than once per cooldown window to avoid log spam.
+                    next_escalation_at = (time.monotonic()
+                                          + self.reset_cooldown_seconds)
 
             # BACKOFF LOGIC: Start fast, then slow down for efficiency
             if scan_count <= MAX_FAST_SCANS:
