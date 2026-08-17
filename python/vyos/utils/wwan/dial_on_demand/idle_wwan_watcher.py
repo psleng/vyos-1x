@@ -3,10 +3,13 @@ import argparse
 import subprocess
 import re
 import asyncio
+import logging
 
 from vyos.utils.wwan.wwan_client import (  # noqa: E402
     WWANClient
 )
+
+logger = logging.getLogger(__name__)
 
 def get_tx_bytes(iface):
     try:
@@ -58,7 +61,7 @@ async def main(interface='wwan0',timeout=30, client=None):
                 })
         await idler(interface=interface, timeout=timeout, client=client)
     except asyncio.CancelledError:
-        pass
+        raise
     finally:
         if client:
             await client.close()
@@ -66,8 +69,8 @@ async def main(interface='wwan0',timeout=30, client=None):
 
 async def idler(interface='wwan0',timeout=30, client=None):
 
-    print(interface)
-    print(timeout)
+    logger.info(f"Given interface: {interface}")
+    logger.info(f"Given idle-timeout: {timeout}")
     timeout = int(timeout)
 
     last_tx = get_tx_bytes(interface)
@@ -79,20 +82,18 @@ async def idler(interface='wwan0',timeout=30, client=None):
         await asyncio.sleep(timeout)
         tx = get_tx_bytes(interface)
         if last_tx != tx:
-            print("idle-wwan-watcher: still detecting packets")
-            print("tx vs last tx: ", tx, last_tx)
+            logger.info("Still detecting packets")
+            logger.info(f"tx vs last tx: {tx}, {last_tx}")
             last_tx = tx
             last_active = int(time.time())
         else:
             now = int(time.time())
             idle = now - last_active
             if idle > timeout:
-                print(f"idle-wwan-watcher: idle for: {timeout}")
-                disconnect = await client.disconnect_bearer(int(interface[4:]))
-                print(disconnect)
+                logger.info(f"idled for: {timeout}")
+                await client.disconnect_bearer(int(interface[4:]))
                 wait_disconnect = await client.wait_for_bearer(int(interface[4:]), "disconnected", timeout=60)
-                print(wait_disconnect)
-                print(await client.get_bearer_status(int(interface[4:])))
+                logger.info(f"Have we successfully disconnected? {wait_disconnect}")
                 last_tx = 0
                 last_active = int(time.time())
                 break

@@ -10,6 +10,7 @@ import subprocess
 import re
 import asyncio
 import argparse
+import logging
 
 from vyos.utils.wwan.wwan_client import (  # noqa: E402
     WWANClient
@@ -17,6 +18,8 @@ from vyos.utils.wwan.wwan_client import (  # noqa: E402
 
 COOLDOWN = 60           # seconds between connection attempts
 CONNECT_TIMEOUT = 20    # seconds to wait for modem to connect
+
+logger = logging.getLogger(__name__)
 
 shutdown_event = asyncio.Event()
 
@@ -119,17 +122,17 @@ class PacketHandler:
 
     # setup
     async def setup(self):
-        print('setup called')
+        logger.info('Setting up the packet handler object.')
         if self.client is None:
             client = WWANClient()
             await client.open()
-            print(client)
+            logger.info('WWAN Client has been created and opened.')
             setup = await client.add_interface(int(self.interface[4:]))
-            print(setup)
             config = await client.set_configuration(int(self.interface[4:]), {
                 "connection_mode": "dial-on-demand",
                 "primary_sim_slot": 1,
             })
+            logger.info('WWAN Client has been configured.')
             self.client = client
         return self
 
@@ -139,7 +142,7 @@ class PacketHandler:
 
         while not packet_queue.empty():
             pkt = await packet_queue.get()
-            print(f"Packet received and accepting from queue: {pkt}")
+            logger.info(f"Packet received and accepting from queue: {pkt}")
             pkt.accept()
 
         await teardown_nftables(queue_num, self.interface)
@@ -158,26 +161,25 @@ class PacketHandler:
 
     # async packet handler
     async def handle_packet_async(self, packet):
-        print(f"Received packet: {packet}")
 
         #if await modem_connected(self.modem_id):
-        print(f"Modem id is: {self.modem_id}")
+        #print(f"Modem id is: {self.modem_id}")
 
         if shutdown_event.is_set() or modem_ready_event.is_set():
-            print(f"Packet received and accepting from callback: {packet}")
+            logger.info(f"Packet received and accepting from callback: {packet}")
             packet.accept()
             return
         # enqueue the packet into an async queue (the async queue is not thread safe)
         try:
             self.loop.call_soon_threadsafe(packet_queue.put_nowait, packet)
-            print(f"packet queued: {packet}")
+            logger.info(f"Packet queued: {packet}")
         except asyncio.QueueFull:
-            print("queue full → dropping")
+            logger.info("Packet queue full → dropping packets")
             packet.drop()
             return
-        except Exception:
+        except asyncio.CancelledError:
             packet.drop()
-            return
+            raise
 
 
         # first case if modem is already connected, set the modem event to ready if it's not already set
@@ -195,16 +197,16 @@ class PacketHandler:
         #print(await self.client.get_bearer_status(int(self.interface[4:])))
         #print(await self.client.get_status(int(self.interface[4:])))
         if await self.client.get_bearer_status(int(self.interface[4:])) == "connected" and not modem_ready_event.is_set():
-            print("If modem is connected, set modem_ready_event")
+            #print("If modem is connected, set modem_ready_event")
             self.loop.call_soon_threadsafe(modem_ready_event.set)
             return
 
         if not self.modem_bringup_started:
             self.modem_bringup_started = True
             if await self.client.connect_bearer(int(self.interface[4:])) == 'accepted':
-                print('connect_bearer started')
+                #print('connect_bearer started')
                 result = await self.client.wait_for_bearer(int(self.interface[4:]), "connected", timeout=float(self.connect_timeout))
-                print("result is: ", result)
+                logger.info(f"Have we successfully reconnected? {result}")
                 if result == True:
                     self.loop.call_soon_threadsafe(modem_ready_event.set)
                     #await renew_dhcp(self.interface)
@@ -215,28 +217,6 @@ class PacketHandler:
         #        loop.call_soon_threadsafe(dhcp_success_event.set)
         #    else:
         #        print("Timeout or failed to get DHCPACK")
-
-
-# renew dhcp to assign ip again
-
-async def renew_dhcp(interface):
-    #Release any old DHCP lease and request a new one.
-    print(f"[WWAN] Renewing DHCP lease on {interface}...", flush=True)
-    code, out, err = await run_cmd("dhclient", "-r", interface)
-    code, out, err = await run_cmd("dhclient", "-v", interface)
-    if code == 0:
-        print(f"[WWAN] DHCP renewal complete on {interface}.", flush=True)
-        print(f"DHCP success output: {out}")
-    else:
-        print(f"[WWAN] DHCP renewal failed on {interface}.", flush=True)
-        print(f"DHCP error output: {err}")
-
-    code, out, err = await run_cmd("dhclient", "-r", interface)
-    code, out, err = await run_cmd("dhclient", "-v", interface)
-
-    #loop.call_soon_threadsafe(dhcp_success_event.set)
-
-    return True
 
 
 # -------------------- Main --------------------
@@ -256,7 +236,7 @@ def get_all_wwan_options():
         else:
             ignore_wwan = {}
             for i in values:
-                print(i)
+                #print(i)
                 if "wwan" in i:
                     ignore_wwan.append(i)
             final_wwan = {k: v for k, v in wwan_to_check.items() if k in ignore_wwan}
@@ -292,10 +272,10 @@ async def main(interface='wwan0', connect_timeout=30, loop=None, client=None):
     else:
         return
 
-    print(connect_timeout)
+    logger.info(f"Given timeout to wait for modem connect: {connect_timeout}")
 
-    print(queue_num)
-    print(modem_index)
+    logger.info(f"The nfqueue to listen to: {queue_num}")
+    #print(modem_index)
     if queue_num is None:
         return
 
@@ -317,16 +297,18 @@ async def main(interface='wwan0', connect_timeout=30, loop=None, client=None):
 
         loop.add_reader(fd, start_nfqueue, nfqueue)
 
-        print("Worker task set")
+        logger.info("Started to listen to nfqueue.")
         worker_task = loop.create_task(handler.packet_consumer(queue_num))
 
         # We wait for the worker task to tell us to stop.
-        print('worker task created')
+        logger.info('Packet consumer task created. Now waiting to finish.')
         await shutdown_event.wait()
-        print('finished tasks and closing dbus')
+        logger.info('Finished tasks, closing client and unbinding nfqueue.')
 
         #await handler.removed_event.wait()
         #loop.run_forever()
+    except asyncio.CancelledError:
+        raise
     finally:
         handler.shutdown = True
         loop.remove_reader(fd)

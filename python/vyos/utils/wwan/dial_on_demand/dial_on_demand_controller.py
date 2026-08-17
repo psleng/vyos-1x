@@ -6,9 +6,14 @@ import re
 import argparse
 import asyncio
 import signal
+import logging
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s %(module)s: %(message)s")
 
 def cleanup(interface='wwan0'):
-    pattern = re.compile(r"^table\s+(\S+)\s+(wwan\d+_raw_\d+)$")
+    pattern = re.compile(rf"^table\s+(\S+)\s+({interface}+_raw_\d+)$")
     result = subprocess.run(
         ["nft", "list", "tables"],
         capture_output=True,
@@ -26,39 +31,36 @@ def cleanup(interface='wwan0'):
             check=True
         )
 
-async def shutdown_raise(shutdown_event, finished_task):
-
-    loop = asyncio.get_event_loop()
-    shutdown_task = loop.create_task(shutdown_event.wait())
-    done, pending = await asyncio.wait(
-        [shutdown_task, finished_task],
-        return_when=asyncio.FIRST_COMPLETED,
-    )
-    for task in pending:
-        task.cancel()
-
-    if shutdown_task in done:
-        raise asyncio.CancelledError()
+async def run(interface='wwan0', timeout=30, connect_timeout=30):
+    try:
+        await idle_wwan_watcher.main(interface=interface, timeout=timeout)
+        await nft_rules.generate_nft_rules(interface=interface)
+        await wwan_nft_reconnect.main(interface=interface, connect_timeout=connect_timeout)
+    except asyncio.CancelledError:
+        raise
+    finally:
+        logger.info("Finished service successfully!")
 
 
 async def main(interface='wwan0', timeout=30, connect_timeout=30):
     """"""
-    shutdown_event = asyncio.Event()
+    current_task = asyncio.create_task(run(interface=interface, timeout=timeout, connect_timeout=connect_timeout))
+    def handle_sigterm():
+        logger.info("Received signal termination. Stopping service...")
+        current_task.cancel()
+
     loop = asyncio.get_event_loop()
-    loop.add_signal_handler(signal.SIGTERM, shutdown_event.set)
+    loop.add_signal_handler(signal.SIGTERM, handle_sigterm)
 
     try:
-        idle_task = await loop.create_task(idle_wwan_watcher.main(interface=interface, timeout=timeout))
-        nft_task = await loop.create_task(nft_rules.generate_nft_rules(interface=interface))
-        reconnect_task = loop.create_task(wwan_nft_reconnect.main(interface=interface, connect_timeout=connect_timeout))
-        shutdown_task = loop.create_task(shutdown_raise(shutdown_event, reconnect_task))
-        await asyncio.gather(reconnect_task, shutdown_task)
+        await current_task
 
     except asyncio.CancelledError:
         pass
     finally:
         # should always cleanup
         cleanup(interface=interface)
+        loop.remove_signal_handler(signal.SIGTERM)
 
 
 

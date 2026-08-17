@@ -47,7 +47,6 @@ async def async_run_nft_cmd(cmd=''):
 
 async def generate_nft_rules(interface='wwan0'):
     config = get_config()
-    print(config)
     matching = {}
     interface_test = {}
     if config.get('interface_health') is not None:
@@ -82,7 +81,10 @@ async def generate_nft_rules(interface='wwan0'):
         else:
             commands = f'''add rule inet {interface}_raw_{rule_num} prerouting iifname {{ {inbound_interface} }} fib daddr oifname "{interface}" queue num {rule_num}
             '''
-        await async_run_nft_cmd(basic_nft_commands + commands)
+        try:
+            await async_run_nft_cmd(basic_nft_commands + commands)
+        except asyncio.CancelledError:
+            raise
 
 
 if __name__ == "__main__":
