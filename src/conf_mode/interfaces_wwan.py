@@ -28,6 +28,7 @@ import os
 import re
 import sys
 import time
+import subprocess
 
 from vyos.config import Config
 from vyos.configdict import get_interface_dict
@@ -941,6 +942,9 @@ def apply(wwan):
         # Ensure the manager is available so RemoveInterface can succeed even
         # if this commit path is the first WWAN action after a service crash.
         _ensure_manager_running()
+
+        # if interface is gone, stop service
+        wwan_on_demand_service(wwan, ifname, False, 'stop')
         removed = asyncio.run(_remove_via_dbus(interface_number))
         if not removed:
             # Manager unreachable (crashed / not yet up): the D-Bus
@@ -989,6 +993,9 @@ def apply(wwan):
     # already active.
     _ensure_manager_running()
 
+    #should stop service if a change is made
+    wwan_on_demand_service(wwan, ifname, True, 'stop')
+
     # Send config via D-Bus
     asyncio.run(_apply_via_dbus(interface_number, config))
 
@@ -1007,7 +1014,39 @@ def apply(wwan):
         defer_admin_up = bool(im['enabled'] and im['ensure_link_up_on_connect'])
         w.update(wwan, defer_admin_up=defer_admin_up)
 
+    wwan_on_demand_service(wwan, ifname, False, 'start')
     return None
+
+def wwan_on_demand_service(wwan, ifname, checkConfig, action):
+    stop_dial_service = True
+    connect_timeout = 30
+    idle_timeout = 30
+    if wwan.get('dial_on_demand') is not None:
+        connect_timeout = wwan.get('dial_on_demand').get('connect_timeout', 30)
+        idle_timeout = wwan.get('dial_on_demand').get('idle_timeout', 30)
+    if checkConfig is True:
+        result = subprocess.run(
+                ["systemctl", "list-units", "--type=service", "--all", "--no-legend", "--plain"],
+            capture_output=True,
+            text=True,
+            check=True,
+            )
+        for line in result.stdout.splitlines():
+            service = line.split()[0]
+            if not service.startswith("dial-on-demand@") or not service.endswith(".service"):
+                continue
+            params = service[len("program@"):-len(".service")].split(":")
+            if len(params) != 3:
+                continue
+            param1, param2, param3 = params
+            if param1 == ifname and param2 == idle_timeout and param3 == connect_timeout:
+                stop_dial_service = False
+                break
+    if stop_dial_service is True and action == 'stop':
+        call(f'systemctl stop dial-on-demand@{ifname}:*.service')
+    if action == 'start':
+        if wwan.get('connection_mode', 'always-on') == 'dial-on-demand':
+            call(f'systemctl start dial-on-demand@{ifname}:{idle_timeout}:{connect_timeout}.service')
 
 
 def _is_transient_dbus_error(exc):
