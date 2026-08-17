@@ -629,7 +629,7 @@ class IgosBoard(Board):
     # -------- semantic helpers --------
     def modem_reset(self, modem: Optional[str] = None) -> None:
         roles = self._resolve_modem(modem)
-        self.pulse(roles["reset"], ms=200, asserted=1)  # type: ignore[arg-type]
+        self.pulse(roles["reset"], ms=1050, asserted=1)  # type: ignore[arg-type]
 
     def modem_power(self, on: bool, modem: Optional[str] = None) -> None:
         roles = self._resolve_modem(modem)
