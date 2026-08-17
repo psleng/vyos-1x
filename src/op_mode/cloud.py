@@ -22,11 +22,8 @@ from tabulate import tabulate
 import urllib3
 
 from vyos.configquery import ConfigTreeQuery
-from vyos.utils.process import is_systemd_service_running
 import vyos.opmode
 
-service_name = 'igos-cloud-proxy'
-device_id_stub = 'unavailable'
 default_https_port = 443
 cloud_status_path = '/perlecloud/status'
 
@@ -42,6 +39,8 @@ def _get_https_port(config: ConfigTreeQuery) -> int:
 
 def _get_connection_details(config: ConfigTreeQuery) -> dict[str, str]:
     details = {
+        'cloud_device_id': 'unavailable',
+        'cloud_connection_status': 'disconnected',
         'cloud_connection_if_name': '',
         'cloud_connection_ip_address': '',
         'cloud_connection_if_role': 'unknown',
@@ -65,13 +64,7 @@ def _get_connection_details(config: ConfigTreeQuery) -> dict[str, str]:
 
 
 def _get_status(config: ConfigTreeQuery) -> dict:
-    is_connected = is_systemd_service_running(service_name)
-    connection_details = _get_connection_details(config)
-    return {
-        'cloud_device_id': device_id_stub,
-        'cloud_connection_status': ('connected' if is_connected else 'disconnected'),
-        **connection_details,
-    }
+    return _get_connection_details(config)
 
 
 def _get_formatted_status(status: dict) -> str:
