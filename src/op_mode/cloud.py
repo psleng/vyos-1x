@@ -33,7 +33,7 @@ config_file = r'/etc/igos-cloud-proxy/igos-cloud-proxy.conf'
 service_name = 'igos-cloud-proxy'
 
 
-def register(code: str, raw: bool):
+def set_registration(code: str, raw: bool):
     config = ConfigTreeQuery()
     if not config.exists(['service', 'cloud', 'enabled']):
         raise vyos.opmode.UnconfiguredSubsystem('Cloud service is not configured')

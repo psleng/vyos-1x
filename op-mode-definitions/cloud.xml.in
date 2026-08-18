@@ -47,7 +47,7 @@
                     <path>One time registration code</path>
                   </completionHelp>
                 </properties>
-                <command>${vyos_op_scripts_dir}/cloud.py register --code "${5}"</command>
+                <command>${vyos_op_scripts_dir}/cloud.py set_registration --code "${5}"</command>
               </tagNode>
             </children>
           </node>
