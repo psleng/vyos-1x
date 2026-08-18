@@ -39,10 +39,6 @@
               <tagNode name="register">
                 <properties>
                   <help>Register cloud</help>
-                  <valueHelp>
-                    <format>txt</format>
-                    <description>6-digit registration code provided by PerleCloud</description>
-                  </valueHelp>
                   <constraint>
                     <regex>[0-9]{6}</regex>
                   </constraint>
