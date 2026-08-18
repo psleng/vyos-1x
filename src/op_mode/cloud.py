@@ -39,11 +39,11 @@ def _get_https_port(config: ConfigTreeQuery) -> int:
 
 def _get_connection_details(config: ConfigTreeQuery) -> dict[str, str]:
     details = {
-        'cloud_device_id': 'unavailable',
         'cloud_connection_status': 'disconnected',
+        'cloud_device_id': '',
         'cloud_connection_if_name': '',
         'cloud_connection_ip_address': '',
-        'cloud_connection_if_role': 'unknown',
+        'cloud_connection_if_role': '',
     }
     port = _get_https_port(config)
     url = f'https://127.0.0.1:{port}{cloud_status_path}'
@@ -69,8 +69,8 @@ def _get_status(config: ConfigTreeQuery) -> dict:
 
 def _get_formatted_status(status: dict) -> str:
     data = [
-        ['Device ID', status['cloud_device_id']],
         ['Connection status', status['cloud_connection_status']],
+        ['Device ID', status['cloud_device_id']],
         ['Connection interface', status['cloud_connection_if_name']],
         ['Connection IP address', status['cloud_connection_ip_address']],
         ['Connection interface role', status['cloud_connection_if_role']],
