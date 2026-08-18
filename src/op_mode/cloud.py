@@ -14,6 +14,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import json
 import sys
 import warnings
 
@@ -23,31 +24,64 @@ import urllib3
 
 from vyos.configquery import ConfigTreeQuery
 import vyos.opmode
+from vyos.utils.process import call
 
 default_https_port = 443
 cloud_status_path = '/perlecloud/status'
 
-
-def _get_https_port(config: ConfigTreeQuery) -> int:
-    path = ['service', 'https', 'port']
-    if config.exists(path):
-        port = config.value(path)
-        if port is not None:
-            return int(str(port))
-    return default_https_port
+config_file = r'/etc/igos-cloud-proxy/igos-cloud-proxy.conf'
+service_name = 'igos-cloud-proxy'
 
 
-def _get_connection_details(config: ConfigTreeQuery) -> dict[str, str]:
-    details = {
+def register(code: str, raw: bool):
+    config = ConfigTreeQuery()
+    if not config.exists(['service', 'cloud', 'enabled']):
+        raise vyos.opmode.UnconfiguredSubsystem('Cloud service is not configured')
+    call(f'systemctl stop {service_name}')
+
+    try:
+        with open(config_file, 'r+') as cloud_config:
+            data_json = json.load(cloud_config)
+            if not isinstance(data_json, dict):
+                raise vyos.opmode.UnconfiguredSubsystem('Invalid cloud configuration')
+            data_json["tmpDeviceRegistrationPIN"] = code
+
+            cloud_config.seek(0)
+            json.dump(data_json, cloud_config, indent=4)
+            cloud_config.write('\n')
+            cloud_config.truncate()
+    except OSError as error:
+        raise vyos.opmode.UnconfiguredSubsystem(
+            'Could not read cloud configuration'
+        ) from error
+    except json.JSONDecodeError as error:
+        raise vyos.opmode.UnconfiguredSubsystem(
+            'Could not parse cloud configuration'
+        ) from error
+
+    call(f'systemctl start {service_name}')
+
+
+def show(raw: bool):
+    config = ConfigTreeQuery()
+    if not config.exists(['service', 'cloud']):
+        raise vyos.opmode.UnconfiguredSubsystem('Cloud service is not configured')
+
+    status = {
         'cloud_connection_status': 'disconnected',
         'cloud_device_id': '',
         'cloud_connection_if_name': '',
         'cloud_connection_ip_address': '',
         'cloud_connection_if_role': '',
     }
-    port = _get_https_port(config)
-    url = f'https://127.0.0.1:{port}{cloud_status_path}'
+    port = default_https_port
+    https_port_path = ['service', 'https', 'port']
+    if config.exists(https_port_path):
+        configured_port = config.value(https_port_path)
+        if configured_port is not None:
+            port = int(str(configured_port))
 
+    url = f'https://127.0.0.1:{port}{cloud_status_path}'
     try:
         with warnings.catch_warnings():
             warnings.simplefilter('ignore', urllib3.exceptions.InsecureRequestWarning)
@@ -55,19 +89,14 @@ def _get_connection_details(config: ConfigTreeQuery) -> dict[str, str]:
         response.raise_for_status()
         response_data = response.json()
     except (requests.RequestException, ValueError):
-        return details
+        pass
+    else:
+        for field in status:
+            if isinstance(response_data.get(field), str):
+                status[field] = response_data[field]
 
-    for field in details:
-        if isinstance(response_data.get(field), str):
-            details[field] = response_data[field]
-    return details
-
-
-def _get_status(config: ConfigTreeQuery) -> dict:
-    return _get_connection_details(config)
-
-
-def _get_formatted_status(status: dict) -> str:
+    if raw:
+        return status
     data = [
         ['Connection status', status['cloud_connection_status']],
         ['Device ID', status['cloud_device_id']],
@@ -76,17 +105,6 @@ def _get_formatted_status(status: dict) -> str:
         ['Connection interface role', status['cloud_connection_if_role']],
     ]
     return tabulate(data)
-
-
-def show(raw: bool):
-    config = ConfigTreeQuery()
-    if not config.exists(['service', 'cloud']):
-        raise vyos.opmode.UnconfiguredSubsystem('Cloud service is not configured')
-
-    status = _get_status(config)
-    if raw:
-        return status
-    return _get_formatted_status(status)
 
 
 if __name__ == '__main__':
