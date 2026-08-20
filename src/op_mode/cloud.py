@@ -69,10 +69,10 @@ def show(raw: bool):
 
     status = {
         'cloud_connection_status': 'disconnected',
-        'cloud_device_id': '',
-        'cloud_connection_if_name': '',
-        'cloud_connection_ip_address': '',
-        'cloud_connection_if_role': '',
+        'cloud_device_id': 'N/A',
+        'cloud_connection_if_name': 'N/A',
+        'cloud_connection_ip_address': 'N/A',
+        'cloud_connection_if_role': 'N/A',
     }
     port = default_https_port
     https_port_path = ['service', 'https', 'port']
