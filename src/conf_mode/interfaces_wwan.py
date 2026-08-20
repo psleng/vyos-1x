@@ -598,7 +598,7 @@ def build_fsm_config(wwan):
     failed_retry = {
         'enabled': not _leaf_exists(fr, 'disable'),
         'intervals': _csv_to_list(
-            _leaf(fr, 'intervals', '600,1800,3600,7200'), int
+            _leaf(fr, 'intervals', '30,60,120,300,600,1800,3600'), int
         ),
         'max_interval': _leaf_int(fr, 'max_interval', 7200),
         'escalation_threshold': _leaf_int(fr, 'escalation_threshold', 3),

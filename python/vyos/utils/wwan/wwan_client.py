@@ -337,8 +337,9 @@ class WWANClient:
 
             ``failed_retry`` — keys: ``enabled`` (bool, default True),
             ``intervals`` (list of ints in seconds, default
-            ``[600, 1800, 3600, 7200]`` — stepped backoff from FAILED
-            state, carrier-friendly), ``max_interval`` (int, cap once list exhausted,
+            ``[30, 60, 120, 300, 600, 1800, 3600]`` — stepped backoff from
+            FAILED state; fast early retries recover from transient signal
+            loss, carrier-friendly tail), ``max_interval`` (int, cap once list exhausted,
             default 7200), ``escalation_threshold`` (int, default 3 —
             after this many consecutive failed retries, escalate to a
             modem disable/enable cycle to force EPS detach/reattach;

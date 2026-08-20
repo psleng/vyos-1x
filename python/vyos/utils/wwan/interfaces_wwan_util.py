@@ -33,6 +33,41 @@ from vyos.utils.wwan import interfaces_wwan_diag as wwan_diag
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# ModemManager managed-downtime guard
+# ---------------------------------------------------------------------------
+# A deliberate ``systemctl stop ModemManager`` -- done around the quiesced
+# hardware reset below -- is indistinguishable from an MM crash to the watchdog
+# in interfaces_wwan_main.ModemManagerMonitor, which would "recover" it by
+# restarting MM mid-reset and defeat the whole point (MM would immediately
+# re-probe the not-yet-ready modem).  The reset path publishes an EXPIRING
+# deadline here; the watchdog consults is_managed_mm_downtime() and leaves MM
+# alone until it passes.  The deadline auto-expires so a failure mid-reset can
+# never leave MM permanently unmonitored.
+_mm_managed_downtime_until = 0.0
+
+
+def begin_managed_mm_downtime(seconds: float) -> None:
+    """Declare ModemManager intentionally stopped for up to ``seconds``."""
+    global _mm_managed_downtime_until
+    _mm_managed_downtime_until = time.monotonic() + max(0.0, seconds)
+
+
+def end_managed_mm_downtime() -> None:
+    """Clear the managed-downtime window (reset finished / MM back)."""
+    global _mm_managed_downtime_until
+    _mm_managed_downtime_until = 0.0
+
+
+def is_managed_mm_downtime() -> bool:
+    """True while a deliberate ModemManager stop is in effect.
+
+    The MM watchdog checks this and stands down (does not restart MM) so a
+    quiesced reset can hold MM down through the modem's unprobed settle window.
+    """
+    return time.monotonic() < _mm_managed_downtime_until
+
+
 def system_is_stopping() -> bool:
     """True when systemd is taking the whole system down (reboot/poweroff/halt).
 
@@ -651,6 +686,108 @@ def modem_reset_sync(interface_number: int) -> bool:
     except Exception as e:
         logger.error(f"Synchronous modem reset failed: {e}")
         return False
+
+
+async def modem_reset_quiesced(interface_number: int, *,
+                              settle_seconds: float = 70.0,
+                              reenumerate_timeout: float = 60.0) -> bool:
+    """Hardware-reset the modem with ModemManager QUIESCED around the pulse.
+
+    Some modems (notably the Telit FN920C04 on early firmware) enumerate on USB
+    within seconds of a reset but leave their QMI/AT command stack unresponsive
+    for ~a minute afterwards.  If ModemManager keeps probing across the reset it
+    talks to the not-yet-ready modem, fails to classify it, and gives up -- so a
+    plain board reset "succeeds" (the modem re-enumerates) yet MM never creates
+    a modem object, and recovery only happens by luck after several attempts.
+
+    This variant removes the race: it STOPS ModemManager, PERST-resets the
+    modem, waits an UNPROBED ``settle_seconds`` window for the command stack to
+    come up, then starts ModemManager so it probes an already-ready modem and
+    classifies it on the first pass.  The MM watchdog is told, via
+    begin_managed_mm_downtime(), not to "recover" the deliberate stop.
+
+    Returns True if ModemManager re-enumerated a modem afterwards.
+    """
+    if _is_running_in_vm():
+        logger.warning("VM detected -- quiesced hardware reset unavailable "
+                       f"for interface {interface_number}")
+        return False
+
+    logger.info("Quiesced hardware reset for interface %d: stop MM -> PERST -> "
+                "%.0fs unprobed settle -> start MM",
+                interface_number, settle_seconds)
+
+    # Keep the MM watchdog from restarting MM while we deliberately hold it
+    # down.  Cover the whole operation (stop + settle + start + re-enum wait)
+    # plus margin; it auto-expires so a failure mid-reset cannot wedge MM off.
+    begin_managed_mm_downtime(settle_seconds + reenumerate_timeout + 60.0)
+    try:
+        # 1. Stop ModemManager so it stops probing the modem.
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "sudo", "systemctl", "stop", "ModemManager",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE)
+            await asyncio.wait_for(proc.communicate(), timeout=20)
+            logger.info("ModemManager stopped for quiesced reset")
+        except Exception as e:  # noqa: BLE001 -- best effort
+            logger.warning(
+                f"Could not stop ModemManager for quiesced reset: {e}")
+
+        # 2. PERST the modem (deterministic board GPIO reset).
+        pulsed = await _try_board_modem_reset(interface_number)
+        if not pulsed:
+            logger.warning("Board PERST reset unavailable/failed; continuing "
+                           "with an unprobed settle + MM restart anyway")
+
+        # 3. UNPROBED settle -- let the modem boot its command stack with
+        #    nobody poking it.  This is the whole point of the quiesce.
+        logger.info("Modem settling for %.0fs with ModemManager stopped "
+                    "(unprobed)", settle_seconds)
+        await asyncio.sleep(max(0.0, settle_seconds))
+
+        # 4. Re-trigger USB udev rules (so MM gets the physical-slot UID, as at
+        #    boot) then start ModemManager to probe the now-ready modem.
+        try:
+            trig = await asyncio.create_subprocess_exec(
+                "udevadm", "trigger", "--action=change",
+                "--subsystem-match=usb",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE)
+            await asyncio.wait_for(trig.communicate(), timeout=15)
+            settle = await asyncio.create_subprocess_exec(
+                "udevadm", "settle", "--timeout=10",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE)
+            await asyncio.wait_for(settle.communicate(), timeout=15)
+        except Exception as e:  # noqa: BLE001 -- best effort
+            logger.warning(f"udev re-trigger before MM start failed: {e}")
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "sudo", "systemctl", "start", "ModemManager",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE)
+            await asyncio.wait_for(proc.communicate(), timeout=20)
+            logger.info("ModemManager started after quiesced reset settle")
+        except Exception as e:  # noqa: BLE001
+            logger.error(
+                f"Failed to start ModemManager after quiesced reset: {e}")
+            return False
+
+        # 5. Confirm MM re-enumerated the modem.
+        ok = await _wait_for_modemmanager_reenumeration(
+            interface_number, timeout=int(reenumerate_timeout))
+        if ok:
+            logger.info("Quiesced reset: ModemManager re-enumerated the modem "
+                        f"for interface {interface_number}")
+            _count_hardware_reset(interface_number)
+        else:
+            logger.warning("Quiesced reset: ModemManager still shows no modem "
+                           f"for interface {interface_number} after settle")
+        return ok
+    finally:
+        end_managed_mm_downtime()
 
 
 async def modem_reset_nuclear(interface_number: int) -> bool:

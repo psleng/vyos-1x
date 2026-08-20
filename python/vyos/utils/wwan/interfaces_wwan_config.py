@@ -162,7 +162,7 @@ class InterfaceConfig(ServiceInterface):
         # Failed-state periodic retry settings
         "failed_retry": {
             "enabled": True,                          # Enable automatic retry from FAILED state
-            "intervals": [600, 1800, 3600, 7200],      # Backoff intervals in seconds (10, 30, 60, 120 min) — carrier-friendly
+            "intervals": [30, 60, 120, 300, 600, 1800, 3600],  # 30s,1m,2m,5m,10m,30m,60m — fast early recovery, carrier-friendly tail
             "max_interval": 7200,                      # Cap interval once list is exhausted (2 hr, carrier-friendly)
             "escalation_threshold": 3,                 # Consecutive failures before disable/enable cycle (0 = disabled)
         },

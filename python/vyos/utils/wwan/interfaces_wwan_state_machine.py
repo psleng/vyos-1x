@@ -32,7 +32,10 @@ from dbus_next.message import Message  # pylint: disable=import-error
 from dbus_next.errors import DBusError  # pylint: disable=import-error
 from dbus_next import Variant  # pylint: disable=import-error
 from automaton import machines  # pylint: disable=import-error
-from vyos.utils.wwan.interfaces_wwan_util import modem_reset
+from vyos.utils.wwan.interfaces_wwan_util import (
+    modem_reset,
+    modem_reset_quiesced,
+)
 from vyos.utils.wwan import interfaces_wwan_diag as wwan_diag
 from vyos.utils.wwan.sim_controller import make_sim_controller
 
@@ -574,6 +577,14 @@ class ModemStateMachine:
         self.hardware_reset_enabled = True
         self.max_hardware_resets = 3
         self.hardware_reset_attempts = 0
+        # Forever-failsafe reset cadence.  After the frequent phase
+        # (max_hardware_resets resets spaced by reset_cooldown_seconds) is
+        # spent, the modem is NOT abandoned: resets continue INDEFINITELY at
+        # this slower interval until a stable connection clears the counter
+        # (_reset_failover_counters).  So a prolonged outage (e.g. hours with no
+        # signal) can never permanently exhaust recovery — it just slows to
+        # this cadence, then resumes the fast burst once the modem connects.
+        self.failsafe_reset_interval = 1800   # 30 min slow-retry, forever
 
         # Service-initiated modem operations tracking (improved reset-aware)
         self.service_initiated_disable = False  # Flag to prevent false SIM missing detection
@@ -606,7 +617,11 @@ class ModemStateMachine:
         self._failed_retry_operation_started_at = 0.0
         self._failed_retry_operation_timeout = 300.0
         self._failed_retry_enabled = True    # Overridden by config in _apply_parsed_configuration
-        self._failed_retry_intervals = [600, 1800, 3600, 7200]  # 10, 30, 60, 120 min (carrier-friendly)
+        # Fast early retries recover from TRANSIENT failures (e.g. signal/antenna
+        # loss then return) within ~30-60s instead of waiting out a long
+        # carrier-friendly interval; the tail (10/30/60 min, cap 2 hr) still
+        # avoids hammering the carrier on a PERSISTENT failure (dead data plan).
+        self._failed_retry_intervals = [30, 60, 120, 300, 600, 1800, 3600]  # 30s,1m,2m,5m,10m,30m,60m
         self._failed_retry_max_interval = 7200  # Cap at 2 hr (carrier-friendly)
         # Upper bound on the shutdown bearer-disconnect D-Bus call.  dbus_next
         # has no client-side timeout, and Simple.Disconnect() on a
@@ -643,6 +658,27 @@ class ModemStateMachine:
 
         # Modem removal flag — lets CancelledError handlers log the right reason
         self._modem_removed = False
+
+        # Post-enumeration settle.  A Telit FN920C04 appears on the USB bus
+        # ~15s after a reset but is not actually ready to service QMI/AT
+        # operations (SIM read, enable, connect) for roughly another ~35s.
+        # Poking it inside that window causes spurious failures (empty SIM
+        # path, cancelled enable, connect errors) and the recovery churn that
+        # follows.  Active configuration waits out the remainder of this
+        # window — measured from when the modem was last detected — before
+        # touching the modem, INCLUDING at initial startup.  Configurable;
+        # set to 0 to disable.
+        self._modem_settle_seconds = 40.0
+        self._modem_detected_at = 0.0
+
+        # Unprobed settle window for the QUIESCED escalation reset
+        # (modem_reset_quiesced): ModemManager is stopped, the modem is
+        # PERST-reset, then left to boot its QMI/AT command stack for this many
+        # seconds with nobody probing it, before MM is started to classify it
+        # on the first pass.  Sized to the modem's ready-to-register time
+        # (~65s observed on the FN920C04) with margin.  Set to 0 to fall back
+        # to a plain (MM-live) reset.
+        self._modem_reset_settle_seconds = 70.0
 
         # SIM switch in-progress flag — suppresses modem-removed handler during
         # expected modem disappearance caused by SetPrimarySimSlot (Telit LN920
@@ -960,29 +996,52 @@ class ModemStateMachine:
                                'alert_type': alert_type})
 
     def _is_reset_allowed(self) -> bool:
-        """Check if hardware reset is allowed (not in cooldown period)"""
+        """Gate hardware resets with a two-tier cadence that NEVER gives up.
+
+        Tier 1 (frequent burst): up to ``max_hardware_resets`` resets, each
+        spaced by ``reset_cooldown_seconds`` — the fast recovery attempts.
+        Tier 2 (forever failsafe): once that budget is spent we do NOT stop
+        (a wedged modem would then stay dead forever, e.g. after a long
+        no-signal outage).  Resets instead continue INDEFINITELY at the slower
+        ``failsafe_reset_interval`` until a stable connection clears the counter
+        (_reset_failover_counters), at which point the fast burst is available
+        again.  So recovery always eventually happens once conditions allow,
+        without hammering a dead modem.
+        """
         if not self.hardware_reset_enabled:
             logger.warning("Hardware reset blocked - feature disabled by configuration",
                           extra={'interface_number': self.interface_number})
             return False
 
-        if self.hardware_reset_attempts >= self.max_hardware_resets:
-            logger.warning("Hardware reset blocked - max attempts reached",
-                          extra={'interface_number': self.interface_number,
-                                 'attempts': self.hardware_reset_attempts,
-                                 'max_attempts': self.max_hardware_resets})
-            return False
+        in_failsafe = self.hardware_reset_attempts >= self.max_hardware_resets
+        required_gap = (self.failsafe_reset_interval if in_failsafe
+                        else self.reset_cooldown_seconds)
 
         current_time = time.time()
         time_since_last_reset = current_time - self.last_reset_time
 
-        if time_since_last_reset < self.reset_cooldown_seconds:
-            remaining_cooldown = self.reset_cooldown_seconds - time_since_last_reset
-            logger.warning(f"Hardware reset blocked by cooldown - {remaining_cooldown:.1f}s remaining",
-                          extra={'interface_number': self.interface_number,
-                                'last_reset': self.last_reset_time,
-                                'cooldown_seconds': self.reset_cooldown_seconds})
+        if time_since_last_reset < required_gap:
+            remaining = required_gap - time_since_last_reset
+            logger.warning(
+                "Hardware reset blocked by %s - %.1fs remaining",
+                "forever-failsafe cadence" if in_failsafe else "cooldown",
+                remaining,
+                extra={'interface_number': self.interface_number,
+                       'last_reset': self.last_reset_time,
+                       'gap_seconds': required_gap,
+                       'in_failsafe': in_failsafe,
+                       'attempts': self.hardware_reset_attempts,
+                       'max_attempts': self.max_hardware_resets})
             return False
+
+        if in_failsafe:
+            logger.warning(
+                "Hardware reset budget (%d) spent — continuing on the "
+                "forever-failsafe cadence (every %.0fs) until the modem "
+                "recovers",
+                self.max_hardware_resets, self.failsafe_reset_interval,
+                extra={'interface_number': self.interface_number,
+                       'attempts': self.hardware_reset_attempts})
         return True
 
     def _record_reset(self):
@@ -1041,7 +1100,17 @@ class ModemStateMachine:
             "modem to recover",
             extra={'interface_number': self.interface_number})
         try:
-            ok = await modem_reset(self.interface_number)
+            # Quiesce ModemManager around the pulse so it re-probes an
+            # already-ready modem.  A bare MM-live reset re-probes the modem
+            # before its command stack is up and lands right back in
+            # unknown-capabilities (observed).  Fall back to the plain reset
+            # only if the settle window is disabled.
+            if self._modem_reset_settle_seconds > 0:
+                ok = await modem_reset_quiesced(
+                    self.interface_number,
+                    settle_seconds=self._modem_reset_settle_seconds)
+            else:
+                ok = await modem_reset(self.interface_number)
             self._record_reset()
             if not ok:
                 logger.warning(
@@ -1063,8 +1132,12 @@ class ModemStateMachine:
     def _start_failed_retry(self):
         """Launch background retry loop when FSM enters FAILED.
 
-        Uses exponential backoff (5, 10, 20, 30, 30, 30 ... min) to
-        reattempt the APN connection cascade.  Covers:
+        Uses escalating backoff (30s, 1, 2, 5, 10, 30, 60 min, then a 2 hr
+        cap) to reattempt the APN connection cascade.  Fast early intervals
+        recover quickly from TRANSIENT faults (signal/antenna loss then
+        return); the long tail stays carrier-friendly for PERSISTENT faults.
+        Covers:
+        - Signal/antenna loss then return (fast early retry)
         - Data plan topped up / monthly rollover
         - Carrier provisioning delay for new SIM
         - Transient network-side errors
@@ -1314,6 +1387,27 @@ class ModemStateMachine:
                             if await self._reset_modem_for_capability_fault():
                                 continue
                             # reset blocked or failed → fall through and defer
+                    # Modem is DISABLED (state 3) — re-enable it so it can
+                    # attempt registration again.  Without this the loop would
+                    # defer forever on a modem left DISABLED (e.g. after a SIM
+                    # failover to an empty primary slot, or a registration
+                    # timeout that deregistered it): nothing else re-enables it,
+                    # so a returning signal/antenna is never noticed and the
+                    # link never recovers on its own.  This is the automatic
+                    # equivalent of a manual `mmcli -m N --enable`.
+                    if mm_state == 3:  # MM_MODEM_STATE_DISABLED
+                        try:
+                            modem_iface = self.proxy.get_interface(MODEM_INTERFACE)
+                            await modem_iface.call_enable(True)
+                            logger.info(
+                                "Failed-state retry: re-enabled DISABLED modem "
+                                "so it can re-register",
+                                extra={'interface_number': self.interface_number})
+                        except Exception as en_e:
+                            logger.warning(
+                                "Failed-state retry: could not re-enable modem: "
+                                f"{en_e}",
+                                extra={'interface_number': self.interface_number})
                     logger.info(
                         f"Modem not ready (state {mm_state}), "
                         "deferring retry to next interval",
@@ -1681,8 +1775,16 @@ class ModemStateMachine:
         # reset, gated by the SAME cooldown/max-attempt rules as the recovery
         # loop (_is_reset_allowed/_record_reset) so it can never reset in a
         # tight loop.  Generic — applies to every modem, not one model.
-        NO_MODEM_RESET_TIMEOUT = 90.0    # bound the reset call below the 120s
-                                         # scan-stall watchdog (_scan_stall_timeout)
+        # Upper bound on the escalation reset call.  The quiesced reset (stop
+        # MM -> PERST -> unprobed settle -> start MM -> re-enum wait)
+        # legitimately runs longer than the old MM-live reset, so size the cap
+        # to the settle plus stop/start/re-enum overhead; the scan-stall
+        # watchdog (_scan_stall_timeout) is raised to match for the duration of
+        # the call (below) so it cannot cancel the scan mid-reset.  A settle of
+        # 0 (quiesce disabled) keeps the old 90s bound.
+        no_modem_reset_timeout = (
+            self._modem_reset_settle_seconds + 150.0
+            if self._modem_reset_settle_seconds > 0 else 90.0)
 
         current_interval = INITIAL_SCAN_INTERVAL
         scan_count = 0
@@ -1866,27 +1968,43 @@ class ModemStateMachine:
                     self._record_reset()
                     next_escalation_at = (time.monotonic()
                                           + self.reset_cooldown_seconds)
-                    # Refresh the scan progress stamp so the 120s scan-stall
-                    # watchdog cannot cancel this scan while the (bounded)
-                    # reset runs.
+                    # Refresh the scan progress stamp AND raise the scan-stall
+                    # watchdog for the duration: the quiesced reset (stop MM ->
+                    # PERST -> unprobed settle -> start MM -> re-enum wait) runs
+                    # legitimately longer than the normal 120s watchdog, so we
+                    # must stop it cancelling this scan mid-reset, then restore.
                     self._scan_last_progress_at = time.monotonic()
+                    saved_stall_timeout = self._scan_stall_timeout
+                    self._scan_stall_timeout = max(
+                        self._scan_stall_timeout,
+                        no_modem_reset_timeout + 30.0)
                     reset_ok = False
                     try:
+                        if self._modem_reset_settle_seconds > 0:
+                            # Quiesce MM around the pulse so it probes an
+                            # already-ready modem (first-pass classification).
+                            reset_coro = modem_reset_quiesced(
+                                self.interface_number,
+                                settle_seconds=self._modem_reset_settle_seconds)
+                        else:
+                            reset_coro = modem_reset(self.interface_number,
+                                                     prefer_hardware=True,
+                                                     allow_nuclear=False)
                         reset_ok = await asyncio.wait_for(
-                            modem_reset(self.interface_number,
-                                        prefer_hardware=True,
-                                        allow_nuclear=False),
-                            timeout=NO_MODEM_RESET_TIMEOUT)
+                            reset_coro, timeout=no_modem_reset_timeout)
                     except asyncio.TimeoutError:
                         logger.warning(
                             "No-modem escalation reset did not complete within "
                             "%.0fs — will retry after cooldown",
-                            NO_MODEM_RESET_TIMEOUT,
+                            no_modem_reset_timeout,
                             extra={'interface_number': self.interface_number})
                     except Exception as reset_e:  # noqa: BLE001 -- best-effort
                         logger.error(
                             f"No-modem escalation reset failed: {reset_e}",
                             extra={'interface_number': self.interface_number})
+                    finally:
+                        self._scan_stall_timeout = saved_stall_timeout
+                        self._scan_last_progress_at = time.monotonic()
                     if reset_ok:
                         # Board reset already waited for re-enumeration, so the
                         # modem should be visible now — resume fast scanning to
@@ -2133,6 +2251,9 @@ class ModemStateMachine:
             return
         self._on_modem_found_in_progress = True
         try:
+            # Record this (re-)enumeration so active configuration waits out the
+            # post-enumeration settle window before poking the modem.
+            self._modem_detected_at = time.monotonic()
 
         # Set up a single PropertiesChanged handler for all interfaces on this proxy.
         # dbus_next delivers all PropertiesChanged signals through one callback;
@@ -2220,12 +2341,26 @@ class ModemStateMachine:
         so SIM-failover logic has a populated config to consult.
         """
         try:
+            # This cold-attach safety net must not race with the initial
+            # configuration task, which OWNS FAILED-at-attach recovery and now
+            # includes the post-enumeration settle.  Wait for that task to
+            # FINISH before reading state; if it is still running, defer to it
+            # entirely.  Acting while it configures/connects spawns a second
+            # connection attempt and the "bearer came up but FSM not connected
+            # — tearing down" churn.
             if self._initial_config_task is not None:
                 try:
                     await asyncio.wait_for(
-                        asyncio.shield(self._initial_config_task), timeout=30.0)
+                        asyncio.shield(self._initial_config_task),
+                        timeout=self._modem_settle_seconds + 90.0)
                 except (asyncio.TimeoutError, Exception):
-                    pass  # proceed regardless of config-task outcome
+                    pass
+                if not self._initial_config_task.done():
+                    logger.info(
+                        "Initial configuration still in progress — deferring "
+                        "cold-attach state dispatch to it",
+                        extra={'interface_number': self.interface_number})
+                    return
 
             if not self.proxy:
                 return
@@ -3577,6 +3712,8 @@ class ModemStateMachine:
         self.hardware_reset_enabled = bool(self.parsed_config.raw_config.get('hardware_reset_enabled', True))
         self.max_hardware_resets = int(self.parsed_config.raw_config.get('max_hardware_resets', 3))
         self.reset_cooldown_seconds = int(self.parsed_config.raw_config.get('hardware_reset_cooldown', 300))
+        self.failsafe_reset_interval = int(self.parsed_config.raw_config.get(
+            'hardware_reset_failsafe_interval', 1800))
 
         logger.info("Applied timeout/reset runtime configuration",
                extra={'interface_number': self.interface_number,
@@ -3584,7 +3721,8 @@ class ModemStateMachine:
                   'registration_timeout': self.registration_timeout,
                   'hardware_reset_enabled': self.hardware_reset_enabled,
                   'max_hardware_resets': self.max_hardware_resets,
-                  'hardware_reset_cooldown': self.reset_cooldown_seconds})
+                  'hardware_reset_cooldown': self.reset_cooldown_seconds,
+                  'failsafe_reset_interval': self.failsafe_reset_interval})
 
         # Failed-state periodic retry configuration
         self._failed_retry_enabled = self.parsed_config.failed_retry.enabled
@@ -3646,6 +3784,33 @@ class ModemStateMachine:
                 extra={'interface_number': self.interface_number},
             )
 
+    async def _await_modem_settle(self, reason: str = '') -> None:
+        """Wait out the post-enumeration settle window before active modem ops.
+
+        The FN920C04 appears on the USB bus ~15s after a reset but is not
+        actually ready to service QMI/AT operations for roughly another ~35s.
+        Acting inside that window causes spurious failures (empty SIM path,
+        cancelled enable, connect errors) and recovery churn.  Sleep the
+        remainder of ``self._modem_settle_seconds`` measured from the last
+        detection (``self._modem_detected_at``), so a modem that has already
+        been up a while is not delayed.  No-op once the window has passed or
+        when disabled (settle <= 0).
+        """
+        if self._modem_settle_seconds <= 0:
+            return
+        detected = self._modem_detected_at or time.monotonic()
+        remaining = self._modem_settle_seconds - (time.monotonic() - detected)
+        if remaining <= 0:
+            return
+        logger.info(
+            f"Post-enumeration settle: waiting {remaining:.0f}s for the modem "
+            "to become fully ready before active operations",
+            extra={'interface_number': self.interface_number,
+                   'reason': reason,
+                   'settle_seconds': self._modem_settle_seconds,
+                   'remaining_seconds': round(remaining, 1)})
+        await asyncio.sleep(remaining)
+
     async def _configure_modem_initial(self):
         """Initial modem configuration - configure SIM/bands/carrier BEFORE network operations"""
         try:
@@ -3660,6 +3825,11 @@ class ModemStateMachine:
 
             logger.info("Starting initial modem configuration",
                        extra={'interface_number': self.interface_number})
+
+            # Post-enumeration settle: the modem enumerates well before it is
+            # truly ready; wait out the remaining settle window before ANY
+            # active operation (state read, reset, SIM/band config, connect).
+            await self._await_modem_settle('initial_config')
 
             # Step 0: Check if modem is already in an active state (abnormal for service startup)
             props = self.proxy.get_interface("org.freedesktop.DBus.Properties")
@@ -4354,6 +4524,56 @@ class ModemStateMachine:
                           extra={'interface_number': self.interface_number})
             return {}
 
+    async def _wait_for_sim_ready(self, timeout: float = 20.0,
+                                  poll_interval: float = 1.0) -> 'str | None':
+        """Wait for the modem's SIM object to appear after a reset.
+
+        Right after a hardware reset / re-enumeration the FN920C04's SIM
+        interface is not ready for several seconds: Modem.Sim is transiently
+        '/' (empty) even though a SIM is physically present.  Reading it once
+        and declaring "No SIM" wrongly triggers a SIM failover (to an empty
+        primary slot) and a reset-churn loop.  Poll Modem.Sim until it exposes
+        a real object path or the window elapses.
+
+        Returns the SIM object path once one appears; '/' if it stays empty for
+        the whole window (genuinely absent); or None if Sim could never be read
+        (proxy gone / D-Bus errors throughout) — caller treats None as
+        inconclusive, NOT absent, and must not fail over on it.
+        """
+        deadline = time.monotonic() + timeout
+        last_err = None
+        read_ok = False
+        while True:
+            if not self.proxy:
+                return None
+            try:
+                props = self.proxy.get_interface(
+                    "org.freedesktop.DBus.Properties")
+                sim_variant = await props.call_get(MODEM_INTERFACE, "Sim")
+                sim_path = (sim_variant.value
+                            if hasattr(sim_variant, 'value') else sim_variant)
+                read_ok = True
+                if sim_path and sim_path != '/':
+                    logger.info("SIM interface ready",
+                               extra={'interface_number': self.interface_number,
+                                      'sim_path': sim_path})
+                    return sim_path
+            except Exception as e:  # noqa: BLE001 -- poll through transient errors
+                last_err = e
+            if time.monotonic() >= deadline:
+                if read_ok:
+                    logger.warning(
+                        "SIM interface still empty after settle window",
+                        extra={'interface_number': self.interface_number,
+                               'waited_seconds': round(timeout, 1)})
+                    return '/'
+                logger.warning(
+                    "Could not read SIM presence during settle window "
+                    f"(last error: {last_err})",
+                    extra={'interface_number': self.interface_number})
+                return None
+            await asyncio.sleep(poll_interval)
+
     async def _unlock_sim_if_needed(self):
         """Unlock SIM with PIN/PUK if required.
 
@@ -4381,6 +4601,31 @@ class ModemStateMachine:
             logger.info("Checking if SIM unlock is needed",
                        extra={'interface_number': self.interface_number,
                               'modem_state': state})
+
+            # Right after a hardware reset / re-enumeration the FN920C04's SIM
+            # interface is not ready for several seconds — Modem.Sim is
+            # transiently '/' even though a SIM is physically present.  When the
+            # modem reports NOT locked, wait for the SIM to actually appear
+            # before deciding it is absent; a first empty read would otherwise
+            # kick off a bogus SIM failover (to an empty primary slot) and a
+            # reset-churn loop.  Re-read State afterwards: the SIM may come up
+            # PIN-locked, in which case the state==2 branch below unlocks it.
+            if state != 2:
+                sim_path = await self._wait_for_sim_ready()
+                if sim_path == '/':
+                    logger.warning("⚠️ No SIM card detected in modem (Sim path is empty)",
+                                  extra={'interface_number': self.interface_number,
+                                         'modem_state': state,
+                                         'sim_path': sim_path})
+                    self.transition(ModemEvent.SIM_MISSING)
+                    self._safe_create_task(self._handle_sim_missing_failover())
+                    raise Exception("No SIM card present")
+                if sim_path is not None:
+                    try:
+                        state = (await props.call_get(
+                            MODEM_INTERFACE, "State")).value
+                    except Exception:
+                        pass
 
             # State 2 = LOCKED (needs PIN or PUK)
             if state == 2:
@@ -4417,32 +4662,13 @@ class ModemStateMachine:
                                   extra={'interface_number': self.interface_number,
                                          'unlock_required': unlock_required})
             else:
-                # Modem not locked - but check if SIM is actually present
-                # With no SIM, modem can still reach ENABLED state on some hardware
-                try:
-                    sim_path_variant = await props.call_get(MODEM_INTERFACE, "Sim")
-                    sim_path = sim_path_variant.value if hasattr(sim_path_variant, 'value') else sim_path_variant
-                    if not sim_path or sim_path == '/':
-                        logger.warning("⚠️ No SIM card detected in modem (Sim path is empty)",
-                                      extra={'interface_number': self.interface_number,
-                                             'modem_state': state,
-                                             'sim_path': sim_path})
-                        # Transition to WAITING_FOR_SIM
-                        self.transition(ModemEvent.SIM_MISSING)
-                        self._safe_create_task(self._handle_sim_missing_failover())
-                        raise Exception("No SIM card present")
-                    else:
-                        logger.info("SIM unlock not needed",
-                                   extra={'interface_number': self.interface_number,
-                                          'modem_state': state,
-                                          'sim_path': sim_path})
-                except DBusError as dbus_e:
-                    logger.warning(f"Could not check SIM presence: {dbus_e}",
-                                  extra={'interface_number': self.interface_number})
-                    # If we can't check, log but continue (don't block on D-Bus errors)
-                    logger.info("SIM unlock not needed (presence check inconclusive)",
-                               extra={'interface_number': self.interface_number,
-                                      'modem_state': state})
+                # Not locked and — per the settle-wait above — the SIM is
+                # present (or its presence was inconclusive).  The presence /
+                # absence decision was already made above, so there is nothing
+                # left to unlock here.
+                logger.info("SIM unlock not needed",
+                           extra={'interface_number': self.interface_number,
+                                  'modem_state': state})
 
         except Exception as e:
             if "No SIM card present" in str(e):

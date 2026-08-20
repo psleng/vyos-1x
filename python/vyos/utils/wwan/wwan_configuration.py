@@ -61,13 +61,15 @@ class InterfaceManagementConfig:
 class FailedRetryConfig:
     '''Failed-state periodic retry configuration'''
     enabled: bool = True
-    intervals: list = None  # Backoff intervals in seconds, e.g. [600, 1800, 3600, 7200]
+    intervals: list = None  # Backoff intervals in seconds, e.g. [30, 60, 120, 300, 600, 1800, 3600]
     max_interval: int = 7200  # Cap once intervals list is exhausted (2 hr, carrier-friendly)
     escalation_threshold: int = 3  # After N consecutive failures, escalate to disable/enable cycle (0 = never)
 
     def __post_init__(self):
         if self.intervals is None:
-            self.intervals = [600, 1800, 3600, 7200]
+            # Fast early retries (30s..5m) catch transient signal-return; the
+            # tail (10/30/60 min) stays carrier-friendly for persistent faults.
+            self.intervals = [30, 60, 120, 300, 600, 1800, 3600]
 
 
 @dataclass
@@ -237,7 +239,7 @@ class ConfigurationLoader:
         if isinstance(enabled, str):
             enabled = enabled.lower() in ('true', 'enabled', '1')
 
-        intervals = failed_retry.get('intervals', [600, 1800, 3600, 7200])
+        intervals = failed_retry.get('intervals', [30, 60, 120, 300, 600, 1800, 3600])
         if isinstance(intervals, str):
             intervals = [int(x.strip()) for x in intervals.split(',') if x.strip()]
 

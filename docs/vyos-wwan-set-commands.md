@@ -173,7 +173,7 @@ interfaces
         │
         ├── failed-retry
         │     ├── disable                                 #   valueless — turn off periodic retry from FAILED state (on by default)
-        │     ├── intervals <sec,sec,...>                  #   default: 600,1800,3600,7200  (10, 30, 60, 120 min)
+        │     ├── intervals <sec,sec,...>                  #   default: 30,60,120,300,600,1800,3600  (30s..60m)
         │     ├── max-interval <seconds>                  #   default: 7200  (cap once list exhausted, 2 hr)
         │     └── escalation-threshold <count>             #   default: 3  (disable/enable cycle after N failures; 0 = never)
         │
@@ -283,7 +283,7 @@ automatically using a 4-priority APN discovery chain:
 | **Data limits (global fallback)** | size `0`, action `none`, billing-date `1`, warning `(empty)` | Applies when per-SIM values are not set |
 | **Data usage monitoring** | interval `30 s` | Counters tracked per billing cycle |
 | **Hardware reset** | `enabled`, max `3` attempts, cooldown `300 s` | Modem power-cycles after repeated unrecoverable failures; use `disable` to turn off |
-| **Failed-state retry** | `enabled`, intervals `600,1800,3600,7200`, cap `7200 s`, escalation threshold `3` | Periodically reattempts connection from FAILED state (data-plan top-up, carrier provisioning, transient errors); carrier-friendly backoff (~10 attempts/hour worst case) avoids triggering Verizon/AT&T throttling; after 3 consecutive failures, escalates to modem disable/enable cycle to clear stale EPS context |
+| **Failed-state retry** | `enabled`, intervals `30,60,120,300,600,1800,3600`, cap `7200 s`, escalation threshold `3` | Periodically reattempts connection from FAILED state; fast early retries (30s, 1, 2, 5 min) recover quickly from transient signal/antenna loss, while the carrier-friendly tail (10, 30, 60 min, cap 2 hr) avoids triggering Verizon/AT&T throttling on persistent failures; after 3 consecutive failures, escalates to modem disable/enable cycle to clear stale EPS context |
 | **Band selection** | `all` | All modem-supported radio technologies enabled |
 | **Network scan timeout** | `180 s` | Max wait for network scan completion (scans can take 2+ min) |
 | **Connection timeout** | `120 s` | Max wait for MM `Simple.Connect()` to succeed |
@@ -1134,7 +1134,7 @@ set interfaces wwan wwan0 hardware-reset cooldown 300
 ```
 # Failed-state retry is enabled by default — to disable:
 # set interfaces wwan wwan0 failed-retry disable
-set interfaces wwan wwan0 failed-retry intervals '600,1800,3600,7200'
+set interfaces wwan wwan0 failed-retry intervals '30,60,120,300,600,1800,3600'
 set interfaces wwan wwan0 failed-retry max-interval 7200
 set interfaces wwan wwan0 failed-retry escalation-threshold 3
 ```
@@ -1433,7 +1433,7 @@ set interfaces wwan wwan0 logging sink 'both'
 | `hardware-reset max-attempts` | `max_hardware_resets` | `3` |
 | `hardware-reset cooldown` | `hardware_reset_cooldown` | `300` |
 | `failed-retry disable` | `failed_retry_enabled` | `true` |
-| `failed-retry intervals` | `failed_retry_intervals` | `600,1800,3600,7200` |
+| `failed-retry intervals` | `failed_retry_intervals` | `30,60,120,300,600,1800,3600` |
 | `failed-retry max-interval` | `failed_retry_max_interval` | `7200` |
 | `failed-retry escalation-threshold` | `failed_retry_escalation_threshold` | `3` |
 | `network-mode` | `network_mode` | `auto` |

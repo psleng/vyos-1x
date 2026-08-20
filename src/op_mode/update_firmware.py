@@ -169,6 +169,32 @@ def mmc_boot_partition_rw(device_path: Path):
             print(f'Relocked {device_path.name} (force_ro=1).')
 
 
+def resolve_uboot_boot_partition(device_path: Path) -> Path:
+    """Redirect a whole-disk eMMC target to its hardware boot partition.
+
+    The packaged U-Boot raw image (tiboot3 + tispl + u-boot) must be written to
+    the eMMC *boot* hardware partition (mmcblkXboot0) that the SoC ROM reads --
+    NOT to the user data area (mmcblkX), whose offset 0 holds the GPT. Writing
+    the raw image to the whole disk would clobber the partition table and would
+    never be seen by the ROM.
+
+    When the resolved target is a whole-disk eMMC node (/dev/mmcblkN) that has a
+    /dev/mmcblkNboot0 sibling, return that boot partition. An explicit boot
+    partition (mmcblkNboot0/1) is respected as-is, and targets with no boot0
+    sibling (SD cards, /dev/sdX) are returned unchanged.
+    """
+    if is_mmc_boot_partition(device_path):
+        return device_path
+
+    if match(r'^mmcblk\d+$', device_path.name):
+        boot_partition = Path(f'/dev/{device_path.name}boot0')
+        if boot_partition.exists() and S_ISBLK(boot_partition.stat().st_mode):
+            print(f'Redirecting U-Boot write to eMMC boot partition: {boot_partition}')
+            return boot_partition
+
+    return device_path
+
+
 def validate_inputs(image_path: Path, device_path: Path) -> None:
     if getuid() != 0:
         exit('This command must be run as root')
@@ -343,6 +369,7 @@ if __name__ == '__main__':
         if args.component == 'uboot':
             image_path = Path(args.image)
             device_path = Path(args.device) if args.device else Path(detect_target_device())
+            device_path = resolve_uboot_boot_partition(device_path)
             validate_inputs(image_path, device_path)
             update_firmware(image_path, device_path, args.yes)
         else:

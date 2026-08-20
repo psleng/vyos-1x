@@ -388,10 +388,67 @@ class ConfigServiceManager:
         if initial_interface is not None:
             logger.info(f"Auto-creating interface {initial_interface} for immediate connection")
             await self.add_interface(initial_interface)
-        else:
-            logger.info("WWAN ConfigService is running, waiting for AddInterface() calls")
+
+        # Self-heal after a bare service restart (systemd crash auto-restart).
+        # conf_mode -- which normally issues AddInterface + SetConfiguration on
+        # every boot and commit -- is NOT re-run when only this service
+        # restarts, so without this the manager would come up idle and never
+        # reconnect an already-configured modem until the next CLI commit.
+        # Re-adopt any interface whose config cache survives in /run/wwan.
+        await self._bootstrap_persisted_interfaces()
+
+        logger.info("WWAN ConfigService is running, waiting for AddInterface() calls")
 
         await asyncio.get_event_loop().create_future()
+
+    async def _bootstrap_persisted_interfaces(self):
+        """Re-adopt configured interfaces from their persisted caches on restart.
+
+        The manager is normally driven by conf_mode, which issues AddInterface
+        (+ SetConfiguration) on every boot and commit.  A bare service restart
+        (systemd auto-restart after a crash) does NOT re-run conf_mode, so
+        without this the manager comes up idle and never reconnects an
+        already-configured modem until the next CLI commit.
+
+        Every configured interface leaves a config cache at
+        /run/wwan/interfaceN.conf (written by SetConfiguration for exactly this
+        purpose).  /run is tmpfs, so the cache survives a service restart but is
+        cleared on reboot -- precisely the scope we want: replay after a crash,
+        defer to conf_mode on a cold boot.  Re-issuing add_interface(N)
+        recreates InterfaceConfig, whose __init__ runs _restore_configuration()
+        and re-applies the saved config to the FSM, reconnecting.
+        """
+        import re
+
+        try:
+            entries = os.listdir("/run/wwan")
+        except FileNotFoundError:
+            return
+        except Exception as e:
+            logger.error(
+                f"Could not scan /run/wwan for persisted interfaces: {e}")
+            return
+
+        pattern = re.compile(r'^interface(\d+)\.conf$')
+        numbers = sorted(
+            int(m.group(1)) for m in map(pattern.match, entries) if m)
+        if not numbers:
+            return
+
+        logger.info("Re-adopting persisted WWAN interface(s) after restart",
+                   extra={'interface_numbers': numbers})
+        for number in numbers:
+            # add_interface() is itself idempotent, but skip early to keep the
+            # log clean when an interface was already added (initial_interface).
+            if number in self.interface_objects:
+                continue
+            try:
+                await self.add_interface(number)
+                logger.info("Re-adopted persisted interface after service restart",
+                           extra={'interface_number': number})
+            except Exception as e:
+                logger.error(f"Failed to re-adopt persisted interface: {e}",
+                            extra={'interface_number': number})
 
     async def add_interface(self, interface_number: int):
         object_path = f"/com/igos/IgosModemManager/Interface{interface_number}"
