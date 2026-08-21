@@ -860,3 +860,78 @@ async def modem_reset_nuclear(interface_number: int) -> bool:
     except Exception as e:
         logger.error(f"Nuclear reset failed for interface {interface_number}: {e}")
         return False
+
+
+async def restart_modemmanager_only(interface_number: int, *,
+                                    reenumerate_timeout: int = 30) -> bool:
+    """Restart ONLY the ModemManager service (no hardware/modem reset) and wait
+    for the modem to be re-detected.
+
+    Recovers the "ModemManager gave up on the modem" case: after consecutive
+    control-port timeouts MM invalidates and drops the modem object
+    ("marking modem as invalid") while the modem's own AT/QMI command stack is
+    still alive.  A fresh MM process re-probes and finds it — far cheaper than a
+    board reset, and it never power-cycles the modem or consumes the
+    hardware-reset budget.
+
+    It does NOT recover a genuine firmware command-stack wedge (the modem will
+    time out the re-probe too); the caller should then escalate to a hardware
+    reset.
+
+    The stop/start is wrapped in the managed-MM-downtime guard so the
+    ModemManagerMonitor does not race it with its own crash-recovery restart.
+
+    Returns True only if the modem re-appears in ModemManager within
+    ``reenumerate_timeout`` seconds.
+    """
+    logger.warning(
+        "Restarting ModemManager only (no hardware reset) for interface %d — "
+        "recovering a dropped/invalidated modem object", interface_number)
+
+    # Hold the MM monitor off for the stop+start+re-enum window.  The guard is
+    # deadline-based and auto-expires, so a crash mid-restart cannot leave MM
+    # unmonitored forever.
+    begin_managed_mm_downtime(reenumerate_timeout + 30.0)
+    try:
+        stop = await asyncio.create_subprocess_exec(
+            "sudo", "systemctl", "stop", "ModemManager",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        await stop.communicate()
+        if stop.returncode != 0:
+            logger.error("restart_modemmanager_only: failed to stop ModemManager")
+            return False
+
+        # Brief pause so MM fully releases the QMI/AT ports before it re-probes.
+        await asyncio.sleep(3)
+
+        start = await asyncio.create_subprocess_exec(
+            "sudo", "systemctl", "start", "ModemManager",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        await start.communicate()
+        if start.returncode != 0:
+            logger.error("restart_modemmanager_only: failed to start ModemManager")
+            return False
+
+        ok = await _wait_for_modemmanager_reenumeration(
+            interface_number, timeout=reenumerate_timeout)
+        if ok:
+            logger.info(
+                "restart_modemmanager_only: modem re-appeared after MM restart "
+                "for interface %d", interface_number)
+            try:
+                wwan_diag.increment('modem_nuclear_reset_count')
+            except Exception:
+                pass
+        else:
+            logger.info(
+                "restart_modemmanager_only: modem still absent after MM restart "
+                "for interface %d (likely a real command-stack wedge)",
+                interface_number)
+        return ok
+    except Exception as e:
+        logger.error(
+            "restart_modemmanager_only failed for interface %d: %s",
+            interface_number, e)
+        return False
+    finally:
+        end_managed_mm_downtime()

@@ -34,6 +34,13 @@ RUN_DIR = Path('/run/wwan')
 DNSMASQ = '/usr/sbin/dnsmasq'
 GRACE_AFTER_RENEW_S = 5
 
+# Safety-net: how often the reconcile loop re-checks that dnsmasq is actually
+# running.  Covers a downstream LAN port that appears AFTER the bearer
+# connected (dnsmasq --bind-interfaces cannot start on a missing netdev) or a
+# dnsmasq that died.  Fixed cadence — the downstream is a single physical
+# port, so this corrective path is rare.
+RECONCILE_INTERVAL_S = 15
+
 # Policy-routing table id used to forward inbound traffic for the carrier IP
 # from wwan<N> to the downstream LAN interface.  Per-instance to allow
 # multiple WWAN FSMs to coexist.  Tables 200-299 are used; outside the
@@ -94,6 +101,12 @@ class PassthroughConfig:
     # the downstream device instead of the carrier-supplied DNS list.
     # Mixed v4/v6 addresses are split internally.
     dns_servers: list = field(default_factory=list)
+    # RFC 4861 Router Advertisement tuning (maps onto dnsmasq ra-param and the
+    # SLAAC/DHCPv6 prefix lifetime).  Defaults reproduce the previously
+    # hard-coded values, so leaving them unset changes nothing.
+    ra_interval: int = 60           # unsolicited RA cadence (s) — dnsmasq ra-param
+    ra_router_lifetime: int = 1800  # default-router lifetime (s) — dnsmasq ra-param
+    ra_prefix_lifetime: int = 0     # SLAAC/DHCPv6 prefix lifetime (s); 0 = use lease_time
 
     @classmethod
     def from_dict(cls, raw: Optional[dict]) -> 'PassthroughConfig':
@@ -113,6 +126,9 @@ class PassthroughConfig:
             mgmt_v6_ip=str(raw.get('mgmt_v6_ip', '') or ''),
             mss_clamp_enabled=bool(raw.get('mss_clamp_enabled', True)),
             dns_servers=[str(d) for d in dns_raw if d],
+            ra_interval=int(raw.get('ra_interval', 60) or 60),
+            ra_router_lifetime=int(raw.get('ra_router_lifetime', 1800) or 1800),
+            ra_prefix_lifetime=int(raw.get('ra_prefix_lifetime', 0) or 0),
         )
 
     def is_active(self) -> bool:
@@ -261,6 +277,13 @@ class PassthroughManager:
         self._shadow_v4: Optional[str] = None  # e.g. '10.64.179.125/30'
         self._shadow_v6: Optional[str] = None  # e.g. '2605:b100:112:136c::1/64'
 
+        # Safety-net reconcile task + cached apply() args for replay when the
+        # downstream LAN port appears late or dnsmasq dies (no netlink watch
+        # here — the downstream is a single physical port).
+        self._reconcile_task: Optional[asyncio.Task] = None
+        self._last_apply_kwargs: Optional[dict] = None
+        self._apply_lock = asyncio.Lock()
+
         RUN_DIR.mkdir(parents=True, exist_ok=True)
 
     # ── path helpers ────────────────────────────────────────────────────
@@ -282,6 +305,32 @@ class PassthroughManager:
         return old_iface and old_iface != new_cfg.interface
 
     async def apply(self, carrier_v4: Optional[str], carrier_v6: Optional[str],
+                    carrier_v6_prefix: int = 128,
+                    carrier_v4_prefix: int = 30,
+                    ipv4_dns: Optional[list] = None,
+                    ipv6_dns: Optional[list] = None,
+                    bearer_mtu: Optional[int] = None) -> None:
+        """Public entry point: serialize concurrent applies and cache the
+        arguments so the safety-net reconcile loop can replay them if the
+        downstream LAN port appears late or dnsmasq dies.  Delegates the real
+        work to _apply_impl().
+        """
+        kwargs = dict(
+            carrier_v4=carrier_v4, carrier_v6=carrier_v6,
+            carrier_v6_prefix=carrier_v6_prefix,
+            carrier_v4_prefix=carrier_v4_prefix,
+            ipv4_dns=ipv4_dns, ipv6_dns=ipv6_dns, bearer_mtu=bearer_mtu,
+        )
+        self._last_apply_kwargs = kwargs
+        async with self._apply_lock:
+            await self._apply_impl(**kwargs)
+        # Keep the safety-net reconcile loop running while active.  A
+        # teardown() inside _apply_impl (inactive / no carrier IP) already
+        # stopped it, so only (re)start when passthrough is still active.
+        if self.cfg.is_active():
+            self._ensure_reconcile_task()
+
+    async def _apply_impl(self, carrier_v4: Optional[str], carrier_v6: Optional[str],
                     carrier_v6_prefix: int = 128,
                     carrier_v4_prefix: int = 30,
                     ipv4_dns: Optional[list] = None,
@@ -460,6 +509,9 @@ class PassthroughManager:
     async def teardown(self) -> None:
         """Stop dnsmasq, drop mgmt addr (if owned), clean up iptables
         and the policy-routing entries used for inbound forwarding."""
+        # Stop the safety-net reconcile loop first so it cannot race a
+        # re-apply against this teardown.
+        self._stop_reconcile_task()
         # Send a burst of deprecation RAs FIRST, while dnsmasq is still
         # alive and the LAN interface still has the shadow v6 address —
         # otherwise the SLAAC client (Windows in particular) will keep
@@ -500,6 +552,60 @@ class PassthroughManager:
         # the fields in __init__ for the failure mode this prevents.
         logger.info("passthrough: torn down on %s",
                     self.cfg.interface or '<unset>', extra=self._log_extra)
+
+    # ── safety-net reconcile (late LAN port / dead dnsmasq) ─────────────
+    @staticmethod
+    def _interface_exists(name: str) -> bool:
+        """True when the kernel netdev for *name* is present."""
+        return bool(name) and os.path.exists(f'/sys/class/net/{name}')
+
+    def _ensure_reconcile_task(self) -> None:
+        """Start the reconcile loop if it is not already running."""
+        if self._reconcile_task is None or self._reconcile_task.done():
+            self._reconcile_task = asyncio.create_task(self._reconcile_loop())
+
+    def _stop_reconcile_task(self) -> None:
+        """Cancel the reconcile loop."""
+        if self._reconcile_task and not self._reconcile_task.done():
+            self._reconcile_task.cancel()
+        self._reconcile_task = None
+
+    async def _reconcile_loop(self) -> None:
+        """Safety net: re-apply when dnsmasq should be running but isn't.
+
+        Unlike ipv6-bridging there is no netlink watch here, so this periodic
+        loop is what recovers a downstream LAN port that appears AFTER the
+        bearer connected (dnsmasq --bind-interfaces cannot start on a missing
+        netdev) or a dnsmasq that died.  It only acts when passthrough is
+        active, a carrier IP is held, the interface exists, and dnsmasq is not
+        alive; the cached apply() args are replayed through the public apply()
+        so the same serialization applies.
+        """
+        try:
+            while True:
+                await asyncio.sleep(RECONCILE_INTERVAL_S)
+                if not self.cfg.is_active():
+                    continue
+                kw = self._last_apply_kwargs
+                if not kw or not (kw.get('carrier_v4') or kw.get('carrier_v6')):
+                    continue
+                if not self._interface_exists(self.cfg.interface):
+                    continue
+                pid = self._read_pid()
+                if pid and self._pid_alive(pid):
+                    continue  # dnsmasq healthy — nothing to do
+                if self._apply_lock.locked():
+                    continue  # an apply() is mid-flight; re-check next cycle
+                logger.info(
+                    "passthrough: safety-net re-applying — dnsmasq not running "
+                    "on %s", self.cfg.interface, extra=self._log_extra)
+                try:
+                    await self.apply(**kw)
+                except Exception as e:
+                    logger.error("passthrough: safety-net re-apply failed: %s",
+                                 e, extra=self._log_extra)
+        except asyncio.CancelledError:
+            pass
 
     # ── dnsmasq lifecycle ───────────────────────────────────────────────
     async def _write_dnsmasq_conf(self, carrier_v4: Optional[str],
@@ -601,6 +707,9 @@ class PassthroughManager:
 
         # ── DHCPv6 + RA ──
         if carrier_v6:
+            # SLAAC / DHCPv6 prefix lifetime: operator override
+            # (router-advert prefix-lifetime) or the DHCP lease time.
+            v6_lease = self.cfg.ra_prefix_lifetime or lease
             # DOCSIS-modem-equivalent IPv6 handoff:
             #
             #   * Carrier prefix ≤ /64 (the common case — Bell/AT&T/Verizon
@@ -625,7 +734,7 @@ class PassthroughManager:
                 # DHCPv6-only clients get a stateful lease.
                 lines.append(
                     f"dhcp-range=set:passthru6,{prefix_base},slaac,"
-                    f"{carrier_v6_prefix},{lease}"
+                    f"{carrier_v6_prefix},{v6_lease}"
                 )
                 # IA_PD — offer the carrier prefix to downstream routers
                 # that request it (RFC 8415 §18.2.4: server only includes
@@ -634,13 +743,13 @@ class PassthroughManager:
                 # "prefix passthrough" handoff used by commercial cellular CPE.
                 lines.append(
                     f"dhcp-range=set:passthru6pd,{prefix_base},{prefix_base},"
-                    f"{carrier_v6_prefix},{lease}"
+                    f"{carrier_v6_prefix},{v6_lease}"
                 )
             else:
                 # /128 carrier — IA_NA-only, no SLAAC possible
                 lines.append(
                     f"dhcp-range=set:passthru6,{carrier_v6},{carrier_v6},"
-                    f"128,{lease}"
+                    f"128,{v6_lease}"
                 )
             lines.append("enable-ra")
             # ra-param=<if>,[mtu:N,]<ra-interval>,<router-lifetime>
@@ -655,7 +764,10 @@ class PassthroughManager:
             # interval and a 30 min lifetime so default-route refresh is
             # automatic and resilient to short blackouts.
             ra_mtu = int(bearer_mtu) if (bearer_mtu and bearer_mtu > 0) else 1500
-            lines.append(f"ra-param={self.cfg.interface},mtu:{ra_mtu},60,1800")
+            lines.append(
+                f"ra-param={self.cfg.interface},mtu:{ra_mtu},"
+                f"{self.cfg.ra_interval},{self.cfg.ra_router_lifetime}"
+            )
             # DNS option 23 (DHCPv6) + RDNSS in RA — user override beats carrier
             _user_v4, user_v6 = self.cfg.split_dns()
             v6_dns = user_v6 or [d for d in (ipv6_dns or []) if d]
@@ -669,7 +781,7 @@ class PassthroughManager:
                 # MAC-based reservation (dnsmasq supports this via dhcp-host
                 # with a v6 address).
                 lines.append(
-                    f"dhcp-host={self.cfg.mac},[{carrier_v6}],set:passthru6,{lease}"
+                    f"dhcp-host={self.cfg.mac},[{carrier_v6}],set:passthru6,{v6_lease}"
                 )
 
         self._conf_path().write_text('\n'.join(lines) + '\n')

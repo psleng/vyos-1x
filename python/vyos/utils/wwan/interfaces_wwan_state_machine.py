@@ -35,6 +35,7 @@ from automaton import machines  # pylint: disable=import-error
 from vyos.utils.wwan.interfaces_wwan_util import (
     modem_reset,
     modem_reset_quiesced,
+    restart_modemmanager_only,
 )
 from vyos.utils.wwan import interfaces_wwan_diag as wwan_diag
 from vyos.utils.wwan.sim_controller import make_sim_controller
@@ -769,6 +770,7 @@ class ModemStateMachine:
         self._bridging_carrier_prefix = None      # IPv6Network
         self._bridging_carrier_prefix_len = None  # int
         self._bridging_bearer_addr = None         # bearer's own /128 (excluded from LAN host bit)
+        self._bridging_dns_servers = []           # carrier IPv6 DNS list (advertised via RDNSS)
         self._bridging_saved_sysctls = {}         # {path: original_value} for teardown
         self._bridging_proxy_entries = set()      # IPv6 addrs proxied on the wwan side
         self._bridging_ndp_task = None            # neighbor-watch task on the LAN side
@@ -1797,6 +1799,22 @@ class ModemStateMachine:
         scan_start = time.monotonic()
         next_escalation_at = scan_start + self.reset_cooldown_seconds
 
+        # Cheap first-line recovery: restart ONLY ModemManager (no hardware
+        # reset) before escalating to the board PERST.  ModemManager sometimes
+        # invalidates and drops the modem object after consecutive control-port
+        # timeouts while the modem itself is alive; a fresh MM probe then
+        # re-detects it.  This fires earlier than the hardware reset, is capped
+        # separately, and does NOT consume the hardware-reset budget.  A genuine
+        # command-stack wedge won't answer the re-probe and falls through to the
+        # gated hardware escalation below.
+        mm_restart_max = 2               # cheap MM restarts before hardware reset
+        mm_restart_after_s = 45.0        # first MM restart after this much no-modem
+        mm_restart_interval_s = 60.0     # spacing between MM restarts
+        mm_restart_reenum_s = 30         # wait this long for the modem to re-appear
+        mm_restart_timeout = mm_restart_reenum_s + 25.0  # overall bound on the call
+        mm_restart_attempts = 0
+        next_mm_restart_at = scan_start + mm_restart_after_s
+
         # Capture the bus generation at entry.  If the FSM is re-bound to a
         # fresh ModemManager (update_bus_connection) while this loop is running,
         # the generation changes and we abort — the post-restart re-init starts
@@ -1938,6 +1956,63 @@ class ModemStateMachine:
                 logger.error(f"Scan error: {e}",
                             extra={'interface_number': self.interface_number,
                                    'scan_count': scan_count})
+
+            # ── MM-restart rung (cheap; recovers "MM gave up on the modem") ──
+            # Before any hardware reset, try restarting ModemManager only.  MM
+            # can invalidate and drop the modem object after consecutive
+            # control-port timeouts while the modem's command stack is actually
+            # alive; a fresh MM probe then re-detects it.  This never
+            # power-cycles the modem and does NOT consume the hardware-reset
+            # budget; a real firmware wedge won't answer the re-probe and falls
+            # through to the gated hardware reset below.
+            if (scan_ok
+                    and not getattr(self, '_admin_disabled', False)
+                    and mm_restart_attempts < mm_restart_max
+                    and time.monotonic() >= next_mm_restart_at):
+                mm_restart_attempts += 1
+                next_mm_restart_at = time.monotonic() + mm_restart_interval_s
+                logger.warning(
+                    "ModemManager exposes no modem after %.0fs — restarting "
+                    "ModemManager only (attempt %d/%d) before any hardware reset",
+                    time.monotonic() - scan_start,
+                    mm_restart_attempts, mm_restart_max,
+                    extra={'interface_number': self.interface_number,
+                           'scan_count': scan_count})
+                # Raise the scan-stall watchdog for the bounded restart window
+                # so it cannot cancel the scan mid-restart; restore in finally.
+                self._scan_last_progress_at = time.monotonic()
+                saved_stall_timeout = self._scan_stall_timeout
+                self._scan_stall_timeout = max(
+                    self._scan_stall_timeout, mm_restart_timeout + 30.0)
+                mm_ok = False
+                try:
+                    mm_ok = await asyncio.wait_for(
+                        restart_modemmanager_only(
+                            self.interface_number,
+                            reenumerate_timeout=mm_restart_reenum_s),
+                        timeout=mm_restart_timeout)
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "ModemManager-restart recovery did not complete within "
+                        "%.0fs — falling through to hardware reset",
+                        mm_restart_timeout,
+                        extra={'interface_number': self.interface_number})
+                except Exception as mm_e:  # noqa: BLE001 -- best-effort
+                    logger.error(
+                        f"ModemManager-restart recovery failed: {mm_e}",
+                        extra={'interface_number': self.interface_number})
+                finally:
+                    self._scan_stall_timeout = saved_stall_timeout
+                    self._scan_last_progress_at = time.monotonic()
+                if mm_ok:
+                    logger.info(
+                        "ModemManager restart recovered the modem; resuming "
+                        "fast scan to pick it up",
+                        extra={'interface_number': self.interface_number})
+                    scan_count = 0
+                    current_interval = INITIAL_SCAN_INTERVAL
+                    self._scan_last_progress_at = time.monotonic()
+                    continue
 
             # No-modem hardware-reset escalation — gated EXACTLY like the
             # recovery loop.  Fires only when MM answered but still exposes no
@@ -3683,7 +3758,7 @@ class ModemStateMachine:
         self._current_bearer_ipv6 = None      # Last applied IPv6 address (bare, no prefix)
         self._current_bearer_ipv6_prefix = None  # e.g. '64' — length of the carrier prefix
         self._ipv6_egress_filter_active = False  # True when ip6tables whitelist chain is installed
-        self._ipv4_egress_filter_active = False  # True when iptables whitelist chain is installed
+        self._ipv4_egress_filter_active = False  # True when nft post-SNAT source guard is installed
         self._output_hygiene_active = False      # True when the OUTPUT egress-hygiene drops (v6 mcast + v4 mcast/bcast) are installed
         self._fsm_mss_clamp_v4_active = False    # FSM-owned mangle/FORWARD TCPMSS rule (v4)
         self._fsm_mss_clamp_v6_active = False    # FSM-owned mangle/FORWARD TCPMSS rule (v6)
@@ -3760,9 +3835,14 @@ class ModemStateMachine:
             self._bridging_config.get('reconciliation_interval', 10)
         )
         if self._bridging_config.get('enabled') and self._bridging_config.get('interface'):
-            logger.info("IPv6 bridging enabled → %s, reconciliation interval %ds",
+            logger.info("IPv6 bridging enabled → %s, reconciliation interval %ds, "
+                       "RA min/max %d/%ds, prefix pref/valid %d/%ds",
                        self._bridging_config['interface'],
                        self._bridging_reconciliation_interval,
+                       int(self._bridging_config.get('ra_min_interval', 3)),
+                       int(self._bridging_config.get('ra_max_interval', 10)),
+                       int(self._bridging_config.get('ra_preferred_lifetime', 1800)),
+                       int(self._bridging_config.get('ra_valid_lifetime', 3600)),
                        extra={'interface_number': self.interface_number})
 
         # IPv6 management-address (FSM-stamped <prefix>::host-id on wwanN).
@@ -17884,77 +17964,95 @@ class ModemStateMachine:
         logger.info("WWAN egress hygiene removed from %s", interface_name,
                     extra={'interface_number': self.interface_number})
 
-    # ── IPv4 egress source whitelist ────────────────────────────────────
+    # ── IPv4 egress source enforcement (post-SNAT) ──────────────────────
     #
-    # Mirrors the IPv6 chain.  Even with VyOS NAT correctly pointed at the
-    # bearer, a stray PBR rule or a misconfigured `outbound-interface` can
-    # leak RFC1918 sources upstream — carriers count those as abuse signals.
-    # The chain accepts only the current bearer /32, drops DHCPv4 (no
-    # cellular bearer ever runs DHCPv4), and drops everything else.
+    # Carrier-abuse guard: nothing may leave wwan<N> with a source other than
+    # the current bearer /32.  A stray PBR rule or a missing masquerade rule
+    # can otherwise leak RFC1918 sources upstream, which carriers count as
+    # abuse signals.
+    #
+    # CRITICAL — this MUST run after SNAT, unlike the IPv6 twin.  IPv6 is
+    # routed (no NAT): the LAN holds GUAs inside the carrier prefix, so a
+    # forwarded packet's source already matches at the filter/FORWARD hook.
+    # IPv4 relies on NAT: a forwarded LAN packet still carries its private
+    # RFC1918 source at FORWARD time — masquerade only rewrites it to the
+    # bearer /32 in the *nat* POSTROUTING hook (priority srcnat = 100).
+    # Enforcing the source in filter/FORWARD therefore DROPS every NAT'd flow
+    # before translation, while the router's own traffic (OUTPUT, already
+    # sourced from the bearer) keeps working — i.e. "ping works but NAT does
+    # not".  We enforce in a dedicated nft filter chain hooked at postrouting
+    # priority 101 (srcnat + 1), where every legitimately-egressing packet —
+    # NAT'd or locally-originated — already carries the bearer source.  A
+    # private `ip <iface>_egress` table keeps the guard isolated from the
+    # VyOS-managed nft tables so it can never reorder firewall/NAT rules.
 
-    def _ipv4_chain_name(self, interface_name):
-        """Return the iptables chain name for v4 source enforcement."""
-        return f"{interface_name.upper()}_SRC_ENFORCE_V4"
+    def _ipv4_egress_table_name(self, interface_name):
+        """nft table holding the v4 post-SNAT source guard for one interface."""
+        return f"{interface_name}_egress"
 
     async def _install_ipv4_egress_filter(self, interface_name, ipv4_addr):
-        """Install or update a persistent iptables FORWARD chain that only
-        allows packets whose IPv4 source equals the current bearer /32.
+        """Install/refresh a post-SNAT nft chain that drops any packet leaving
+        <iface> whose IPv4 source is not the current bearer /32.
 
-        Chain structure:
-          FORWARD → -o <iface> -j <CHAIN>
-          <CHAIN>:
-            -p udp --sport 67  -j DROP      (outbound DHCPv4 server — never legal)
-            -p udp --sport 68  -j DROP      (outbound DHCPv4 client — cellular bearer
-                                             receives address via QMI/MBIM, not DHCP)
-            -s <bearer>/32     -j RETURN    (permit current bearer source)
-            -j DROP                          (drop RFC1918 leaks, 0.0.0.0, stale src, …)
+        Hooked at postrouting priority 101 (just after nat srcnat = 100) so the
+        source is evaluated AFTER masquerade has rewritten it.  Chain body:
+            oifname <iface> udp sport 67  drop            (outbound DHCPv4 server)
+            oifname <iface> udp sport 68  drop            (outbound DHCPv4 client —
+                                                           bearer gets its address via
+                                                           QMI/MBIM, never DHCP)
+            oifname <iface> ip saddr != <bearer>/32 drop  (RFC1918 / stale-src leak guard)
         """
         if not ipv4_addr:
             return
-        chain = self._ipv4_chain_name(interface_name)
+        table = self._ipv4_egress_table_name(interface_name)
+        chain = 'srcguard'
 
-        if self._ipv4_egress_filter_active:
-            # Chain already exists — flush and repopulate with new bearer /32
-            await self._run_ipcmd('iptables', '-F', chain)
-        else:
-            await self._run_ipcmd('iptables', '-N', chain)
-            await self._run_ipcmd(
-                'iptables', '-I', 'FORWARD', '1',
-                '-o', interface_name, '-j', chain,
-            )
-            self._ipv4_egress_filter_active = True
+        # Idempotent: (re)create table + chain, then flush and repopulate so an
+        # IP change or a restart-without-teardown can never stack duplicate
+        # rules.  `nft add` on an existing table/chain with the same spec is a
+        # no-op that returns success.
+        await self._run_ipcmd('nft', 'add', 'table', 'ip', table)
+        await self._run_ipcmd(
+            'nft', 'add', 'chain', 'ip', table, chain,
+            '{', 'type', 'filter', 'hook', 'postrouting',
+            'priority', '101', ';', 'policy', 'accept', ';', '}',
+        )
+        await self._run_ipcmd('nft', 'flush', 'chain', 'ip', table, chain)
 
         await self._run_ipcmd(
-            'iptables', '-A', chain,
-            '-p', 'udp', '--sport', '67', '-j', 'DROP',
+            'nft', 'add', 'rule', 'ip', table, chain,
+            'oifname', interface_name, 'udp', 'sport', '67', 'drop',
         )
         await self._run_ipcmd(
-            'iptables', '-A', chain,
-            '-p', 'udp', '--sport', '68', '-j', 'DROP',
+            'nft', 'add', 'rule', 'ip', table, chain,
+            'oifname', interface_name, 'udp', 'sport', '68', 'drop',
         )
         await self._run_ipcmd(
-            'iptables', '-A', chain, '-s', f"{ipv4_addr}/32", '-j', 'RETURN',
+            'nft', 'add', 'rule', 'ip', table, chain,
+            'oifname', interface_name, 'ip', 'saddr', '!=', f"{ipv4_addr}/32", 'drop',
         )
-        await self._run_ipcmd('iptables', '-A', chain, '-j', 'DROP')
+        self._ipv4_egress_filter_active = True
 
         logger.info(
-            "IPv4 egress filter updated: allow %s/32 on %s", ipv4_addr, interface_name,
+            "IPv4 egress filter updated (post-SNAT): allow %s/32 on %s",
+            ipv4_addr, interface_name,
             extra={'interface_number': self.interface_number},
         )
 
     async def _remove_ipv4_egress_filter(self, interface_name):
-        """Remove the persistent iptables FORWARD chain entirely."""
-        if not self._ipv4_egress_filter_active:
-            return
-        chain = self._ipv4_chain_name(interface_name)
-        await self._run_ipcmd(
-            'iptables', '-D', 'FORWARD', '-o', interface_name, '-j', chain,
-        )
-        await self._run_ipcmd('iptables', '-F', chain)
-        await self._run_ipcmd('iptables', '-X', chain)
+        """Remove the post-SNAT nft source-guard table entirely.
+
+        Unconditional: the delete is attempted even when our in-memory flag is
+        unset (e.g. an FSM restart lost the flag while the kernel table
+        survived) so a stale table can never linger.  Deleting an absent table
+        is a harmless no-op (logged at debug by _run_ipcmd).
+        """
+        table = self._ipv4_egress_table_name(interface_name)
+        await self._run_ipcmd('nft', 'delete', 'table', 'ip', table)
+        if self._ipv4_egress_filter_active:
+            logger.info("IPv4 egress filter removed from %s", interface_name,
+                        extra={'interface_number': self.interface_number})
         self._ipv4_egress_filter_active = False
-        logger.info("IPv4 egress filter removed from %s", interface_name,
-                    extra={'interface_number': self.interface_number})
 
     # ── FSM-wide TCP MSS clamp to PMTU ──────────────────────────────────
     #
@@ -18156,6 +18254,7 @@ class ModemStateMachine:
         Starts netlink watch and reconciliation timer if bridging is configured.
         """
         self._bridging_bearer_addr = bearer_addr
+        self._bridging_dns_servers = list(dns_servers or [])
         if not self._bridging_target_interface():
             return
 
@@ -18204,27 +18303,46 @@ class ModemStateMachine:
         if desired:
             self._bridging_start_background_tasks()
 
-        # FSM-owned radvd: start (or reload) advertising the current
-        # carrier prefix + carrier DNS on the LAN.  This replaces any
-        # need for the operator to configure `service router-advert`
-        # for the bridged interface — the prefix tracks the bearer.
-        lan = self._bridging_target_interface()
-        if lan and self._bridging_applied.get(lan):
-            try:
-                net_str = str(self._bridging_carrier_prefix.network_address)
-                await self._bridging_radvd.apply(
-                    lan=lan,
-                    prefix=net_str,
-                    plen=carrier_prefix_len,
-                    dns_servers=list(dns_servers or []),
-                )
-            except Exception as e:
-                logger.error("IPv6 bridging radvd apply failed: %s", e,
-                            extra={'interface_number': self.interface_number})
+        # FSM-owned radvd: start (or reload) advertising the current carrier
+        # prefix + carrier DNS on the LAN.  Sourced from instance state via a
+        # shared helper so the late-appearing-interface paths (netlink watch,
+        # reconciliation loop) can start radvd too — apply-to-interface alone
+        # only adds the L3 address, which is not enough for SLAAC.
+        await self._bridging_apply_radvd()
 
         logger.info("IPv6 bridging apply complete: %d applied, %d pending",
                    len(self._bridging_applied), len(self._bridging_pending),
                    extra={'interface_number': self.interface_number})
+
+    async def _bridging_apply_radvd(self):
+        """Start or reload the FSM-owned radvd for the bridged LAN.
+
+        Sources everything from instance state so it can be called from the
+        initial apply (`_bridging_apply_all`), the netlink watch, and the
+        reconciliation loop alike.  No-op until the target LAN interface
+        actually holds the prefix — radvd cannot bind an interface that is
+        not yet up / applied, so late-appearing interfaces start radvd from
+        their apply transition instead.
+        """
+        lan = self._bridging_target_interface()
+        if not lan or not self._bridging_applied.get(lan) \
+                or not self._bridging_carrier_prefix:
+            return
+        try:
+            net_str = str(self._bridging_carrier_prefix.network_address)
+            await self._bridging_radvd.apply(
+                lan=lan,
+                prefix=net_str,
+                plen=self._bridging_carrier_prefix_len,
+                dns_servers=list(self._bridging_dns_servers or []),
+                min_interval=int(self._bridging_config.get('ra_min_interval', 3)),
+                max_interval=int(self._bridging_config.get('ra_max_interval', 10)),
+                preferred_lft=int(self._bridging_config.get('ra_preferred_lifetime', 1800)),
+                valid_lft=int(self._bridging_config.get('ra_valid_lifetime', 3600)),
+            )
+        except Exception as e:
+            logger.error("IPv6 bridging radvd apply failed: %s", e,
+                        extra={'interface_number': self.interface_number})
 
     async def _bridging_remove_all(self):
         """Remove the bridged prefix from the downstream interface and reset state."""
@@ -18899,6 +19017,12 @@ class ModemStateMachine:
                                ', '.join(newly_applied),
                                extra={'interface_number': self.interface_number})
 
+                # If the radvd target interface just came up this tick, start
+                # the FSM-owned radvd on it (apply-to-interface only added the
+                # L3 address; radvd is what actually drives SLAAC on the LAN).
+                if self._bridging_target_interface() in newly_applied:
+                    await self._bridging_apply_radvd()
+
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -19013,6 +19137,10 @@ class ModemStateMachine:
                         "IPv6 bridging netlink: applied to newly-appeared %s",
                         iface_name,
                         extra={'interface_number': self.interface_number})
+                    # Start radvd now that the target LAN actually holds the
+                    # prefix — apply-to-interface only adds the L3 address.
+                    if iface_name == self._bridging_target_interface():
+                        await self._bridging_apply_radvd()
 
         elif msg_type == RTM_DELLINK and iface_name in self._bridging_applied:
             del self._bridging_applied[iface_name]

@@ -362,10 +362,16 @@ def _build_ipv6_bridging(wwan):
     """Build the FSM ipv6_bridging sub-dict (carrier /64 to one LAN)."""
     brg = wwan.get('ipv6_bridging', {}) or {}
     brg_iface = brg.get('interface') if isinstance(brg, dict) else None
+    # RFC 4861 Router Advertisement timers (operator-tunable renumber speed).
+    ra = (brg.get('router_advert', {}) or {}) if isinstance(brg, dict) else {}
     return {
         'enabled': bool(brg_iface) and wwan['_user_set']['ipv6_bridging_interface'],
         'interface': brg_iface or '',
         'reconciliation_interval': _leaf_int(brg, 'reconciliation_interval', 10),
+        'ra_min_interval': _leaf_int(ra, 'min_interval', 3),
+        'ra_max_interval': _leaf_int(ra, 'max_interval', 10),
+        'ra_preferred_lifetime': _leaf_int(ra, 'preferred_lifetime', 1800),
+        'ra_valid_lifetime': _leaf_int(ra, 'valid_lifetime', 3600),
     }
 
 
@@ -408,6 +414,9 @@ def _build_ip_passthrough(wwan):
     pt_iface = ipt.get('interface') if isinstance(ipt, dict) else None
     if not pt_iface:
         return {'enabled': False}
+
+    # RFC 4861 RA tuning sub-node (dnsmasq ra-param + SLAAC/DHCPv6 lifetime).
+    ra = (ipt.get('router_advert', {}) or {}) if isinstance(ipt, dict) else {}
 
     # Policy B: only emit a default mgmt address when the user has NOT
     # set 'interfaces ethernet <if> address ...' on the passthrough port.
@@ -474,6 +483,11 @@ def _build_ip_passthrough(wwan):
             if isinstance(ipt.get('dns_server'), list)
             else ([ipt.get('dns_server')] if ipt.get('dns_server') else [])
         ),
+        # RFC 4861 RA tuning (dnsmasq ra-param + SLAAC/DHCPv6 prefix lifetime).
+        # prefix_lifetime 0 = fall back to the DHCP lease-time (current behaviour).
+        'ra_interval': _leaf_int(ra, 'interval', 60),
+        'ra_router_lifetime': _leaf_int(ra, 'router_lifetime', 1800),
+        'ra_prefix_lifetime': _leaf_int(ra, 'prefix_lifetime', 0),
     }
 
 
@@ -910,6 +924,41 @@ def verify(wwan):
             f"carrier prefix lands on the L3-owning interface."
         )
 
+    # ── ipv6-bridging RA timer sanity (RFC 4861 / radvd hard requirements) ──
+    # radvd refuses to start unless MinRtrAdvInterval <= 0.75 * MaxRtrAdvInterval
+    # and AdvPreferredLifetime <= AdvValidLifetime.  Catch it here with a clean
+    # message instead of a silent radvd start failure at runtime.
+    if user_set.get('ipv6_bridging_interface'):
+        ra = (wwan.get('ipv6_bridging', {}) or {}).get('router_advert', {}) or {}
+        ra_min = int(ra.get('min_interval', 3))
+        ra_max = int(ra.get('max_interval', 10))
+        if ra_min > 0.75 * ra_max:
+            raise ConfigError(
+                f"ipv6-bridging router-advert min-interval ({ra_min}s) must be "
+                f"<= 0.75 x max-interval ({int(0.75 * ra_max)}s for the configured "
+                f"max-interval of {ra_max}s) — RFC 4861 / radvd reject this combination."
+            )
+        ra_pref = int(ra.get('preferred_lifetime', 1800))
+        ra_valid = int(ra.get('valid_lifetime', 3600))
+        if ra_pref > ra_valid:
+            raise ConfigError(
+                f"ipv6-bridging router-advert preferred-lifetime ({ra_pref}s) must "
+                f"not exceed valid-lifetime ({ra_valid}s) — RFC 4861."
+            )
+
+    # ── ip-passthrough RA timer sanity (dnsmasq ra-param) ──────────────
+    # A router-lifetime shorter than the RA interval leaves the downstream
+    # device without a default route between advertisements (RFC 4861).
+    if user_set.get('ip_passthrough_interface'):
+        pra = (wwan.get('ip_passthrough', {}) or {}).get('router_advert', {}) or {}
+        pra_int = int(pra.get('interval', 60))
+        pra_life = int(pra.get('router_lifetime', 1800))
+        if pra_life != 0 and pra_life < pra_int:
+            raise ConfigError(
+                f"ip-passthrough router-advert router-lifetime ({pra_life}s) must "
+                f"be 0 or >= interval ({pra_int}s) — a shorter lifetime leaves the "
+                f"downstream device without a default route between RAs (RFC 4861)."
+            )
 
     return None
 

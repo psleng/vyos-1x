@@ -174,6 +174,12 @@ class InterfaceConfig(ServiceInterface):
             "enabled": False,
             "interface": "",
             "reconciliation_interval": 10,    # Seconds between safety-net re-checks
+            # RFC 4861 Router Advertisement timers for the bridged prefix.
+            # Short defaults so SLAAC clients renumber quickly on prefix change.
+            "ra_min_interval": 3,             # MinRtrAdvInterval (s)
+            "ra_max_interval": 10,            # MaxRtrAdvInterval (s)
+            "ra_preferred_lifetime": 1800,    # AdvPreferredLifetime (s)
+            "ra_valid_lifetime": 3600,        # AdvValidLifetime (s)
         },
 
         # IP Passthrough (DOCSIS-modem-style) — hand carrier IP to one

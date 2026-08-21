@@ -702,6 +702,69 @@
                 </properties>
                 <defaultValue>10</defaultValue>
               </leafNode>
+              <node name="router-advert">
+                <properties>
+                  <help>Router Advertisement (RFC 4861) timers for the bridged prefix</help>
+                </properties>
+                <children>
+                  <leafNode name="min-interval">
+                    <properties>
+                      <help>Minimum time between unsolicited Router Advertisements (RFC 4861 MinRtrAdvInterval)</help>
+                      <valueHelp>
+                        <format>u32:3-1350</format>
+                        <description>Interval in seconds</description>
+                      </valueHelp>
+                      <constraint>
+                        <validator name="numeric" argument="--range 3-1350"/>
+                      </constraint>
+                      <constraintErrorMessage>Minimum interval must be 3-1350 seconds and no more than 0.75 x max-interval</constraintErrorMessage>
+                    </properties>
+                    <defaultValue>3</defaultValue>
+                  </leafNode>
+                  <leafNode name="max-interval">
+                    <properties>
+                      <help>Maximum time between unsolicited Router Advertisements (RFC 4861 MaxRtrAdvInterval)</help>
+                      <valueHelp>
+                        <format>u32:4-1800</format>
+                        <description>Interval in seconds</description>
+                      </valueHelp>
+                      <constraint>
+                        <validator name="numeric" argument="--range 4-1800"/>
+                      </constraint>
+                      <constraintErrorMessage>Maximum interval must be 4-1800 seconds</constraintErrorMessage>
+                    </properties>
+                    <defaultValue>10</defaultValue>
+                  </leafNode>
+                  <leafNode name="preferred-lifetime">
+                    <properties>
+                      <help>Preferred lifetime of the advertised prefix (RFC 4861 AdvPreferredLifetime)</help>
+                      <valueHelp>
+                        <format>u32:0-2592000</format>
+                        <description>Lifetime in seconds</description>
+                      </valueHelp>
+                      <constraint>
+                        <validator name="numeric" argument="--range 0-2592000"/>
+                      </constraint>
+                      <constraintErrorMessage>Preferred lifetime must be 0-2592000 seconds and no more than valid-lifetime</constraintErrorMessage>
+                    </properties>
+                    <defaultValue>1800</defaultValue>
+                  </leafNode>
+                  <leafNode name="valid-lifetime">
+                    <properties>
+                      <help>Valid lifetime of the advertised prefix (RFC 4861 AdvValidLifetime)</help>
+                      <valueHelp>
+                        <format>u32:1-2592000</format>
+                        <description>Lifetime in seconds</description>
+                      </valueHelp>
+                      <constraint>
+                        <validator name="numeric" argument="--range 1-2592000"/>
+                      </constraint>
+                      <constraintErrorMessage>Valid lifetime must be 1-2592000 seconds</constraintErrorMessage>
+                    </properties>
+                    <defaultValue>3600</defaultValue>
+                  </leafNode>
+                </children>
+              </node>
             </children>
           </node>
           <!-- ── IP Passthrough (DOCSIS-modem-style single-host) ── -->
@@ -797,6 +860,54 @@
                   <valueless/>
                 </properties>
               </leafNode>
+              <node name="router-advert">
+                <properties>
+                  <help>Router Advertisement tuning for the downstream device (dnsmasq RA)</help>
+                </properties>
+                <children>
+                  <leafNode name="interval">
+                    <properties>
+                      <help>Interval between unsolicited Router Advertisements (RFC 4861 MaxRtrAdvInterval)</help>
+                      <valueHelp>
+                        <format>u32:4-1800</format>
+                        <description>Interval in seconds</description>
+                      </valueHelp>
+                      <constraint>
+                        <validator name="numeric" argument="--range 4-1800"/>
+                      </constraint>
+                      <constraintErrorMessage>RA interval must be 4-1800 seconds</constraintErrorMessage>
+                    </properties>
+                    <defaultValue>60</defaultValue>
+                  </leafNode>
+                  <leafNode name="router-lifetime">
+                    <properties>
+                      <help>Default-router lifetime advertised downstream (RFC 4861 AdvDefaultLifetime; 0 = not a default router)</help>
+                      <valueHelp>
+                        <format>u32:0-9000</format>
+                        <description>Lifetime in seconds</description>
+                      </valueHelp>
+                      <constraint>
+                        <validator name="numeric" argument="--range 0-9000"/>
+                      </constraint>
+                      <constraintErrorMessage>Router lifetime must be 0-9000 seconds (0, or at least the RA interval)</constraintErrorMessage>
+                    </properties>
+                    <defaultValue>1800</defaultValue>
+                  </leafNode>
+                  <leafNode name="prefix-lifetime">
+                    <properties>
+                      <help>SLAAC / DHCPv6 address lifetime for the downstream device (default: the DHCP lease-time)</help>
+                      <valueHelp>
+                        <format>u32:0-2592000</format>
+                        <description>Lifetime in seconds</description>
+                      </valueHelp>
+                      <constraint>
+                        <validator name="numeric" argument="--range 0-2592000"/>
+                      </constraint>
+                      <constraintErrorMessage>Prefix lifetime must be 0-2592000 seconds</constraintErrorMessage>
+                    </properties>
+                  </leafNode>
+                </children>
+              </node>
             </children>
           </node>
           <!-- ── Reconnection ────────────────────────────────────── -->
