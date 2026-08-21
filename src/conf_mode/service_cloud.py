@@ -78,25 +78,11 @@ def generate(cloud):
 
 
 def apply(cloud):
-    try:
-        with open(config_file) as config_fd:
-            config = json.load(config_fd)
-        registration_code = config.get('tmpDeviceRegistrationPIN')
-    except (OSError, json.JSONDecodeError, AttributeError):
-        registration_code = None
-
     if cloud is None or 'enabled' not in cloud:
-        call(f'systemctl stop {service_name}')
-        call(f'systemctl disable {service_name}')
-        return None
-
-    call(f'systemctl enable {service_name}')
-    if not registration_code:
         call(f'systemctl stop {service_name}')
         return None
 
     call(f'systemctl start {service_name}')
-    return None
 
 
 if __name__ == '__main__':
