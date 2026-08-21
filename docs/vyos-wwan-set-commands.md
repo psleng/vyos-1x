@@ -54,7 +54,12 @@ interfaces
         │
         ├── ipv6-bridging                                # carrier /64 → single downstream LAN (NOT DHCPv6 PD)
         │     ├── interface <name>                        # downstream LAN interface that gets the carrier prefix
-        │     └── reconciliation-interval <5-300>          # safety-net timer (default: 10 s)
+        │     ├── reconciliation-interval <5-300>          # safety-net timer (default: 10 s)
+        │     └── router-advert                            # RFC 4861 RA timers for the bridged LAN (renumber speed)
+        │           ├── min-interval <3-1350>             # MinRtrAdvInterval    (default: 3 s)
+        │           ├── max-interval <4-1800>             # MaxRtrAdvInterval    (default: 10 s)
+        │           ├── preferred-lifetime <0-2592000>    # AdvPreferredLifetime (default: 1800 s)
+        │           └── valid-lifetime <1-2592000>        # AdvValidLifetime     (default: 3600 s)
         │
         ├── dhcpv6-options                                # standard VyOS DHCPv6 client (handled by dhcp6c)
         │     ├── duid <hex-string>                       # client DUID override
@@ -77,7 +82,11 @@ interfaces
         │     ├── management-address <ipv4/prefix>        # FSM-provisioned mgmt v4 (default: 192.168.200.1/24; Policy B: skipped if 'interfaces ethernet <if> address' is set)
         │     ├── management-address-ipv6 <ipv6/prefix>   # FSM-provisioned mgmt v6 (default: fd00:6c61:6e30::1/64; same Policy B)
         │     ├── dns-server <ipv4|ipv6> (multi)          # override DNS advertised to downstream (precedence: user > carrier > 8.8.8.8/1.1.1.1)
-        │     └── disable-mss-clamp                       # valueless — turn off TCP MSS clamp-to-PMTU on WWAN egress (on by default)
+        │     ├── disable-mss-clamp                       # valueless — turn off TCP MSS clamp-to-PMTU on WWAN egress (on by default)
+        │     └── router-advert                           # RA tuning for the downstream device (dnsmasq)
+        │           ├── interval <4-1800>                 # unsolicited RA cadence, s (default: 60)
+        │           ├── router-lifetime <0-9000>          # default-router lifetime, s (default: 1800; 0 = not a default router)
+        │           └── prefix-lifetime <0-2592000>       # SLAAC/DHCPv6 address lifetime, s (default: lease-time)
         │
         ├── mirror                                        # packet mirroring
         │     ├── ingress <interface>
@@ -253,6 +262,8 @@ automatically using a 4-priority APN discovery chain:
 | **IPv6 management-address** | not configured (opt-in) | FSM leaves `wwanN` address-only.  When the user creates `ipv6 management-address`, the FSM stamps `<carrier-prefix>::1/128` and installs an `ip6tables` chain permitting ICMPv6, ESTABLISHED/RELATED, and TCP 443 (VyOS HTTPS UI); everything else is dropped.  Use `disable-default-https` to suppress the 443 auto-permit, `permit-tcp` / `permit-udp` to open additional ports, and `permit-source` to gate all permits to a specific source prefix. |
 | **DHCPv6 PD** | not configured | Standard VyOS `dhcpv6-options pd …` is available; dhcp6c runs only when configured.  **Mutually exclusive** with `ip-passthrough`, `ipv6-bridging` and `ipv6 management-address` — all four consume the carrier-assigned IPv6 prefix, so `verify()` permits only one. |
 | **Bridging reconciliation** | `10 s` | Safety-net timer re-checks the downstream LAN interface; netlink watch provides instant detection |
+| **Bridging RA timers** | min `3 s`, max `10 s`, preferred-lifetime `1800 s`, valid-lifetime `3600 s` | RFC 4861 Router Advertisement timers for the FSM-owned radvd on the bridged LAN.  Short defaults so SLAAC clients renumber quickly on a (rare) carrier prefix change.  Tunable via `ipv6-bridging router-advert …`; `verify()` enforces `min ≤ 0.75 × max` and `preferred ≤ valid`. |
+| **Passthrough RA timers** | interval `60 s`, router-lifetime `1800 s`, prefix-lifetime = `lease-time` | dnsmasq Router Advertisement tuning for the downstream device (only when `ip-passthrough` is active).  Tunable via `ip-passthrough router-advert …`; `verify()` requires `router-lifetime` to be `0` or ≥ `interval`. |
 | **Active SIM slot** | `1` | Slot 1 is used |
 | **APN** | per-SIM only, `(empty)` — triggers auto-discovery | Priority chain: 1) per-SIM configured APN, 1.5) in-memory last-connected APN, 3) Android APN DB (enabled by default), 4) automatic (let the network assign) |
 | **Authentication** | per-SIM only, default `none` | No PPP auth; auth-type/username/password configured per SIM slot |
@@ -589,6 +600,27 @@ set interfaces wwan wwan0 ipv6 management-address host-id '::cafe'
 > If the interface is destroyed (`RTM_DELLINK`) it is moved back to the
 > pending set and re-applied when it reappears.  Bearer disconnect removes
 > the bridged prefix; bearer reconnect re-applies it.
+>
+> **Tuning renumber speed (RFC 4861 Router Advertisements):**  The
+> FSM-owned radvd (mechanism #4 above) sends its RAs on a cadence and
+> advertises prefix lifetimes that are, by default, deliberately short so
+> downstream SLAAC clients pick up a changed carrier prefix quickly.  All
+> four values are operator-tunable under `ipv6-bridging router-advert`
+> (leaving the node unset reproduces the previously hard-coded behaviour,
+> so it changes nothing):
+>
+> | Command | radvd / RFC 4861 field | Default | Effect |
+> |---|---|---|---|
+> | `min-interval <3-1350>` | `MinRtrAdvInterval` | `3 s` | Lower bound between unsolicited RAs |
+> | `max-interval <4-1800>` | `MaxRtrAdvInterval` | `10 s` | Upper bound between unsolicited RAs — **lower = clients hear a new prefix sooner** |
+> | `preferred-lifetime <0-2592000>` | `AdvPreferredLifetime` | `1800 s` | How long the advertised address stays *preferred*; shorter = the old prefix is deprecated faster |
+> | `valid-lifetime <1-2592000>` | `AdvValidLifetime` | `3600 s` | How long the advertised address stays *valid* |
+>
+> `verify()` rejects a configuration where `min-interval > 0.75 ×
+> max-interval` or `preferred-lifetime > valid-lifetime` (both are RFC 4861
+> / radvd hard requirements) with a clear error instead of a silent radvd
+> start failure.  `AdvDefaultLifetime` (the router lifetime) is derived
+> automatically from `max-interval` and never needs tuning.
 
 ```
 # Bridge the carrier-supplied /64 to eth0
@@ -596,6 +628,13 @@ set interfaces wwan wwan0 ipv6-bridging interface 'eth0'
 
 # Reconciliation interval — safety-net for late-appearing interfaces (default 10 s)
 set interfaces wwan wwan0 ipv6-bridging reconciliation-interval 10
+
+# RFC 4861 Router Advertisement timers on the bridged LAN — all optional.
+# The values below ARE the defaults; omit any line to keep its default.
+set interfaces wwan wwan0 ipv6-bridging router-advert min-interval 3
+set interfaces wwan wwan0 ipv6-bridging router-advert max-interval 10
+set interfaces wwan wwan0 ipv6-bridging router-advert preferred-lifetime 1800
+set interfaces wwan wwan0 ipv6-bridging router-advert valid-lifetime 3600
 ```
 
 > **Tip — stable carrier-independent IPv6 management address:**  Unlike
@@ -719,6 +758,36 @@ set interfaces wwan wwan0 dhcpv6-options pd 0 interface eth0 sla-id '0'
 >    entirely — no auto-mgmt address is added.  Silent → FSM provides
 >    defaults.  This avoids fighting VyOS's own ethernet config.
 >
+> **Router Advertisement tuning (optional):**  The RA cadence and the
+> advertised address lifetimes are tunable under `ip-passthrough
+> router-advert`.  Because the RA/DHCP server here is `dnsmasq` (not
+> `radvd`), the knobs map onto what dnsmasq actually exposes:
+>
+> | Command | dnsmasq field | Default | Effect |
+> |---|---|---|---|
+> | `interval <4-1800>` | `ra-param` RA interval | `60 s` | How often unsolicited RAs are sent |
+> | `router-lifetime <0-9000>` | `ra-param` router lifetime | `1800 s` | Default-router validity; `0` = advertise as non-default-router |
+> | `prefix-lifetime <0-2592000>` | SLAAC/DHCPv6 lease | `lease-time` | Downstream address preferred/valid lifetime |
+>
+> Defaults reproduce the previously hard-coded `ra-param=…,60,1800`, so
+> leaving the node unset changes nothing; `prefix-lifetime` falls back to
+> `lease-time` when unset.  `verify()` rejects a `router-lifetime` shorter
+> than `interval` (unless `0`) — that would leave the downstream device
+> without a default route between advertisements (RFC 4861).  Note that fast
+> IPv6 renumbering does **not** depend on these: on a carrier IPv6 change the
+> FSM already fires a burst of deprecation RAs (`preferred=0 valid=0`) for
+> the old prefix, so the downstream drops it immediately instead of waiting
+> for a lifetime to expire.
+>
+> **Safety net (late LAN port / dead dnsmasq):**  `dnsmasq --bind-interfaces`
+> cannot start on a not-yet-present netdev, and unlike `ipv6-bridging` there
+> is no netlink watch here.  A per-instance reconcile task therefore
+> re-checks every 15 s: while passthrough is active and holds a carrier IP,
+> if the designated interface now exists but `dnsmasq` is not running, it
+> replays the last apply — recovering both a downstream port that appears
+> after the bearer connected and a `dnsmasq` that died.  The replay is
+> idempotent and serialized against normal applies, so it never double-runs.
+>
 > **Carrier IP changes (the hard part):**  When the carrier reassigns an
 > address (renew, handover, reconnect), stale connections must die
 > immediately or the downstream device will black-hole until its lease
@@ -801,6 +870,13 @@ set interfaces wwan wwan0 ip-passthrough dns-server '2606:4700:4700::1111'
 #   uses --clamp-mss-to-pmtu so it auto-tracks the bearer MTU dynamically.
 #   Only disable for PMTUD black-hole debugging.
 # set interfaces wwan wwan0 ip-passthrough disable-mss-clamp
+
+# Optional: tune the downstream Router Advertisements (dnsmasq).
+#   Defaults shown; omit any line to keep its default. router-lifetime must
+#   be 0 or >= interval; prefix-lifetime defaults to the lease-time when unset.
+set interfaces wwan wwan0 ip-passthrough router-advert interval 60
+set interfaces wwan wwan0 ip-passthrough router-advert router-lifetime 1800
+set interfaces wwan wwan0 ip-passthrough router-advert prefix-lifetime 60
 ```
 
 ### Packet Mirroring
