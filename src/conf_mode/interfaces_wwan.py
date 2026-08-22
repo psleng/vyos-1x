@@ -368,6 +368,7 @@ def _build_ipv6_bridging(wwan):
         'enabled': bool(brg_iface) and wwan['_user_set']['ipv6_bridging_interface'],
         'interface': brg_iface or '',
         'reconciliation_interval': _leaf_int(brg, 'reconciliation_interval', 10),
+        'translate_prefix': _leaf(brg, 'translate_prefix', '') or '',
         'ra_min_interval': _leaf_int(ra, 'min_interval', 3),
         'ra_max_interval': _leaf_int(ra, 'max_interval', 10),
         'ra_preferred_lifetime': _leaf_int(ra, 'preferred_lifetime', 1800),
@@ -924,6 +925,14 @@ def verify(wwan):
             f"carrier prefix lands on the L3-owning interface."
         )
 
+    # translate-prefix is meaningless without a bridged LAN interface.
+    if (wwan.get('ipv6_bridging', {}) or {}).get('translate_prefix') \
+            and not user_set.get('ipv6_bridging_interface'):
+        raise ConfigError(
+            "ipv6-bridging translate-prefix requires 'ipv6-bridging interface "
+            "<lan>' to be set."
+        )
+
     # ── ipv6-bridging RA timer sanity (RFC 4861 / radvd hard requirements) ──
     # radvd refuses to start unless MinRtrAdvInterval <= 0.75 * MaxRtrAdvInterval
     # and AdvPreferredLifetime <= AdvValidLifetime.  Catch it here with a clean
@@ -945,6 +954,24 @@ def verify(wwan):
                 f"ipv6-bridging router-advert preferred-lifetime ({ra_pref}s) must "
                 f"not exceed valid-lifetime ({ra_valid}s) — RFC 4861."
             )
+
+        # NPTv6 translate-prefix must be a valid IPv6 /64 (cellular carriers
+        # assign a /64; the 1:1 prefix map only substitutes the /64 bits).
+        translate_prefix = (wwan.get('ipv6_bridging', {}) or {}).get('translate_prefix')
+        if translate_prefix:
+            try:
+                _net = ipaddress.IPv6Network(translate_prefix, strict=False)
+            except (ipaddress.AddressValueError,
+                    ipaddress.NetmaskValueError, ValueError):
+                raise ConfigError(
+                    f"ipv6-bridging translate-prefix '{translate_prefix}' is not a "
+                    f"valid IPv6 prefix."
+                )
+            if _net.prefixlen != 64:
+                raise ConfigError(
+                    f"ipv6-bridging translate-prefix must be a /64 (cellular carriers "
+                    f"assign a /64); got /{_net.prefixlen}."
+                )
 
     # ── ip-passthrough RA timer sanity (dnsmasq ra-param) ──────────────
     # A router-lifetime shorter than the RA interval leaves the downstream

@@ -53,8 +53,9 @@ interfaces
         │           └── permit-source <ipv6-prefix> (multi)  # ACL: restrict all permits (including auto-443) to this source prefix
         │
         ├── ipv6-bridging                                # carrier /64 → single downstream LAN (NOT DHCPv6 PD)
-        │     ├── interface <name>                        # downstream LAN interface that gets the carrier prefix
+        │     ├── interface <name>                        # downstream LAN interface that gets the prefix
         │     ├── reconciliation-interval <5-300>          # safety-net timer (default: 10 s)
+        │     ├── translate-prefix <ipv6-/64>             # NPTv6 (RFC 6296): map a stable internal /64 ↔ carrier /64 (LAN never renumbers)
         │     └── router-advert                            # RFC 4861 RA timers for the bridged LAN (renumber speed)
         │           ├── min-interval <3-1350>             # MinRtrAdvInterval    (default: 3 s)
         │           ├── max-interval <4-1800>             # MaxRtrAdvInterval    (default: 10 s)
@@ -258,11 +259,12 @@ automatically using a 4-priority APN discovery chain:
 | **Mirror** | not set | No ingress/egress mirroring |
 | **IPv4 options** | VyOS defaults | Forwarding enabled, source-validation disabled |
 | **IPv6 options** | VyOS defaults | Forwarding enabled, source-validation disabled |
-| **IPv6 bridging** | not configured | No prefix is bridged; configure `ipv6-bridging interface <lan>` to copy the carrier /64 onto a downstream LAN interface (NOT DHCPv6 PD). |
+| **IPv6 bridging** | not configured | No prefix is bridged; configure `ipv6-bridging interface <lan>` to copy the carrier /64 onto a downstream LAN interface (NOT DHCPv6 PD).  Add `translate-prefix <ipv6-/64>` to switch to NPTv6 (RFC 6296) mode — see below. |
 | **IPv6 management-address** | not configured (opt-in) | FSM leaves `wwanN` address-only.  When the user creates `ipv6 management-address`, the FSM stamps `<carrier-prefix>::1/128` and installs an `ip6tables` chain permitting ICMPv6, ESTABLISHED/RELATED, and TCP 443 (VyOS HTTPS UI); everything else is dropped.  Use `disable-default-https` to suppress the 443 auto-permit, `permit-tcp` / `permit-udp` to open additional ports, and `permit-source` to gate all permits to a specific source prefix. |
 | **DHCPv6 PD** | not configured | Standard VyOS `dhcpv6-options pd …` is available; dhcp6c runs only when configured.  **Mutually exclusive** with `ip-passthrough`, `ipv6-bridging` and `ipv6 management-address` — all four consume the carrier-assigned IPv6 prefix, so `verify()` permits only one. |
 | **Bridging reconciliation** | `10 s` | Safety-net timer re-checks the downstream LAN interface; netlink watch provides instant detection |
 | **Bridging RA timers** | min `3 s`, max `10 s`, preferred-lifetime `1800 s`, valid-lifetime `3600 s` | RFC 4861 Router Advertisement timers for the FSM-owned radvd on the bridged LAN.  Short defaults so SLAAC clients renumber quickly on a (rare) carrier prefix change.  Tunable via `ipv6-bridging router-advert …`; `verify()` enforces `min ≤ 0.75 × max` and `preferred ≤ valid`. |
+| **NPTv6 translate-prefix** | not configured (verbatim bridging) | When `ipv6-bridging translate-prefix <internal-/64>` is set, the LAN is given the *stable internal* /64 instead of the carrier /64, and an nft NPTv6 (RFC 6296-style) rule 1:1-maps internal ↔ carrier at the wwan edge.  On a carrier prefix change only the translation's external prefix moves — the LAN never renumbers.  Must be a `/64`.  **Datapath requires hardware validation.** |
 | **Passthrough RA timers** | interval `60 s`, router-lifetime `1800 s`, prefix-lifetime = `lease-time` | dnsmasq Router Advertisement tuning for the downstream device (only when `ip-passthrough` is active).  Tunable via `ip-passthrough router-advert …`; `verify()` requires `router-lifetime` to be `0` or ≥ `interval`. |
 | **Active SIM slot** | `1` | Slot 1 is used |
 | **APN** | per-SIM only, `(empty)` — triggers auto-discovery | Priority chain: 1) per-SIM configured APN, 1.5) in-memory last-connected APN, 3) Android APN DB (enabled by default), 4) automatic (let the network assign) |
@@ -655,6 +657,56 @@ set interfaces wwan wwan0 ipv6-bridging router-advert valid-lifetime 3600
 >
 > SLAAC clients prefer the global carrier address for off-link traffic
 > and use the ULA for on-LAN management — no extra configuration needed.
+
+> **NPTv6 prefix translation (RFC 6296) — a carrier-independent prefix
+> for the *whole* LAN:**  The ULA tip above gives the router a stable
+> management address, but downstream hosts still SLAAC off the carrier
+> /64 and therefore renumber whenever the carrier rotates the prefix.  If
+> you instead want the entire LAN to keep a fixed, operator-chosen prefix
+> across carrier renumbering, set `translate-prefix` to a stable internal
+> /64:
+>
+> ```
+> set interfaces wwan wwan0 ipv6-bridging interface 'eth0'
+> set interfaces wwan wwan0 ipv6-bridging translate-prefix 'fd00:6c61:6e30::/64'
+> ```
+>
+> In this mode `ipv6-bridging` behaves as follows:
+>
+> 1. The LAN (`eth0`) is given `fd00:6c61:6e30::1/64` and the FSM-owned
+>    radvd advertises **the internal prefix**, so SLAAC hosts form stable
+>    `fd00:6c61:6e30::/64` addresses that never change.
+> 2. A dedicated nftables table `ip6 wwanN_nptv6` installs a stateless
+>    1:1 prefix map — the same `snat`/`dnat prefix to` construct VyOS
+>    `nat66` uses — rewriting the internal /64 ↔ the current carrier /64
+>    at the `wwanN` edge:
+>
+>    ```
+>    oifname wwanN ip6 saddr fd00:6c61:6e30::/64 snat prefix to <carrier>/64
+>    iifname wwanN ip6 daddr <carrier>/64        dnat prefix to fd00:6c61:6e30::/64
+>    ```
+>
+> 3. On a carrier prefix change **only the external prefix of that rule
+>    is refreshed** — the LAN address and RAs are untouched, so downstream
+>    hosts never renumber (verbatim-copy mode would instead deprecate the
+>    old prefix and SLAAC the new one).
+> 4. LAN hosts are mirrored on the wwan side with proxy-NDP for their
+>    *translated* address (`<carrier>::<host-IID>`), just as verbatim
+>    bridging proxies the host's own address.
+>
+> **Mutually exclusive** with `ip-passthrough`, DHCPv6-PD and `ipv6
+> management-address` (same rule as plain `ipv6-bridging` — all consume
+> the carrier prefix).  Use a ULA range (`fd00::/8`, RFC 4193) for the
+> internal prefix so it never collides with real global space.
+>
+> > ⚠️ **Datapath not yet hardware-validated.**  The NPTv6 forwarding
+> > path — the nft prefix translation, proxy-NDP for translated
+> > addresses, and the carrier's routed-vs-on-link /64 behaviour — cannot
+> > be exercised without live cellular hardware; treat this mode as
+> > needing a board bring-up test before production use.  In particular
+> > the proxy-NDP mirror assumes nftables `prefix to` keeps the host IID
+> > verbatim (stateful prefix NAT), not RFC 6296 checksum-neutral IID
+> > adjustment.
 
 ### DHCPv6 (standard VyOS — real PD via dhcp6c)
 

@@ -174,6 +174,10 @@ class InterfaceConfig(ServiceInterface):
             "enabled": False,
             "interface": "",
             "reconciliation_interval": 10,    # Seconds between safety-net re-checks
+            # NPTv6 (RFC 6296) translate mode: stable operator-chosen internal
+            # /64 that the LAN keeps across carrier renumbering.  Empty string
+            # = verbatim-copy bridging (carrier /64 handed to the LAN as-is).
+            "translate_prefix": "",
             # RFC 4861 Router Advertisement timers for the bridged prefix.
             # Short defaults so SLAAC clients renumber quickly on prefix change.
             "ra_min_interval": 3,             # MinRtrAdvInterval (s)

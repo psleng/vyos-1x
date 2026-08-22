@@ -771,6 +771,8 @@ class ModemStateMachine:
         self._bridging_carrier_prefix_len = None  # int
         self._bridging_bearer_addr = None         # bearer's own /128 (excluded from LAN host bit)
         self._bridging_dns_servers = []           # carrier IPv6 DNS list (advertised via RDNSS)
+        self._bridging_translate_net = None       # NPTv6: stable internal /64 (None = verbatim bridging)
+        self._bridging_nptv6_active = False       # True when the nft NPTv6 prefix map is installed
         self._bridging_saved_sysctls = {}         # {path: original_value} for teardown
         self._bridging_proxy_entries = set()      # IPv6 addrs proxied on the wwan side
         self._bridging_ndp_task = None            # neighbor-watch task on the LAN side
@@ -3834,6 +3836,20 @@ class ModemStateMachine:
         self._bridging_reconciliation_interval = int(
             self._bridging_config.get('reconciliation_interval', 10)
         )
+        # NPTv6 translate mode: an operator-chosen stable internal /64 that the
+        # LAN keeps across carrier renumbering; empty string = verbatim-copy
+        # bridging (the historical behaviour).
+        self._bridging_translate_net = None
+        _translate_prefix = (self._bridging_config or {}).get('translate_prefix') or ''
+        if _translate_prefix:
+            try:
+                self._bridging_translate_net = ipaddress.IPv6Network(
+                    _translate_prefix, strict=False)
+            except Exception as _e:
+                logger.warning(
+                    "IPv6 bridging translate-prefix %r invalid, ignoring: %s",
+                    _translate_prefix, _e,
+                    extra={'interface_number': self.interface_number})
         if self._bridging_config.get('enabled') and self._bridging_config.get('interface'):
             logger.info("IPv6 bridging enabled → %s, reconciliation interval %ds, "
                        "RA min/max %d/%ds, prefix pref/valid %d/%ds",
@@ -18160,6 +18176,105 @@ class ModemStateMachine:
         iface = self._bridging_config.get('interface') or ''
         return iface or None
 
+    def _bridging_lan_net(self):
+        """Return (IPv6Network, prefix_len) for the DOWNSTREAM LAN prefix.
+
+        NPTv6 translate mode -> the operator's stable internal /64 (the LAN
+        never renumbers).  Verbatim-copy bridging -> the carrier prefix.
+        """
+        if self._bridging_translate_net is not None:
+            return (self._bridging_translate_net,
+                    self._bridging_translate_net.prefixlen)
+        return self._bridging_carrier_prefix, self._bridging_carrier_prefix_len
+
+    def _bridging_proxy_target(self, lan_addr):
+        """Map a LAN host address to the wwan-side address the carrier NSes for.
+
+        Verbatim bridging: the LAN address already is a carrier address, so we
+        proxy it unchanged.  NPTv6 translate mode: nftables `snat/dnat prefix
+        to` substitutes the /64 prefix bits and keeps the 64-bit interface
+        identifier (conntrack fixes the L4 checksums), so the carrier sees
+        <carrier-prefix> + the host's own IID -- proxy that.
+
+        NOTE: this assumes verbatim-IID prefix NAT (the VyOS nat66 construct),
+        not RFC 6296 checksum-neutral IID adjustment.  The proxy address is a
+        best-effort mirror and must be confirmed on real cellular hardware.
+        """
+        if self._bridging_translate_net is None or not self._bridging_carrier_prefix:
+            return lan_addr
+        try:
+            host = ipaddress.IPv6Address(lan_addr)
+            hostmask = (1 << (128 - self._bridging_translate_net.prefixlen)) - 1
+            iid = int(host) & hostmask
+            carrier_base = int(self._bridging_carrier_prefix.network_address)
+            return str(ipaddress.IPv6Address(carrier_base | iid))
+        except Exception:
+            return lan_addr
+
+    def _bridging_nptv6_table(self):
+        """Dedicated nft table name for this interface's NPTv6 prefix map."""
+        return f"wwan{self.interface_number}_nptv6"
+
+    async def _bridging_apply_nptv6(self, carrier_net):
+        """Install/refresh the stateless 1:1 NPTv6 prefix translation.
+
+        Maps the operator's stable internal /64 <-> the current carrier /64 in
+        a dedicated `ip6 <iface>_nptv6` table (isolated from vyos_nat), using
+        the same `snat/dnat prefix to` construct VyOS `nat66` uses:
+
+            postrouting (pri 100)  oifname wwanN ip6 saddr <internal> snat prefix to <carrier>
+            prerouting  (pri -100) iifname wwanN ip6 daddr <carrier>  dnat prefix to <internal>
+
+        Idempotent: the chains are flushed and repopulated on every carrier
+        prefix change so only the external prefix moves -- the LAN never
+        renumbers.  Needs nft_nat loaded (present whenever NAT/firewall is in
+        use); a missing module fails soft via _run_ipcmd and is logged.
+
+        DATAPATH CAVEAT: this IPv6 forwarding path (translation + proxy-NDP for
+        the translated addresses + the carrier's routed-vs-on-link /64
+        behaviour) cannot be exercised without live cellular hardware and must
+        be validated during board bring-up.
+        """
+        if self._bridging_translate_net is None:
+            return
+        internal = str(self._bridging_translate_net)
+        carrier = str(carrier_net)
+        wwan = f"wwan{self.interface_number}"
+        table = self._bridging_nptv6_table()
+        await self._run_ipcmd('nft', 'add', 'table', 'ip6', table)
+        await self._run_ipcmd(
+            'nft', 'add', 'chain', 'ip6', table, 'PREROUTING',
+            '{', 'type', 'nat', 'hook', 'prerouting', 'priority', '-100', ';',
+            'policy', 'accept', ';', '}')
+        await self._run_ipcmd(
+            'nft', 'add', 'chain', 'ip6', table, 'POSTROUTING',
+            '{', 'type', 'nat', 'hook', 'postrouting', 'priority', '100', ';',
+            'policy', 'accept', ';', '}')
+        await self._run_ipcmd('nft', 'flush', 'chain', 'ip6', table, 'PREROUTING')
+        await self._run_ipcmd('nft', 'flush', 'chain', 'ip6', table, 'POSTROUTING')
+        # Inbound: carrier -> internal (destination translation).
+        await self._run_ipcmd(
+            'nft', 'add', 'rule', 'ip6', table, 'PREROUTING',
+            'iifname', wwan, 'ip6', 'daddr', carrier, 'dnat', 'prefix', 'to', internal)
+        # Outbound: internal -> carrier (source translation).
+        await self._run_ipcmd(
+            'nft', 'add', 'rule', 'ip6', table, 'POSTROUTING',
+            'oifname', wwan, 'ip6', 'saddr', internal, 'snat', 'prefix', 'to', carrier)
+        self._bridging_nptv6_active = True
+        logger.info("IPv6 NPTv6 active on %s: internal %s <-> carrier %s",
+                    wwan, internal, carrier,
+                    extra={'interface_number': self.interface_number})
+
+    async def _bridging_remove_nptv6(self):
+        """Tear down the NPTv6 prefix map (no-op unless it was installed)."""
+        if not self._bridging_nptv6_active:
+            return
+        await self._run_ipcmd(
+            'nft', 'delete', 'table', 'ip6', self._bridging_nptv6_table())
+        self._bridging_nptv6_active = False
+        logger.info("IPv6 NPTv6 removed from wwan%d", self.interface_number,
+                    extra={'interface_number': self.interface_number})
+
     def _bridging_build_desired_state(self, carrier_net, carrier_prefix_len):
         """Compute the desired bridged address for the downstream interface.
 
@@ -18267,7 +18382,10 @@ class ModemStateMachine:
             (int(prev_net.network_address) != int(carrier_net.network_address)
              or prev_plen != carrier_prefix_len)
         )
-        if prefix_changed:
+        # In NPTv6 translate mode the LAN keeps a stable internal prefix, so a
+        # carrier prefix change must NOT deprecate/renumber the LAN address --
+        # only the nft translation's external prefix is refreshed below.
+        if prefix_changed and self._bridging_translate_net is None:
             await self._bridging_deprecate_previous()
 
         self._bridging_carrier_prefix = carrier_net
@@ -18279,7 +18397,10 @@ class ModemStateMachine:
         # the LAN side.  Saved values are restored in _bridging_remove_all.
         await self._bridging_apply_sysctls()
 
-        desired = self._bridging_build_desired_state(carrier_net, carrier_prefix_len)
+        # The LAN address + RA advertise the internal prefix in translate mode
+        # and the carrier prefix in verbatim-bridging mode (see _bridging_lan_net).
+        lan_net, lan_plen = self._bridging_lan_net()
+        desired = self._bridging_build_desired_state(lan_net, lan_plen)
         self._bridging_pending = set()
         self._bridging_applied = {}
 
@@ -18310,6 +18431,16 @@ class ModemStateMachine:
         # only adds the L3 address, which is not enough for SLAAC.
         await self._bridging_apply_radvd()
 
+        # NPTv6 translate mode: (re)install the stateless 1:1 prefix map so the
+        # internal LAN prefix reaches the Internet via the current carrier /64.
+        # On a carrier prefix change only this rule's external prefix moves.
+        if self._bridging_translate_net is not None:
+            try:
+                await self._bridging_apply_nptv6(carrier_net)
+            except Exception as e:
+                logger.error("IPv6 NPTv6 apply failed: %s", e,
+                            extra={'interface_number': self.interface_number})
+
         logger.info("IPv6 bridging apply complete: %d applied, %d pending",
                    len(self._bridging_applied), len(self._bridging_pending),
                    extra={'interface_number': self.interface_number})
@@ -18328,12 +18459,15 @@ class ModemStateMachine:
         if not lan or not self._bridging_applied.get(lan) \
                 or not self._bridging_carrier_prefix:
             return
+        # Advertise the LAN prefix: the stable internal /64 in NPTv6 translate
+        # mode, the carrier /64 in verbatim-bridging mode.
+        lan_net, lan_plen = self._bridging_lan_net()
         try:
-            net_str = str(self._bridging_carrier_prefix.network_address)
+            net_str = str(lan_net.network_address)
             await self._bridging_radvd.apply(
                 lan=lan,
                 prefix=net_str,
-                plen=self._bridging_carrier_prefix_len,
+                plen=lan_plen,
                 dns_servers=list(self._bridging_dns_servers or []),
                 min_interval=int(self._bridging_config.get('ra_min_interval', 3)),
                 max_interval=int(self._bridging_config.get('ra_max_interval', 10)),
@@ -18348,6 +18482,12 @@ class ModemStateMachine:
         """Remove the bridged prefix from the downstream interface and reset state."""
         # Stop background tasks first so they don't race with cleanup.
         self._bridging_stop_background_tasks()
+        # Remove the NPTv6 prefix map (no-op unless translate mode installed it).
+        try:
+            await self._bridging_remove_nptv6()
+        except Exception as e:
+            logger.debug("IPv6 NPTv6 remove failed: %s", e,
+                        extra={'interface_number': self.interface_number})
         # Stop the FSM-owned radvd so it doesn't keep advertising a
         # prefix we no longer hold.
         try:
@@ -18823,16 +18963,22 @@ class ModemStateMachine:
             await self._bridging_del_proxy(addr)
 
     def _bridging_addr_eligible_for_proxy(self, addr_str):
-        """True if addr is inside the carrier prefix and not the bearer/router itself."""
+        """True if addr is a LAN host we should proxy on the wwan side.
+
+        The host lives in the carrier prefix (verbatim bridging) or in the
+        operator's internal prefix (NPTv6 translate mode); either way it must
+        not be the bearer's own address or the router's own LAN address.
+        """
         if not self._bridging_carrier_prefix:
             return False
+        lan_net = self._bridging_translate_net or self._bridging_carrier_prefix
         try:
             addr = ipaddress.IPv6Address(addr_str)
         except Exception:
             return False
         if addr.is_link_local or addr.is_multicast or addr.is_unspecified:
             return False
-        if addr not in self._bridging_carrier_prefix:
+        if addr not in lan_net:
             return False
         if self._bridging_bearer_addr:
             try:
@@ -18936,10 +19082,13 @@ class ModemStateMachine:
                                     break
                                 attr_offset += (rta_len + 3) & ~3
                             if dst and self._bridging_addr_eligible_for_proxy(dst):
+                                # In translate mode the carrier NSes for the
+                                # prefix-swapped address, so proxy that.
+                                target = self._bridging_proxy_target(dst)
                                 if nlmsg_type == RTM_NEWNEIGH:
-                                    await self._bridging_add_proxy(dst)
+                                    await self._bridging_add_proxy(target)
                                 else:
-                                    await self._bridging_del_proxy(dst)
+                                    await self._bridging_del_proxy(target)
                     offset += (nlmsg_len + 3) & ~3
 
         except asyncio.CancelledError:
@@ -18963,7 +19112,8 @@ class ModemStateMachine:
             for line in stdout.decode().splitlines():
                 addr = line.split()[0] if line.split() else ''
                 if addr and self._bridging_addr_eligible_for_proxy(addr):
-                    await self._bridging_add_proxy(addr)
+                    await self._bridging_add_proxy(
+                        self._bridging_proxy_target(addr))
         except Exception as e:
             logger.debug("IPv6 bridging proxy seed failed: %s", e,
                         extra={'interface_number': self.interface_number})
@@ -18978,10 +19128,8 @@ class ModemStateMachine:
                         not self._bridging_target_interface():
                     continue
 
-                desired = self._bridging_build_desired_state(
-                    self._bridging_carrier_prefix,
-                    self._bridging_carrier_prefix_len,
-                )
+                lan_net, lan_plen = self._bridging_lan_net()
+                desired = self._bridging_build_desired_state(lan_net, lan_plen)
 
                 newly_applied = []
                 for iface_name in list(self._bridging_pending):
@@ -19117,10 +19265,8 @@ class ModemStateMachine:
             if not self._bridging_carrier_prefix or \
                     not self._bridging_target_interface():
                 return
-            desired = self._bridging_build_desired_state(
-                self._bridging_carrier_prefix,
-                self._bridging_carrier_prefix_len,
-            )
+            lan_net, lan_plen = self._bridging_lan_net()
+            desired = self._bridging_build_desired_state(lan_net, lan_plen)
             if iface_name in desired:
                 info = desired[iface_name]
                 ok = await self._bridging_apply_to_interface(
@@ -19147,10 +19293,8 @@ class ModemStateMachine:
             if not self._bridging_carrier_prefix or \
                     not self._bridging_target_interface():
                 return
-            desired = self._bridging_build_desired_state(
-                self._bridging_carrier_prefix,
-                self._bridging_carrier_prefix_len,
-            )
+            lan_net, lan_plen = self._bridging_lan_net()
+            desired = self._bridging_build_desired_state(lan_net, lan_plen)
             if iface_name in desired:
                 self._bridging_pending.add(iface_name)
                 logger.info(

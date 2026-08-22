@@ -702,6 +702,19 @@
                 </properties>
                 <defaultValue>10</defaultValue>
               </leafNode>
+              <leafNode name="translate-prefix">
+                <properties>
+                  <help>Enable NPTv6 (RFC 6296) translation using this stable internal /64 instead of copying the carrier prefix; the LAN keeps this prefix across carrier renumbering</help>
+                  <valueHelp>
+                    <format>ipv6net</format>
+                    <description>Stable internal IPv6 prefix, must be a /64 (e.g. fd00:6c61:6e30::/64)</description>
+                  </valueHelp>
+                  <constraint>
+                    <validator name="ipv6-prefix"/>
+                  </constraint>
+                  <constraintErrorMessage>translate-prefix must be a valid IPv6 /64 prefix (e.g. fd00:6c61:6e30::/64)</constraintErrorMessage>
+                </properties>
+              </leafNode>
               <node name="router-advert">
                 <properties>
                   <help>Router Advertisement (RFC 4861) timers for the bridged prefix</help>
