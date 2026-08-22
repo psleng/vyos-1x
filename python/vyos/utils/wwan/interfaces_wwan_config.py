@@ -68,7 +68,6 @@ class InterfaceConfig(ServiceInterface):
     # Centralized default configuration values
     DEFAULT_CONFIG = {
         # Interface-level settings
-        "interface_disabled": False,  # Admin disable — disconnect modem and suppress all activity
         "connection_mode": "always-on",  # always-on | connect-on-demand | dial-on-demand
         "primary_sim_slot": 1,  # Which SIM slot to use (1 or 2)
 
@@ -1371,13 +1370,6 @@ class InterfaceConfig(ServiceInterface):
                                      'validation_field': 'data_limit_size'})
                 raise ValueError("data_limit_size must be a non-negative integer (bytes, 0 = unlimited)")
 
-        # Validate interface_disabled
-        if 'interface_disabled' in config and not isinstance(config['interface_disabled'], bool):
-            logger.warning("Invalid interface_disabled",
-                          extra={'interface_number': self.interface_number,
-                                 'validation_field': 'interface_disabled'})
-            raise ValueError("interface_disabled must be true or false")
-
         # Validate APN discovery settings
         if 'android_apn_discovery' in config and config['android_apn_discovery'] not in ['enabled', 'disabled']:
             logger.warning("Invalid android_apn_discovery",
@@ -1677,17 +1669,17 @@ class InterfaceConfig(ServiceInterface):
                 f"manually. Use connection-mode connect-on-demand or "
                 f"dial-on-demand for manual control.")
         try:
-            # Reject if the interface is administratively disabled (airplane
-            # mode).  Without this guard the request would silently queue
-            # via connect_requested and never fire until the operator runs
-            # 'delete interfaces wwan wwanN disable'.
-            if (getattr(self.fsm, '_airplane_mode_active', False)
+            # Reject if the interface is parked in airplane mode (RF off).
+            # Without this guard the request would silently queue via
+            # connect_requested and never fire until airplane mode is off.
+            if (getattr(self.fsm, '_admin_disabled', False)
+                    or getattr(self.fsm, '_airplane_mode_active', False)
                     or getattr(self.fsm, '_airplane_mode_requested', False)):
                 raise DBusError(
                     "com.igos.IgosModemManager.AdminDisabled",
-                    f"Interface {self.interface_number} is administratively "
-                    f"disabled (airplane mode). Run 'delete interfaces wwan "
-                    f"wwan{self.interface_number} disable' to re-enable.")
+                    f"Interface {self.interface_number} is in airplane mode "
+                    f"(RF off). Run 'change wwan wwan{self.interface_number} "
+                    f"airplane-mode disable' to reconnect.")
 
             current_state = (
                 getattr(self.fsm.machine, 'current_state', 'UNKNOWN')
@@ -1846,6 +1838,26 @@ class InterfaceConfig(ServiceInterface):
             raise DBusError("com.igos.IgosModemManager.DisconnectionError", str(e))
 
     @method()
+    async def SetAirplaneMode(self, enabled: 'b') -> 's':  # type: ignore[name-defined]  # noqa: F821, F722
+        """Op-mode airplane toggle: RF off + park (True) or RF on + reconnect (False).
+
+        Non-persistent -- the operator drives this at runtime; it is never
+        written to config, so a reboot always comes up in normal operation.
+        """
+        try:
+            logger.info("Airplane mode request",
+                       extra={'interface_number': self.interface_number,
+                              'enabled': bool(enabled)})
+            await self.fsm.set_airplane_mode(bool(enabled))
+            return (f"Airplane mode {'enabled' if enabled else 'disabled'} "
+                    f"on interface {self.interface_number}")
+        except Exception as e:
+            logger.error("Airplane mode error",
+                        extra={'interface_number': self.interface_number,
+                               'error': str(e)})
+            raise DBusError("com.igos.IgosModemManager.AirplaneModeError", str(e))
+
+    @method()
     async def get_bearer_status(self) -> 's':  # type: ignore[name-defined]  # noqa: F821
         """Lightweight bearer status poll.
 
@@ -1906,17 +1918,17 @@ class InterfaceConfig(ServiceInterface):
                 f"manually. Use connection-mode connect-on-demand or "
                 f"dial-on-demand for manual control.")
         try:
-            # Reject if the interface is administratively disabled (airplane
-            # mode).  Without this guard the request would silently queue
-            # via connect_requested and never fire until the operator runs
-            # 'delete interfaces wwan wwanN disable'.
-            if (getattr(self.fsm, '_airplane_mode_active', False)
+            # Reject if the interface is parked in airplane mode (RF off).
+            # Without this guard the request would silently queue via
+            # connect_requested and never fire until airplane mode is off.
+            if (getattr(self.fsm, '_admin_disabled', False)
+                    or getattr(self.fsm, '_airplane_mode_active', False)
                     or getattr(self.fsm, '_airplane_mode_requested', False)):
                 raise DBusError(
                     "com.igos.IgosModemManager.AdminDisabled",
-                    f"Interface {self.interface_number} is administratively "
-                    f"disabled (airplane mode). Run 'delete interfaces wwan "
-                    f"wwan{self.interface_number} disable' to re-enable.")
+                    f"Interface {self.interface_number} is in airplane mode "
+                    f"(RF off). Run 'change wwan wwan{self.interface_number} "
+                    f"airplane-mode disable' to reconnect.")
 
             from vyos.utils.wwan.interfaces_wwan_state_machine import ModemEvent, ModemState
             current_state = (

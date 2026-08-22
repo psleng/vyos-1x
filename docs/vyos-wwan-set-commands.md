@@ -28,7 +28,7 @@ dhcp6c.  VyOS infrastructure features (`description`,
 interfaces
   └── wwan <wwanN>
         ├── description <text>                            # max 255 characters
-        ├── disable                                       # valueless — admin shutdown
+        ├── disable                                       # valueless — full teardown (delete-style, purges history); interface recreated when removed
         ├── mtu <576-1500>                                # fallback MTU if carrier does not provide one (default: 1420); also ceiling
         ├── vrf <name>                                    # VRF instance name
         ├── connection-mode <always-on|connect-on-demand|dial-on-demand>

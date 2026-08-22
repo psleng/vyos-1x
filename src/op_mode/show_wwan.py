@@ -39,15 +39,30 @@ def _get_client():
     return WWANClientSync()
 
 
-def _get_full_status(interface: str) -> dict:
-    """Fetch the full FSM status dict for an interface."""
+def _require_interface(interface: str) -> int:
+    """Validate a wwan interface for op-mode use and return its index.
+
+    Raises ``UnconfiguredSubsystem`` when the interface is absent from the
+    config, or when it is administratively disabled -- `disable` is a full
+    delete-style teardown, so there is no FSM / D-Bus object to query and a
+    raw "cannot reach WWAN service" error would be misleading.
+    """
     config = ConfigTreeQuery()
     if not config.exists(['interfaces', 'wwan', interface]):
         raise vyos.opmode.UnconfiguredSubsystem(
             f'Interface "{interface}" is not configured'
         )
+    if config.exists(['interfaces', 'wwan', interface, 'disable']):
+        raise vyos.opmode.UnconfiguredSubsystem(
+            f'Interface "{interface}" is administratively disabled '
+            f'(delete "interfaces wwan {interface} disable" to bring it up)'
+        )
+    return _get_interface_number(interface)
 
-    if_num = _get_interface_number(interface)
+
+def _get_full_status(interface: str) -> dict:
+    """Fetch the full FSM status dict for an interface."""
+    if_num = _require_interface(interface)
     try:
         client = _get_client()
         return client.get_status(if_num)
@@ -93,6 +108,7 @@ def _raw_status(status: dict) -> dict:
         'interface': status.get('interface_name', ''),
         'state': status.get('fsm_state', ''),
         'connection_mode': status.get('connection_mode', ''),
+        'airplane_mode': status.get('airplane_mode', False),
         'modem_state': status.get('modem_state', ''),
         'power_state': status.get('modem_power_state_name', ''),
         'access_technology': status.get('access_technology_name', ''),
@@ -240,6 +256,8 @@ def _format_status(status: dict, interface: str) -> str:
     lines.append(_section('Connection'))
     lines.append(_kv('State:', d['state']))
     lines.append(_kv('Connection mode:', d['connection_mode']))
+    if d['airplane_mode']:
+        lines.append(_kv('Airplane mode:', 'active (RF off)'))
     lines.append(_kv('Power state:', d['power_state']))
     lines.append(_kv('Access technology:', d['access_technology']))
     lines.append(_kv('Operator:', d['operator']))
@@ -579,13 +597,7 @@ def show_wait_failover(raw: bool,
     if poll_interval < 1:
         raise ValueError('Poll interval must be >= 1 second')
 
-    config = ConfigTreeQuery()
-    if not config.exists(['interfaces', 'wwan', interface]):
-        raise vyos.opmode.UnconfiguredSubsystem(
-            f'Interface "{interface}" is not configured'
-        )
-
-    if_num = _get_interface_number(interface)
+    if_num = _require_interface(interface)
     try:
         client = _get_client()
         alert = client.wait_for_failover_alert(
@@ -633,13 +645,7 @@ def show_monitor_alerts(raw: bool,
     if category and category not in ('connectivity', 'sim', 'usage'):
         raise ValueError('Category must be one of: connectivity, sim, usage')
 
-    config = ConfigTreeQuery()
-    if not config.exists(['interfaces', 'wwan', interface]):
-        raise vyos.opmode.UnconfiguredSubsystem(
-            f'Interface "{interface}" is not configured'
-        )
-
-    if_num = _get_interface_number(interface)
+    if_num = _require_interface(interface)
     try:
         client = _get_client()
         alerts = client.monitor_alerts(
@@ -690,18 +696,13 @@ def clear_data_usage(raw: bool, interface: str, slot: int):
     The slot must be given explicitly so the reset is always unambiguous.
     The previous counters are logged by the service before they are cleared.
     """
-    config = ConfigTreeQuery()
-    if not config.exists(['interfaces', 'wwan', interface]):
-        raise vyos.opmode.UnconfiguredSubsystem(
-            f'Interface "{interface}" is not configured'
-        )
+    if_num = _require_interface(interface)
 
     try:
         slot = int(slot)
     except (TypeError, ValueError):
         raise ValueError('SIM slot must be an integer')
 
-    if_num = _get_interface_number(interface)
     try:
         client = _get_client()
         result = client.clear_data_usage(if_num, slot)

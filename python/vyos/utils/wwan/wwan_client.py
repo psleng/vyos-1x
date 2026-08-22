@@ -435,6 +435,29 @@ class WWANClient:
         except DBusError as exc:
             raise WWANError(f"Disconnect failed: {exc}") from exc
 
+    async def set_airplane_mode(self, interface_number: int, enabled: bool) -> str:
+        """Enable/disable airplane mode (RF off + park / RF on + reconnect).
+
+        Non-persistent op-mode action; never written to config.
+
+        Parameters
+        ----------
+        interface_number : int
+            Interface index.
+        enabled : bool
+            True to enter airplane mode, False to exit and reconnect.
+
+        Returns
+        -------
+        str
+            Service response.
+        """
+        iface = await self._get_iface(interface_number)
+        try:
+            return await iface.call_set_airplane_mode(bool(enabled))
+        except DBusError as exc:
+            raise WWANError(f"SetAirplaneMode failed: {exc}") from exc
+
     async def connect_bearer(self, interface_number: int) -> str:
         """Request bearer establishment (fire-and-forget).
 
@@ -1440,6 +1463,11 @@ class WWANClientSync:
     def disconnect(self, interface_number: int) -> str:
         """Synchronous wrapper.  See :meth:`WWANClient.disconnect`."""
         return self._run(self._call("disconnect", interface_number))
+
+    def set_airplane_mode(self, interface_number: int, enabled: bool) -> str:
+        """Airplane mode toggle.  See :meth:`WWANClient.set_airplane_mode`."""
+        return self._run(
+            self._method("set_airplane_mode", interface_number, enabled))
 
     def connect_bearer(self, interface_number: int) -> str:
         """Fire-and-forget bearer connect.  See :meth:`WWANClient.connect_bearer`."""

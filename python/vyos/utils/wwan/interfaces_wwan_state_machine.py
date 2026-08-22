@@ -380,8 +380,9 @@ class ModemStateMachine:
         # __runtime_state__ and restored before config is applied.
         self.bearer_requested = False
         self._shutting_down = False         # Set by shutdown() to suppress recovery
-        self._airplane_mode_requested = False  # Set when disable=true is applied
+        self._airplane_mode_requested = False  # airplane requested (may be pending modem bind)
         self._airplane_mode_active = False     # True once SetPowerState(LOW) succeeded
+        self._admin_disabled = False           # parked in airplane mode: stay down, ignore modem/SIM events
         # Timers/tasks referenced by _admin_disable() →
         # _stop_network_interface_monitoring() before any config is applied.
         # _apply_parsed_configuration() re-initializes these to None as well,
@@ -2367,13 +2368,11 @@ class ModemStateMachine:
                             extra={'interface_number': self.interface_number,
                                    'current_state': self.machine.current_state})
 
-            # If config says the interface is admin-disabled, drive the
-            # modem to airplane mode now and stop — don't run the initial
-            # configuration cascade.  Covers the cold-start case where the
-            # FSM service restarted with cached `interface_disabled=True`.
-            if getattr(self, '_admin_disabled', False) or (
-                    self.config and self.config.get('interface_disabled')):
-                logger.info("Interface is admin-disabled — driving modem to airplane mode",
+            # If we bind to a modem while parked in airplane mode (e.g. the
+            # modem re-enumerated during airplane mode), drive it straight back
+            # to RF-off and stop -- don't run the initial connection cascade.
+            if getattr(self, '_admin_disabled', False):
+                logger.info("Interface is in airplane mode -- driving modem to RF off",
                            extra={'interface_number': self.interface_number})
                 self._admin_disabled = True
                 self.user_disconnected = True
@@ -2926,6 +2925,18 @@ class ModemStateMachine:
                           'current_fsm_state': self.machine.current_state})
 
         current_fsm_state = self.machine.current_state
+
+        # ── Suppress ALL modem state events while parked in airplane mode ──
+        # The interface is intentionally down (RF off).  Nothing the modem
+        # emits -- including our own Enable(False) surfacing as DISABLED, or a
+        # SIM hotswap -- may revive it.  A dedicated early return here (rather
+        # than a flag checked inside each sub-branch) is what makes airplane
+        # mode robust against the SIM-missing -> failover path.
+        if getattr(self, '_admin_disabled', False):
+            logger.debug("Modem state %s ignored -- airplane mode", mm_state,
+                        extra={'interface_number': self.interface_number,
+                               'modem_state': mm_state})
+            return
 
         # ── Suppress modem state events during SIM switch ────────────
         # When a SIM switch is in progress the modem will cycle through
@@ -3533,41 +3544,21 @@ class ModemStateMachine:
 
     def apply_config(self, config: dict):
         """Apply configuration - handles all states properly"""
-        # ── Admin disable / enable transitions ──────────────────────────────
-        was_disabled = getattr(self, '_admin_disabled', False)
-        is_disabled = config.get('interface_disabled', False)
-
-        if is_disabled:
-            # Store config and flag; skip normal state processing
+        # ── Airplane mode is sticky against config commits ──
+        # Airplane mode (op-mode `change wwan wwanN airplane-mode enable`) is a
+        # runtime state driven via set_airplane_mode(), NOT via config.  If a
+        # config commit lands while parked in airplane mode, store it for when
+        # airplane mode is later cleared, but stay down -- a commit must never
+        # silently power the radio back on.  Exit is only via
+        # `airplane-mode disable` (or a reboot, since it is non-persistent).
+        if getattr(self, '_admin_disabled', False):
             if hasattr(self, 'config') and self.config:
                 self._previous_config = self.config.copy()
             self.config = config
-            self._admin_disabled = True
-            self._cancel_active_sim_removal_watchdog()
-            if not was_disabled:
-                logger.info("Interface administratively disabled",
-                           extra={'interface_number': self.interface_number})
-                self.user_disconnected = True
-                self._safe_create_task(self._admin_disable())
-            else:
-                logger.info("Interface remains disabled, configuration stored",
-                           extra={'interface_number': self.interface_number})
-            return
-
-        if was_disabled and not is_disabled:
-            self._admin_disabled = False
-            self.user_disconnected = False
-            logger.info("Interface re-enabled from admin-disabled state",
+            logger.info("Configuration stored while in airplane mode -- "
+                       "staying down until airplane mode is disabled",
                        extra={'interface_number': self.interface_number})
-            # Exit airplane mode (PowerState LOW → ON) before falling
-            # through to the normal apply path.  Scheduled as a task so
-            # the apply_config sync entry-point isn't blocked; the normal
-            # path's _ensure_modem_enabled also handles LOW→ON
-            # defensively if this hasn't completed in time.
-            if self._airplane_mode_requested or self._airplane_mode_active:
-                self._safe_create_task(self._exit_airplane_mode_if_needed())
-            # Fall through to normal apply logic — will trigger
-            # RECONFIGURE or initial config depending on current state.
+            return
 
         # ── Normal configuration path ───────────────────────────────────────
         # Store previous config for selective disconnection logic
@@ -13581,6 +13572,12 @@ class ModemStateMachine:
         status['config_applied'] = bool(self.config)
         status['user_disconnected'] = self.user_disconnected
         status['connect_requested'] = self.connect_requested
+        # Airplane mode (op-mode `change wwan wwanN airplane-mode enable`): the
+        # interface is parked with RF off.  Surfaced so `show` can report it.
+        status['airplane_mode'] = bool(
+            getattr(self, '_admin_disabled', False)
+            or getattr(self, '_airplane_mode_active', False)
+            or getattr(self, '_airplane_mode_requested', False))
 
         # ── 1a. Connection failure details ───────────────────────────────
         # These fields explain WHY the modem is in FAILED state so that
@@ -15451,12 +15448,12 @@ class ModemStateMachine:
                    extra={'interface_number': self.interface_number})
 
     async def _admin_disable(self):
-        """Administratively disable the interface.
+        """Tear down the interface for airplane mode.
 
-        Disconnects the bearer, cancels all monitoring and retry tasks,
-        and stops network interface monitoring.  The FSM stays in memory
-        so it can be re-enabled later via a config update with
-        ``interface_disabled: False``.
+        Disconnects the bearer, cancels all monitoring and retry tasks, tears
+        down downstream features and drives the modem RF off.  The FSM stays
+        in memory (parked via ``_admin_disabled``) so it can be re-enabled
+        later via ``set_airplane_mode(False)``.
         """
         try:
             # Cancel failed-state retry timer
@@ -15695,6 +15692,50 @@ class ModemStateMachine:
             logger.error(f"Error exiting airplane mode: {e}",
                         extra={'interface_number': self.interface_number})
             self._airplane_mode_active = False
+
+    async def set_airplane_mode(self, enabled: bool):
+        """Operator airplane-mode toggle (op-mode driven, NON-persistent).
+
+        ENABLE: disconnect the bearer, tear down downstream features, cancel
+        every monitor/retry task and drive the modem RF off
+        (SetPowerState LOW).  The FSM then parks: the `_admin_disabled`
+        guards across scan / liveness / on_modem_found / SIM-detect /
+        handle_modem_event make it ignore all modem+SIM events until released.
+        DISABLE: bring RF back on and restart the connection cascade from
+        scratch.
+
+        Airplane mode is never written to config, so a reboot always comes up
+        in normal operation -- deliberately, so a remote unit whose only link
+        is cellular can always be recovered with a power cycle.
+        """
+        if enabled:
+            if getattr(self, '_admin_disabled', False):
+                logger.info("Airplane mode already active",
+                           extra={'interface_number': self.interface_number})
+                return
+            logger.info("Airplane mode ENABLE -- tearing down and powering RF off",
+                       extra={'interface_number': self.interface_number})
+            self._admin_disabled = True
+            self.user_disconnected = True
+            self._cancel_active_sim_removal_watchdog()
+            await self._admin_disable()
+        else:
+            if not (getattr(self, '_admin_disabled', False)
+                    or self._airplane_mode_requested
+                    or self._airplane_mode_active):
+                logger.info("Airplane mode already inactive",
+                           extra={'interface_number': self.interface_number})
+                return
+            logger.info("Airplane mode DISABLE -- powering RF on and reconnecting",
+                       extra={'interface_number': self.interface_number})
+            self._admin_disabled = False
+            self.user_disconnected = False
+            await self._exit_airplane_mode_if_needed()
+            # Restart the connection cascade from scratch.  apply_config sees
+            # _admin_disabled=False now, so it takes the normal path and
+            # re-drives registration/connection from the current modem state.
+            if self.config:
+                self.apply_config(self.config)
 
     async def handle_disconnection_recovery(self, escalate=True,
                                               connectivity_triggered=False):

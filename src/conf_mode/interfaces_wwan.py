@@ -259,6 +259,19 @@ def get_config(config=None):
         'deleted' in wwan and not conf.exists(base)
     )
 
+    # `disable` is implemented as a delete-style teardown (see apply()).  Work
+    # out here — while the proposed config tree is live — whether disabling
+    # THIS interface leaves no enabled wwan interface remaining, so apply()
+    # can stop ModemManager exactly as deleting the last interface does.
+    _this_iface_disabled = conf.exists(base + [ifname, 'disable'])
+    _all_wwan = conf.list_nodes(base) if conf.exists(base) else []
+    _any_enabled_remaining = any(
+        not conf.exists(base + [n, 'disable']) for n in _all_wwan
+    )
+    wwan['_disable_last_active'] = (
+        _this_iface_disabled and not _any_enabled_remaining
+    )
+
     # ── Live-tree intent flags ───────────────────────────────────────
     # get_interface_dict() merges XML <defaultValue> tags into the parsed
     # dict regardless of whether the user actually configured the parent
@@ -641,7 +654,6 @@ def build_fsm_config(wwan):
     # ── Assemble the complete config dict ────────────────────────────────
     config = {
         # Basic interface settings
-        'interface_disabled': _leaf_exists(wwan, 'disable'),
         'primary_sim_slot': _leaf_int(sim_cfg, 'primary_slot', 1),
         'connection_mode': _leaf(wwan, 'connection_mode', 'always-on'),
 
@@ -1049,16 +1061,34 @@ def apply(wwan):
         return None
 
     if _leaf_exists(wwan, 'disable'):
-        # Admin-disable — keep the FSM/D-Bus object around but tell it to
-        # drop the bearer and suppress activity.  Persisted config is
-        # retained so re-enable picks up the previous configuration.
-        config = {'interface_disabled': True}
+        # Admin-disable is a FULL teardown, identical to `delete` except the
+        # config node stays in the CLI tree.  Rationale: once the modem is
+        # torn down we have no visibility into SIM/carrier changes, so
+        # replaying stale history (data-usage counters, last-connected APN)
+        # on re-enable could be wrong -- a clean slate is correct.
+        # RemoveInterface drops the bearer, deregisters, tears down the
+        # downstream LAN state, unexports the D-Bus object and PURGES the
+        # persisted config cache + data-usage counters.  Removing `disable`
+        # later recreates the interface from scratch via the normal apply
+        # path below.
+        disable_last_active = wwan.get('_disable_last_active', False)
         _ensure_manager_running()
-        asyncio.run(_apply_via_dbus(interface_number, config))
+        removed = asyncio.run(_remove_via_dbus(interface_number))
+        if not removed:
+            # Manager unreachable: purge persisted state locally so a later
+            # re-enable still starts clean (mirrors the delete fallback).
+            _remove_local_wwan_cache(interface_number)
+            _remove_persisted_usage(interface_number)
 
         if interface_exists(ifname):
             w = WWANIf(ifname)
             w.remove()
+
+        # If no enabled wwan interface remains, bring cellular fully down:
+        # stop the WWAN manager (which stops ModemManager) so nothing runs,
+        # exactly as deleting the last interface does.
+        if disable_last_active:
+            _stop_manager_and_modemmanager()
 
         return None
 
