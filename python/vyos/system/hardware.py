@@ -9,6 +9,7 @@
 
 import platform
 from pathlib import Path
+from uuid import UUID
 
 DMI_ID_PATH = Path('/sys/class/dmi/id')
 DEVICE_INFO_PATH = Path('/sys/bus/platform/devices/device-info')
@@ -37,6 +38,15 @@ def _read_text(path: Path) -> str:
         return ''
 
 
+def _read_uuid(path: Path, *, binary: bool = False) -> str:
+    try:
+        data = path.read_bytes()
+        value = UUID(bytes=data) if binary else UUID(data.decode().strip())
+        return str(value)
+    except (OSError, UnicodeDecodeError, ValueError):
+        return ''
+
+
 def get_hardware_info(
     machine: str | None = None,
     dmi_path: Path = DMI_ID_PATH,
@@ -47,14 +57,14 @@ def get_hardware_info(
         vendor = _read_text(dmi_path / 'sys_vendor')
         model = _read_text(dmi_path / 'product_name')
         serial = _read_text(dmi_path / 'product_serial')
-        uuid = _read_text(dmi_path / 'product_uuid')
+        uuid = _read_uuid(dmi_path / 'product_uuid')
     else:
         product = _read_text(device_info_path / 'product')
         board_model = _read_text(device_info_path / 'model')
-        vendor = ''
+        vendor = _read_text(device_info_path / 'vendor')
         model = '-'.join(value for value in (product, board_model) if value)
         serial = _read_text(device_info_path / 'serial')
-        uuid = ''
+        uuid = _read_uuid(device_info_path / 'uuid', binary=True)
 
     return {
         'hardware_vendor': vendor or 'Unknown',
@@ -71,7 +81,9 @@ def get_stable_hardware_id(
 ) -> str:
     """Return the best stable per-system identifier available."""
     if is_x86(machine):
-        return _read_text(dmi_path / 'product_uuid') or _read_text(
+        return _read_uuid(dmi_path / 'product_uuid') or _read_text(
             dmi_path / 'product_serial'
         )
-    return _read_text(device_info_path / 'serial')
+    return _read_uuid(device_info_path / 'uuid', binary=True) or _read_text(
+        device_info_path / 'serial'
+    )
