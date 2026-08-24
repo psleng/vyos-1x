@@ -34,14 +34,15 @@ import os
 import requests
 import vyos.defaults
 from vyos.system.image import is_live_boot
+from vyos.system.hardware import get_hardware_info
 from urllib3.util import retry
 
-from vyos.utils.file import read_file
 from vyos.utils.file import read_json
 from vyos.utils.process import popen
 from vyos.utils.process import DEVNULL
 
 version_file = os.path.join(vyos.defaults.directories['data'], 'version.json')
+
 
 def get_version_data(fname=version_file):
     """
@@ -75,10 +76,10 @@ def get_full_version_data(fname=version_file):
     # Get system architecture (well, kernel architecture rather)
     version_data['system_arch'], _ = popen('uname -m', stderr=DEVNULL)
 
-    hypervisor,code = popen('hvinfo', stderr=DEVNULL)
+    hypervisor, code = popen('hvinfo', stderr=DEVNULL)
     if code == 1:
-         # hvinfo returns 1 if it cannot detect any hypervisor
-         version_data['system_type'] = 'bare metal'
+        # hvinfo returns 1 if it cannot detect any hypervisor
+        version_data['system_type'] = 'bare metal'
     else:
         version_data['system_type'] = f"{hypervisor} guest"
 
@@ -92,17 +93,10 @@ def get_full_version_data(fname=version_file):
         boot_via = "installed image"
     version_data['boot_via'] = boot_via
 
-    # Get hardware details from DMI
-    dmi = '/sys/class/dmi/id'
-    version_data['hardware_vendor'] = read_file(dmi + '/sys_vendor', 'Unknown')
-    version_data['hardware_model'] = read_file(dmi +'/product_name','Unknown')
-
-    # These two assume script is run as root, normal users can't access those files
-    subsystem = '/sys/class/dmi/id/subsystem/id'
-    version_data['hardware_serial'] = read_file(subsystem + '/product_serial','Unknown')
-    version_data['hardware_uuid'] = read_file(subsystem + '/product_uuid', 'Unknown')
+    version_data.update(get_hardware_info())
 
     return version_data
+
 
 def get_remote_version(url):
     """
@@ -142,11 +136,11 @@ def get_remote_version(url):
             return False
         return remote_data.json()
     except requests.exceptions.HTTPError as errh:
-        print ("HTTP Error:", errh)
+        print("HTTP Error:", errh)
     except requests.exceptions.ConnectionError as errc:
-        print ("Connecting error:", errc)
+        print("Connecting error:", errc)
     except requests.exceptions.Timeout as errt:
-        print ("Timeout error:", errt)
+        print("Timeout error:", errt)
     except requests.exceptions.RequestException as err:
-        print ("Unable to get remote data", err)
+        print("Unable to get remote data", err)
     return False
