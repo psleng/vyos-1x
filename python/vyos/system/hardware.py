@@ -38,6 +38,14 @@ def _read_text(path: Path) -> str:
         return ''
 
 
+def _read_serial(path: Path) -> str:
+    value = _read_text(path)
+    parts = value.split('-')
+    if len(parts) == 2 and len(parts[0]) == 3 and len(parts[1]) == 12:
+        return value
+    return ''
+
+
 def _read_uuid(path: Path, *, binary: bool = False) -> str:
     try:
         data = path.read_bytes()
@@ -63,7 +71,7 @@ def get_hardware_info(
         board_model = _read_text(device_info_path / 'model')
         vendor = _read_text(device_info_path / 'vendor')
         model = '-'.join(value for value in (product, board_model) if value)
-        serial = _read_text(device_info_path / 'serial')
+        serial = _read_serial(device_info_path / 'serial')
         uuid = _read_uuid(device_info_path / 'uuid', binary=True)
 
     return {
@@ -84,6 +92,6 @@ def get_stable_hardware_id(
         return _read_uuid(dmi_path / 'product_uuid') or _read_text(
             dmi_path / 'product_serial'
         )
-    return _read_uuid(device_info_path / 'uuid', binary=True) or _read_text(
+    return _read_uuid(device_info_path / 'uuid', binary=True) or _read_serial(
         device_info_path / 'serial'
     )
