@@ -619,7 +619,7 @@
                             <description>RSRP in dBm (integer only, no unit suffix)</description>
                           </valueHelp>
                           <constraint>
-                            <validator name="numeric" argument="--range -140--44"/>
+                            <regex>^-(4[4-9]|[5-9][0-9]|1[0-3][0-9]|140)$</regex>
                           </constraint>
                           <constraintErrorMessage>RSRP threshold must be an integer from -140 to -44 (do not append dBm)</constraintErrorMessage>
                         </properties>
@@ -633,7 +633,7 @@
                             <description>RSSI in dBm (integer only, no unit suffix)</description>
                           </valueHelp>
                           <constraint>
-                            <validator name="numeric" argument="--range -120--50"/>
+                            <regex>^-(5[0-9]|[6-9][0-9]|1[01][0-9]|120)$</regex>
                           </constraint>
                           <constraintErrorMessage>RSSI threshold must be an integer from -120 to -50 (do not append dBm)</constraintErrorMessage>
                         </properties>
@@ -946,7 +946,7 @@
                         <description>RSRP in dBm (integer only, no unit suffix)</description>
                       </valueHelp>
                       <constraint>
-                        <validator name="numeric" argument="--range -140--44"/>
+                        <regex>^-(4[4-9]|[5-9][0-9]|1[0-3][0-9]|140)$</regex>
                       </constraint>
                       <constraintErrorMessage>RSRP threshold must be an integer from -140 to -44 (do not append dBm)</constraintErrorMessage>
                     </properties>
@@ -960,7 +960,7 @@
                         <description>RSSI in dBm (integer only, no unit suffix)</description>
                       </valueHelp>
                       <constraint>
-                        <validator name="numeric" argument="--range -120--50"/>
+                        <regex>^-(5[0-9]|[6-9][0-9]|1[01][0-9]|120)$</regex>
                       </constraint>
                       <constraintErrorMessage>RSSI threshold must be an integer from -120 to -50 (do not append dBm)</constraintErrorMessage>
                     </properties>
