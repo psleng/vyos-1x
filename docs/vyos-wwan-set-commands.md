@@ -29,20 +29,29 @@ interfaces
   └── wwan <wwanN>
         ├── description <text>                            # max 255 characters
         ├── disable                                       # valueless — full teardown (delete-style, purges history); interface recreated when removed
-        ├── mtu <576-1500>                                # fallback MTU if carrier does not provide one (default: 1420); also ceiling
+        ├── mtu <68-1500>                                # fallback MTU if carrier does not provide one (default: 1420); also ceiling
         ├── vrf <name>                                    # VRF instance name
         ├── connection-mode <always-on|connect-on-demand|dial-on-demand>
         ├── network-mode <auto|lte|5g|5g-only|3g|2g>      # modem-level RAT selection
         ├── network-time                                  # valueless — set system clock from NITZ at registration
         ├── default-route-metric <0-255>                  # metric for the FSM-installed carrier default route(s) (default: 220; keeps cellular below a wired primary — failover/static=1, DHCP=210)
         │
-        ├── ip                                            # IPv4 routing parameters (kernel-level)
+        ├── ip                                            # IPv4 routing parameters (standard VyOS interface options; ARP/broadcast knobs are inert on a point-to-point cellular bearer)
         │     ├── adjust-mss <bytes|clamp-mss-to-pmtu>
+        │     ├── arp-cache-timeout <1-86400>             # ARP cache entry timeout, s (default: 30)
+        │     ├── disable-arp-filter                      # valueless
         │     ├── disable-forwarding                      # valueless
+        │     ├── enable-arp-accept                       # valueless
+        │     ├── enable-arp-announce                     # valueless
+        │     ├── enable-arp-ignore                       # valueless
+        │     ├── enable-directed-broadcast               # valueless
+        │     ├── enable-proxy-arp                        # valueless
+        │     ├── proxy-arp-pvlan                         # valueless
         │     └── source-validation <strict|loose|disable>
         │
-        ├── ipv6                                          # IPv6 routing parameters (kernel-level)
+        ├── ipv6                                          # IPv6 routing parameters (reduced set; FSM owns RA/SLAAC/DAD + link-local on wwanN)
         │     ├── adjust-mss <bytes|clamp-mss-to-pmtu>
+        │     ├── base-reachable-time <1-86400>           # NDP base reachable time, s (default: 30)
         │     ├── disable-forwarding                      # valueless
         │     ├── source-validation <strict|loose|disable>
         │     └── management-address                      # FSM-stamped <prefix>::host-id/128 on wwanN (opt-in; auto-permits TCP 443 + ICMPv6 + ESTABLISHED)
@@ -379,6 +388,14 @@ set interfaces wwan wwan0 mtu 1420
 ### IPv4 Options
 
 > **If unconfigured:** VyOS kernel defaults — forwarding enabled, source-validation disabled.
+>
+> `ip` inherits the **full standard VyOS interface option set**.  Beyond the
+> three shown below, the ARP / broadcast knobs `arp-cache-timeout`,
+> `disable-arp-filter`, `enable-arp-accept`, `enable-arp-announce`,
+> `enable-arp-ignore`, `enable-proxy-arp`, `proxy-arp-pvlan` and
+> `enable-directed-broadcast` are all accepted but are **inert on a
+> point-to-point L3 PDN bearer** — there is no ARP on the cellular link — so
+> leave them unset.
 
 ```
 set interfaces wwan wwan0 ip adjust-mss '1380'
@@ -389,9 +406,24 @@ set interfaces wwan wwan0 ip source-validation 'strict'
 ### IPv6 Options
 
 > **If unconfigured:** VyOS kernel defaults — forwarding enabled, source-validation disabled.
-> DAD and `address no-default-link-local` are omitted — DAD is meaningless on
-> a /128 point-to-point carrier link, and suppressing the fe80:: link-local
-> would break IPv6 NDP routing on wwan.
+>
+> `ipv6` exposes a deliberately **reduced** subset of the standard VyOS
+> interface options — only the knobs actually honoured on a cellular bearer:
+> `adjust-mss`, `disable-forwarding`, `source-validation`,
+> `base-reachable-time`, plus the FSM-specific `management-address` subtree
+> (documented below).
+>
+> The following standard options are **intentionally not exposed** on `wwanN`,
+> because the modem terminates 3GPP SLAAC internally and the WWAN FSM is the
+> sole owner of the interface's RA/SLAAC/DAD sysctls and link-local
+> (`_harden_wwan_ipv6_sysctls`):
+>
+> - the host-SLAAC address modes `address autoconf` / `eui64` /
+>   `interface-identifier` — host SLAAC can never complete on the bearer;
+> - the DAD knobs `accept-dad` / `dup-addr-detect-transmits` — the FSM
+>   overrides these on every commit, so they would do nothing;
+> - `address no-default-link-local` — the FSM manages the `wwanN` link-local;
+>   removing it would break IPv6 NDP.
 
 ```
 set interfaces wwan wwan0 ipv6 adjust-mss '1380'
@@ -1269,7 +1301,7 @@ set interfaces wwan wwan0 failed-retry escalation-threshold 3
 
 ### Carrier / Network Scan
 
-> **If unconfigured:** Network-mode auto (all technologies), network scanning disabled, scan timeout 60 s.
+> **If unconfigured:** Network-mode auto (all technologies), network scanning disabled, scan timeout 180 s.
 >
 > **Network-mode vs Per-SIM bands:**
 > The `network-mode` setting (see Basic Commands above) controls which radio
@@ -1338,7 +1370,7 @@ set interfaces wwan wwan0 failed-retry escalation-threshold 3
 > - If both a friendly name **and** `network-scan enable` are set, a single scan serves both purposes.
 
 ```
-set interfaces wwan wwan0 network-scan timeout 60
+set interfaces wwan wwan0 network-scan timeout 180
 ```
 
 #### Band Name Reference
@@ -1566,7 +1598,7 @@ set interfaces wwan wwan0 logging sink 'both'
 | `failed-retry escalation-threshold` | `failed_retry_escalation_threshold` | `3` |
 | `network-mode` | `network_mode` | `auto` |
 | `mtu` | `mtu` | `1420` |
-| `network-scan timeout` | `network_scan_timeout` | `60` |
+| `network-scan timeout` | `network_scan_timeout` | `180` |
 | `timeouts connection` | `connection_timeout` | `120` |
 | `timeouts registration` | `registration_timeout` | `180` |
 | `timeouts normal-monitoring-interval` | `normal_monitoring_interval` | `30` |

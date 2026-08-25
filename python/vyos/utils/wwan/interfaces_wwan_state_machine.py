@@ -436,6 +436,14 @@ class ModemStateMachine:
         self.last_failover_time = 0          # Timestamp of last SIM failover
         self.failover_count = 0              # Number of failovers since last stable connection
         self.lifetime_failover_count = 0     # Total failovers since boot (never reset by stable connection)
+        # SNMP failover-table detail (surfaced in _build_status)
+        self.failback_count = 0              # Failbacks to primary since boot
+        self.last_failover_from_slot = 0     # Slot the last failover/failback switched FROM
+        self.last_failover_to_slot = 0       # Slot the last failover/failback switched TO
+        self.last_failover_reason = ''       # Reason string for the last failover/failback
+        # Last emitted alert/event (SNMP IfLastEventTime/Description)
+        self._last_event_time = 0
+        self._last_event_description = ''
         self.failover_cooldown_seconds = 600 # 10 minute cooldown between failovers (carrier-friendly)
         self.max_failovers_before_backoff = 3 # Max failovers before extended backoff
         self.failover_backoff_seconds = 3600 # 1 hour extended backoff after max failovers (carrier-friendly)
@@ -979,6 +987,10 @@ class ModemStateMachine:
 
     def _emit_alert(self, alert_type: str, severity: str, message: str, **extra_fields):
         """Emit a normalized alert envelope through the manager-owned alert bus."""
+        # Record last event for SNMP IfLastEventTime/Description (regardless of
+        # whether an alert emitter is currently attached).
+        self._last_event_time = time.time()
+        self._last_event_description = message
         if not self.alert_emitter:
             return
 
@@ -7241,6 +7253,12 @@ class ModemStateMachine:
             trigger: Code path that triggered the event.
             extra_data: Optional dict of additional context.
         """
+        # Surface last failover/failback detail for the SNMP failover table.
+        self.last_failover_from_slot = from_sim or 0
+        self.last_failover_to_slot = to_sim or 0
+        self.last_failover_reason = reason or ''
+        if event_type == 'failback':
+            self.failback_count += 1
         event = {
             'timestamp': datetime.datetime.utcnow().isoformat() + 'Z',
             'event_type': event_type,
@@ -13567,6 +13585,13 @@ class ModemStateMachine:
         status['interface_number'] = self.interface_number
         status['interface_name'] = getattr(self, 'interface_name', f"wwan{self.interface_number}")
         status['fsm_state'] = current_state
+        # Time in current FSM state (approximate — sampled when status is built).
+        if getattr(self, '_uptime_tracked_state', None) != current_state:
+            self._uptime_tracked_state = current_state
+            self._uptime_state_since = time.time()
+        status['fsm_state_uptime_seconds'] = int(time.time() - getattr(self, '_uptime_state_since', time.time()))
+        status['last_event_time'] = self._last_event_time or 0
+        status['last_event_description'] = self._last_event_description or ''
         status['modem_path'] = self.modem_path or ''
         status['bearer_path'] = self.bearer_path or ''
         status['config_applied'] = bool(self.config)
@@ -14234,6 +14259,15 @@ class ModemStateMachine:
         status['reconnect_attempt_count'] = self.reconnect_attempt_count
         status['reconnect_success_count'] = self.reconnect_success_count
         status['sim_switch_count'] = self.sim_switch_count
+        status['failover_in_progress'] = self._sim_failover_in_progress
+        status['failback_count'] = self.failback_count
+        status['last_failover_from_slot'] = self.last_failover_from_slot
+        status['last_failover_to_slot'] = self.last_failover_to_slot
+        status['last_failover_reason'] = self.last_failover_reason
+        status['failover_cooldown_remain'] = (
+            max(0, int(self.failover_cooldown_seconds - (time.time() - self.last_failover_time)))
+            if self.last_failover_time else 0
+        )
         status['total_bearer_downtime_seconds'] = self.total_bearer_downtime_seconds
         # A bearer-downtime window must never be reported while the bearer is
         # actually up: if a reconnect path forgot to call _record_bearer_up(),
@@ -14283,6 +14317,7 @@ class ModemStateMachine:
                 status[f"{prefix}_pdp_type"] = slot.get('pdp_type', 'ipv4v6')
                 apn_val = slot.get('apn', '')
                 status[f"{prefix}_apn"] = apn_val.get('name', '') if isinstance(apn_val, dict) else str(apn_val)
+                status[f"{prefix}_auth_type"] = apn_val.get('auth_type', 'none') if isinstance(apn_val, dict) else 'none'
                 status[f"{prefix}_preferred_carrier"] = slot.get('preferred_carrier', '')
                 status[f"{prefix}_data_limit_bytes"] = slot.get('data_limit_size', 0)
                 status[f"{prefix}_data_limit_action"] = slot.get('data_limit_action', 'none')

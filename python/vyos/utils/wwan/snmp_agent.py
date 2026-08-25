@@ -23,7 +23,7 @@ using the net-snmp ``pass_persist`` protocol.
 
 Wire-up in /etc/snmp/snmpd.conf::
 
-    pass_persist .1.3.6.1.4.1.44641.1  /usr/libexec/vyos/wwan-snmp-agent
+    pass_persist .1.3.6.1.4.1.44641.1  /usr/bin/igos-wwan-snmp-agent
 
 Tables implemented (read-only):
 
@@ -33,7 +33,7 @@ Tables implemented (read-only):
 * igosWwanBearerTable    (.1.3.6.1.4.1.44641.1.1.4.1)
 * igosWwanFailoverTable  (.1.3.6.1.4.1.44641.1.1.5.1)
 
-PD and IP-passthrough tables are reserved (not yet populated).
+The PD table is reserved (not yet populated).
 """
 
 from __future__ import annotations
@@ -124,10 +124,21 @@ NETWORK_MODE_MAP = {
 AUTH_TYPE_MAP = {'none': 1, 'pap': 2, 'chap': 3, 'both': 4}
 PDP_TYPE_MAP  = {'ipv4': 1, 'ipv6': 2, 'ipv4v6': 3}
 
-APN_SOURCE_MAP = {
-    'configured': 1, 'last-connected': 2, 'last_connected': 2,
-    'android-db': 3, 'android_db': 3, 'network': 4, 'network-assigned': 4,
-    'network_assigned': 4, 'unknown': 5,
+# Failover reason string → code (mirrors IGOS-WWAN-MIB failover reason enum and
+# snmp_traps.FAILOVER_REASON_MAP; also covers the FSM's own reason strings).
+FAILOVER_REASON_MAP = {
+    'none': 0, '': 0,
+    'signal-loss': 1, 'signal_loss': 1,
+    'registration-lost': 2, 'registration_lost': 2,
+    'registration-flap': 3, 'registration_flap': 3,
+    'connect-failure': 4, 'connect_failure': 4, 'connectivity_failure': 4,
+    'data-limit-reached': 5, 'data_limit_reached': 5, 'usage_limit': 5,
+    'data_limit_failover': 5,
+    'hardware-error': 6, 'hardware_error': 6,
+    'manual': 7, 'manual_switch': 7, 'runtime_slot_change': 7,
+    'failback': 8, 'primary-recovered': 8, 'primary_recovered': 8,
+    'primary_sim_available': 8, 'failback_to_primary': 8,
+    'sim-absent': 9, 'sim_absent': 9, 'sim_missing': 9,
 }
 
 
@@ -198,12 +209,22 @@ class _StatusFetcher:
 
     def get(self) -> Dict[int, Dict[str, Any]]:
         snapshot: Dict[int, Dict[str, Any]] = {}
-        client = self._get_client()
+        try:
+            client = self._get_client()
+        except Exception as exc:
+            # FSM/D-Bus unreachable — drop the client and return an empty
+            # snapshot (no rows) so the next refresh reconnects cleanly.
+            logger.debug('WWAN client init failed: %s', exc)
+            self._client = None
+            return snapshot
         for if_num, name, if_index in _discover_interfaces():
             try:
                 status = client.get_status(if_num)
             except Exception as exc:
                 logger.debug('get_status(%s) failed: %s', if_num, exc)
+                # Drop the (possibly stale) client so the next refresh rebuilds
+                # the D-Bus connection instead of serving empty tables forever.
+                self._client = None
                 status = {}
             status.setdefault('_ifname', name)
             status.setdefault('_ifindex', if_index)
@@ -274,7 +295,6 @@ def _build_sim_rows(if_index: int, st: Dict[str, Any]) -> Iterable[Tuple[Tuple[i
             opname = _str(st.get('operator_name')) or _str(st.get(f'sim_slot_{slot}_operator'))
             opcode = _str(st.get('operator_code')) or _str(st.get(f'sim_slot_{slot}_mcc_mnc'))
             apn = _str(st.get('connected_apn'))
-            apn_src = _enum(st.get('apn_source'), APN_SOURCE_MAP, 5)
             reg_state = _enum(st.get('registration_state'), REG_STATE_MAP, 0)
             roaming = _bool_truthvalue(reg_state == REG_STATE_MAP['roaming'])
         else:
@@ -283,26 +303,22 @@ def _build_sim_rows(if_index: int, st: Dict[str, Any]) -> Iterable[Tuple[Tuple[i
             opname = _str(st.get(f'sim_slot_{slot}_operator'))
             opcode = _str(st.get(f'sim_slot_{slot}_mcc_mnc'))
             apn = ''
-            apn_src = APN_SOURCE_MAP['unknown']
             reg_state = REG_STATE_MAP['unknown']
             roaming = _bool_truthvalue(False)
 
         roaming_allowed = _bool_truthvalue(
-            not bool(st.get(f'sim_slot_{slot}_roaming_disabled', False))
-        )
-        msisdn = _str(st.get(f'sim_slot_{slot}_msisdn')) or (
-            _str(st.get('modem_phone_number')) if is_active else ''
+            str(st.get(f'sim_slot_{slot}_roaming', 'enabled')).strip().lower() != 'disabled'
         )
 
         # Data-limit fields: live config exposes only the active slot;
         # inactive slot values fall back to per-slot config keys if present.
         if is_active:
-            dl_size   = _int(st.get('active_data_limit_size'), 0)
-            dl_action = _enum(st.get('active_data_limit_action'), DATA_LIMIT_ACTION_MAP, 0)
-            dl_billing = _int(st.get('active_data_limit_billing_date'), 1)
+            dl_size   = _int(st.get('data_limit_bytes'), 0)
+            dl_action = _enum(st.get('data_limit_action'), DATA_LIMIT_ACTION_MAP, 0)
+            dl_billing = _int(st.get('data_limit_billing_date'), 1)
             dl_used_cycle = _int(st.get('cumulative_bytes'), 0)
         else:
-            dl_size   = _int(st.get(f'sim_slot_{slot}_data_limit_size'), 0)
+            dl_size   = _int(st.get(f'sim_slot_{slot}_data_limit_bytes'), 0)
             dl_action = _enum(st.get(f'sim_slot_{slot}_data_limit_action'), DATA_LIMIT_ACTION_MAP, 0)
             dl_billing = _int(st.get(f'sim_slot_{slot}_data_limit_billing_date'), 1)
             dl_used_cycle = _int(st.get(f'sim_slot_{slot}_cycle_bytes'), 0)
@@ -318,21 +334,18 @@ def _build_sim_rows(if_index: int, st: Dict[str, Any]) -> Iterable[Tuple[Tuple[i
         yield base + (3, *idx),  T_INT,       str(_bool_truthvalue(is_active))
         yield base + (4, *idx),  T_STRING,    iccid
         yield base + (5, *idx),  T_STRING,    imsi
-        yield base + (6, *idx),  T_STRING,    msisdn
+        # col 6 (igosWwanSimMsisdn) removed from MIB
         yield base + (7, *idx),  T_STRING,    opcode
         yield base + (8, *idx),  T_STRING,    opname
         yield base + (9, *idx),  T_INT,       str(roaming)
         yield base + (10, *idx), T_INT,       str(roaming_allowed)
         yield base + (11, *idx), T_STRING,    apn
-        yield base + (12, *idx), T_INT,       str(apn_src)
+        # col 12 (igosWwanSimApnSource) removed from MIB
         yield base + (13, *idx), T_INT,       str(_enum(st.get(f'sim_slot_{slot}_auth_type'), AUTH_TYPE_MAP, 1))
         yield base + (14, *idx), T_INT,       str(_enum(st.get(f'sim_slot_{slot}_pdp_type'), PDP_TYPE_MAP, 3))
         yield base + (15, *idx), T_INT,       str(reg_state)
-        yield base + (16, *idx), T_COUNTER64, str(_int(st.get(f'sim_slot_{slot}_connect_attempts'), 0))
-        yield base + (17, *idx), T_COUNTER64, str(_int(st.get(f'sim_slot_{slot}_connect_failures'), 0))
-        yield base + (18, *idx), T_STRING,    _now_ts_to_dateandtime(st.get(f'sim_slot_{slot}_last_connect_time'))
-        yield base + (19, *idx), T_STRING,    _now_ts_to_dateandtime(st.get(f'sim_slot_{slot}_last_disconnect_time'))
-        yield base + (20, *idx), T_STRING,    _str(st.get(f'sim_slot_{slot}_last_disconnect_cause'))
+        # cols 16-19 (per-slot connect counters/timestamps) removed from MIB
+        yield base + (20, *idx), T_STRING,    _str(st.get('last_disconnect_reason') if is_active else st.get(f'sim_slot_{slot}_last_disconnect_cause'))
         yield base + (21, *idx), T_COUNTER64, str(dl_size)
         yield base + (22, *idx), T_INT,       str(dl_action)
         yield base + (23, *idx), T_COUNTER64, str(dl_used_cycle)
@@ -388,6 +401,11 @@ def _build_bearer_row(if_index: int, st: Dict[str, Any]) -> Iterable[Tuple[Tuple
     v6 = _str(st.get('ipv6_address'))
     v4_type = 1 if v4 else 0
     v6_type = 2 if v6 else 0
+    # FSM publishes DNS as comma-joined strings (ipv4_dns / ipv6_dns); split
+    # into primary/secondary for the two bearer DNS columns (v4 preferred).
+    v4_dns = [d.strip() for d in _str(st.get('ipv4_dns')).split(',') if d.strip()]
+    v6_dns = [d.strip() for d in _str(st.get('ipv6_dns')).split(',') if d.strip()]
+    dns_list = v4_dns or v6_dns
     yield base + (1, if_index),  T_INT,       str(_bool_truthvalue(connected))
     yield base + (2, if_index),  T_INT,       str(v4_type)
     yield base + (3, if_index),  T_STRING,    v4
@@ -396,8 +414,8 @@ def _build_bearer_row(if_index: int, st: Dict[str, Any]) -> Iterable[Tuple[Tuple
     yield base + (6, if_index),  T_STRING,    v6
     yield base + (7, if_index),  T_INT,       str(_int(st.get('ipv6_prefix_length'), 128 if v6 else 0))
     yield base + (8, if_index),  T_STRING,    _str(st.get('ipv6_gateway'))
-    yield base + (9, if_index),  T_STRING,    _str(st.get('dns_primary') or st.get('ipv4_dns_primary'))
-    yield base + (10, if_index), T_STRING,    _str(st.get('dns_secondary') or st.get('ipv4_dns_secondary'))
+    yield base + (9, if_index),  T_STRING,    (dns_list[0] if len(dns_list) > 0 else '')
+    yield base + (10, if_index), T_STRING,    (dns_list[1] if len(dns_list) > 1 else '')
     yield base + (11, if_index), T_STRING,    _now_ts_to_dateandtime(st.get('last_connect_time'))
     yield base + (12, if_index), T_TIMETICKS, str(_int(st.get('session_duration_seconds'), 0) * 100)
     yield base + (13, if_index), T_COUNTER64, str(_int(st.get('session_rx_bytes'), 0))
@@ -406,18 +424,18 @@ def _build_bearer_row(if_index: int, st: Dict[str, Any]) -> Iterable[Tuple[Tuple
 
 def _build_failover_row(if_index: int, st: Dict[str, Any]) -> Iterable[Tuple[Tuple[int, ...], str, str]]:
     base = FAILOVER_ENTRY
-    yield base + (1, if_index),  T_INT,       str(_bool_truthvalue(not st.get('sim_failover_disabled', False)))
-    yield base + (2, if_index),  T_INT,       str(_bool_truthvalue(not st.get('sim_failback_disabled', False)))
+    yield base + (1, if_index),  T_INT,       str(_bool_truthvalue(st.get('sim_failover_enabled', True)))
+    yield base + (2, if_index),  T_INT,       str(_bool_truthvalue(st.get('sim_failback_enabled', True)))
     yield base + (3, if_index),  T_INT,       str(_bool_truthvalue(st.get('failover_in_progress', False)))
     yield base + (4, if_index),  T_INT,       str(_int(st.get('last_failover_from_slot'), 0))
     yield base + (5, if_index),  T_INT,       str(_int(st.get('last_failover_to_slot'), 0))
-    yield base + (6, if_index),  T_INT,       str(_int(st.get('last_failover_reason_code'), 0))
+    yield base + (6, if_index),  T_INT,       str(_enum(st.get('last_failover_reason'), FAILOVER_REASON_MAP, 0))
     yield base + (7, if_index),  T_STRING,    _now_ts_to_dateandtime(st.get('last_failover_time'))
     yield base + (8, if_index),  T_COUNTER64, str(_int(st.get('failover_count'), 0))
     yield base + (9, if_index),  T_COUNTER64, str(_int(st.get('failback_count'), 0))
     yield base + (10, if_index), T_INT,       str(_int(st.get('failover_cooldown_remain'), 0))
-    yield base + (11, if_index), T_INT,       str(_int(st.get('registration_flap_count'), 0))
-    yield base + (12, if_index), T_INT,       str(_int(st.get('registration_flap_window_seconds'), 360))
+    yield base + (11, if_index), T_INT,       str(_int(st.get('registration_flap_events_in_window'), 0))
+    yield base + (12, if_index), T_INT,       str(_int(st.get('registration_flap_window_configured'), 360))
 
 
 def _build_oid_tree(snapshot: Dict[int, Dict[str, Any]]) -> List[Tuple[Tuple[int, ...], str, str]]:

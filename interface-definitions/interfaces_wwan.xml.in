@@ -3,7 +3,10 @@
      Replaces the upstream VyOS WWAN tree.  Legacy per-interface apn,
      authentication, connect-on-demand, address, and dhcp-options nodes are
      removed — those functions are handled per-SIM by the enhanced service.
-     PD is a direct child for FSM-native IPv6 prefix delegation (no dhcp6c).
+     ipv6-bridging copies the carrier-assigned IPv6 prefix (typically /64)
+     verbatim to a single downstream LAN interface (FSM-native, NOT DHCPv6
+     PD); real DHCPv6 prefix delegation uses the standard dhcpv6-options
+     nodes (handled by dhcp6c).
 -->
 <interfaceDefinition>
   <node name="interfaces">
@@ -36,16 +39,21 @@
           #include <include/interface/mirror.xml.i>
           #include <include/interface/ipv4-options.xml.i>
           <!-- ── IPv6 options (WWAN-specific) ──────────────────────────────
-               Reconstructed from include/interface/ipv6-options.xml.i and
-               ipv6-options-with-nd.xml.i but WITHOUT the host-SLAAC address
-               modes: `address autoconf`, `address eui64` and
-               `address interface-identifier`.  The Telit modem terminates
-               3GPP SLAAC internally and never relays a Router Advertisement
-               onto wwanN, so host SLAAC can never complete; the WWAN FSM
-               installs the carrier /128 from ModemManager Ip6Config and is
-               the sole owner of all RA/SLAAC/DAD sysctls (see
-               _harden_wwan_ipv6_sysctls).  Exposing those nodes would
-               advertise a capability the hardware cannot deliver. -->
+               A deliberately REDUCED subset of the standard VyOS interface
+               IPv6 options — only the knobs actually honoured on wwanN.  The
+               modem terminates 3GPP SLAAC internally, never relays a Router
+               Advertisement onto wwanN, and the WWAN FSM is the sole owner of
+               the interface's RA/SLAAC/DAD sysctls and link-local (see
+               _harden_wwan_ipv6_sysctls, which forces accept_ra / autoconf /
+               accept_dad / dad_transmits and a stable-privacy link-local).
+               Intentionally NOT exposed, because they would do nothing or
+               fight the FSM:
+                 - host-SLAAC address modes `address autoconf`, `address eui64`,
+                   `address interface-identifier` (host SLAAC can never complete);
+                 - `accept-dad` / `dup-addr-detect-transmits` (the FSM overrides
+                   these on every commit — see WWANIf.set_ipv6_dad_* guards);
+                 - `address no-default-link-local` (the FSM manages the wwanN
+                   link-local; removing it would break IPv6 NDP). -->
           <node name="ipv6">
             <properties>
               <help>IPv6 routing parameters</help>
@@ -54,17 +62,7 @@
               #include <include/interface/adjust-mss.xml.i>
               #include <include/interface/base-reachable-time.xml.i>
               #include <include/interface/disable-forwarding.xml.i>
-              #include <include/interface/ipv6-accept-dad.xml.i>
-              #include <include/interface/ipv6-dup-addr-detect-transmits.xml.i>
               #include <include/interface/source-validation.xml.i>
-              <node name="address">
-                <properties>
-                  <help>IPv6 address configuration modes</help>
-                </properties>
-                <children>
-                  #include <include/interface/ipv6-address-no-default-link-local.xml.i>
-                </children>
-              </node>
             </children>
           </node>
           <!-- ── IPv6 management-address (FSM-stamped <prefix>::1 on wwanN) ── -->
