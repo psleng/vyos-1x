@@ -1,0 +1,58 @@
+<?xml version="1.0"?>
+<interfaceDefinition>
+  <node name="show">
+    <children>
+      <node name="service">
+        <properties>
+          <help>Show service information</help>
+        </properties>
+        <children>
+          <node name="cloud">
+            <properties>
+              <help>Show cloud service information</help>
+            </properties>
+            <children>
+              <leafNode name="status">
+                <properties>
+                  <help>Show cloud service status</help>
+                </properties>
+                <command>${vyos_op_scripts_dir}/cloud.py show</command>
+              </leafNode>
+            </children>
+          </node>
+        </children>
+      </node>
+    </children>
+  </node>
+  <node name="set">
+    <children>
+      <node name="service">
+        <properties>
+          <help>Set operational service options</help>
+        </properties>
+        <children>
+          <node name="cloud">
+            <properties>
+              <help>Set cloud service operational information</help>
+            </properties>
+            <children>
+              <tagNode name="register">
+                <properties>
+                  <help>Register cloud</help>
+                  <constraint>
+                    <regex>[0-9]{6}</regex>
+                  </constraint>
+                  <constraintErrorMessage>Registration code must be exactly 6 digits</constraintErrorMessage>
+                  <completionHelp>
+                    <path>One time registration code</path>
+                  </completionHelp>
+                </properties>
+                <command>${vyos_op_scripts_dir}/cloud.py set_registration --code "${5}"</command>
+              </tagNode>
+            </children>
+          </node>
+        </children>
+      </node>
+    </children>
+  </node>
+</interfaceDefinition>

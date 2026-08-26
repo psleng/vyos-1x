@@ -8,17 +8,10 @@
           <priority>1280</priority>
         </properties>
         <children>
-          <leafNode name="registration">
+          <leafNode name="enabled">
             <properties>
-              <help>Cloud registration code</help>
-              <valueHelp>
-                <format>txt</format>
-                <description>6-digit registration code provided by PerleCloud</description>
-              </valueHelp>
-              <constraint>
-                <regex>[0-9]{6}</regex>
-              </constraint>
-              <constraintErrorMessage>Registration code must be exactly 6 digits</constraintErrorMessage>
+              <help>Enable cloud service</help>
+              <valueless/>
             </properties>
           </leafNode>
           <leafNode name="override-device-url">
