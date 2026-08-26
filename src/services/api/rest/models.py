@@ -22,6 +22,7 @@ from enum import Enum
 from typing import List
 from typing import Union
 from typing import Dict
+from typing import Optional
 from typing import Self
 
 from pydantic import BaseModel
@@ -237,6 +238,7 @@ class GenerateModel(ApiModel):
 
 class ShowModel(ApiModel):
     op: StrictStr
+    format: Optional[StrictStr] = None
     path: List[StrictStr]
 
     class Config:
@@ -349,33 +351,41 @@ responses = {
 class AuthModel(ApiModel):
     op: StrictStr
     service: StrictStr
-    hostname: StrictStr = None
-    relay_state: StrictStr = None
-    session: StrictStr = None
-    secret: StrictStr = None
+    hostname: Optional[StrictStr] = None
+    relay_state: Optional[StrictStr] = None
+    session: Optional[StrictStr] = None
+    secret: Optional[StrictStr] = None
+    sid: Optional[StrictStr] = None
+    sids: Optional[List[StrictStr]] = None
 
     @model_validator(mode='after')
     def check_required_fields(self) -> Self:
-        if self.service != 'saml':
+        if self.service not in ('saml', 'cloud'):
             raise ValueError(f"Unsupported auth service '{self.service}'")
-        if self.op == 'login' and not self.hostname:
+        if self.service == 'saml' and self.op == 'login' and not self.hostname:
             raise ValueError("Field 'hostname' is required when op is 'login'")
-        if self.op == 'validate':
+        if self.service == 'saml' and self.op == 'validate':
             if not self.session:
                 raise ValueError("Field 'session' is required when op is 'validate'")
             if not self.secret:
                 raise ValueError("Field 'secret' is required when op is 'validate'")
+        if self.service == 'cloud' and self.op == 'validate' and not self.sid:
+            raise ValueError("Field 'sid' is required when op is 'validate'")
+        if self.service == 'cloud' and self.op == 'validate_batch' and not self.sids:
+            raise ValueError("Field 'sids' is required when op is 'validate_batch'")
         return self
 
     class Config:
         json_schema_extra = {
             'example': {
                 'key': 'id_key',
-                'service': 'saml',
-                'op': 'login | validate',
+                'service': 'saml | cloud',
+                'op': 'login | validate | validate_batch | jwks',
                 'hostname': 'device hostname or IP',
                 'relay_state': 'https://redirect-after-auth',
                 'session': 'session token',
                 'secret': 'session secret',
+                'sid': 'PerleCLOUD proxy session ID',
+                'sids': ['PerleCLOUD proxy session IDs'],
             }
         }
