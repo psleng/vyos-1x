@@ -15,6 +15,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import os
+import base64
 
 from glob import glob
 from sys import exit
@@ -38,6 +39,7 @@ from vyos.utils.network import is_wireguard_key_pair
 from vyos.utils.process import call
 from vyos import ConfigError
 from vyos import airbag
+from vyos import tpm
 airbag.enable()
 
 
@@ -94,8 +96,31 @@ def verify(wireguard):
     verify_bond_bridge_member(wireguard)
     verify_mirror_redirect(wireguard)
 
-    if 'private_key' not in wireguard:
+    private_keys = [k for k in wireguard.keys() if 'private_key' in k]
+    if not private_keys:
         raise ConfigError('Wireguard private-key not defined')
+
+    if len(private_keys) != 1:
+        raise ConfigError('Wireguard private-key defined multiple times')
+
+    if 'private_key_file' in wireguard:
+        # Validation done here instead of in xml constraint due to permission issues
+        # File can technically exist, but the constraint is checked without sudo permission
+        if not os.path.exists(wireguard['private_key_file']):
+            raise ConfigError('Wireguard private-key-file cannot be located')
+        with open(wireguard['private_key_file']) as f:
+            wireguard['private_key'] = f.read().strip()
+        del wireguard['private_key_file']
+
+    elif 'private_key_tpm' in wireguard:
+        if tpm.tpm_exist:
+            save_file = wireguard['private_key_tpm']
+            pub = save_file + '.pub'
+            priv = save_file + '.priv'
+            reread_key = base64.b64encode(tpm.read_tpm_key_file(pub, priv)).decode("utf-8")
+            # wireguard['private_key'] = wireguard['private_key_tpm']
+            wireguard['private_key'] = reread_key
+            del wireguard['private_key_tpm']
 
     if 'port' in wireguard and 'port_changed' in wireguard:
         listen_port = int(wireguard['port'])

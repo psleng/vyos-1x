@@ -309,6 +309,33 @@
                 </children>
                 <command>${vyos_op_scripts_dir}/pki.py generate_pki --pki-type wireguard --key</command>
               </node>
+              <tagNode name="key-pair-tpm">
+                <properties>
+                  <help>Generate WireGuard public/private key-pair, sealing private key via tpm in specified file.pub and file.priv</help>
+                  <completionHelp>
+                    <list>&lt;filename&gt;</list>
+                  </completionHelp>
+                </properties>
+                <children>
+                  <node name="install">
+                    <properties>
+                      <help>Generate CLI commands to install WireGuard key to configuration</help>
+                    </properties>
+                    <children>
+                      <tagNode name="interface">
+                        <properties>
+                          <help>WireGuard Interface used in install command</help>
+                          <completionHelp>
+                            <path>interfaces wireguard</path>
+                          </completionHelp>
+                        </properties>
+                        <command>${vyos_op_scripts_dir}/pki.py generate_pki --pki-type wireguard --key --tpm-file "$5" --interface "$8" --install</command>
+                      </tagNode>
+                    </children>
+                  </node>
+                </children>
+                <command>${vyos_op_scripts_dir}/pki.py generate_pki --pki-type wireguard --key --tpm-file "$5"</command>
+              </tagNode>
               <node name="preshared-key">
                 <properties>
                   <help>Generate WireGuard pre-shared key</help>
