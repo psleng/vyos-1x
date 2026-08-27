@@ -41,7 +41,7 @@ def _read_text(path: Path) -> str:
 def _read_serial(path: Path) -> str:
     value = _read_text(path)
     parts = value.split('-')
-    if len(parts) == 2 and len(parts[0]) == 3 and len(parts[1]) == 12:
+    if len(parts) == 2 and len(parts[0]) == 3:
         return value
     return ''
 
