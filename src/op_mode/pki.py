@@ -907,8 +907,8 @@ def generate_wireguard_key(interface=None, install=False, tpm_file=None):
     # If tpm file is specified, seal the key using tpm_file as base name for public and private objects
     # Generated tpm_file.pub and tpm_file.priv files are required to unseal / decode private key
     if tpm_file:
-        if not tpm.tpm_enabled:
-            print('Error: tpm is not enabled!  Cannot use tpm commands!')
+        if not tpm.tpm_exist():
+            print('Error: tpm does not exist!  Cannot use tpm commands!')
             return
         else:
             tpm.write_tpm_key_file(base64.b64decode(private_key), tpm_file)

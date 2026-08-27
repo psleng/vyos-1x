@@ -113,12 +113,11 @@ def verify(wireguard):
         del wireguard['private_key_file']
 
     elif 'private_key_tpm' in wireguard:
-        if tpm.tpm_exist:
+        if tpm.tpm_exist():
             save_file = wireguard['private_key_tpm']
             pub = save_file + '.pub'
             priv = save_file + '.priv'
             reread_key = base64.b64encode(tpm.read_tpm_key_file(pub, priv)).decode("utf-8")
-            # wireguard['private_key'] = wireguard['private_key_tpm']
             wireguard['private_key'] = reread_key
             del wireguard['private_key_tpm']
 
