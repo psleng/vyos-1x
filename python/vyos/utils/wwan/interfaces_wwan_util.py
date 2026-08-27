@@ -28,6 +28,7 @@ import time
 from pathlib import Path
 
 from vyos.hardware import api as hw_api
+from vyos.system.hardware import is_x86
 from vyos.utils.wwan import interfaces_wwan_diag as wwan_diag
 
 logger = logging.getLogger(__name__)
@@ -123,15 +124,15 @@ async def _bring_interface_down_safe(interface_name: str) -> bool:
         # Check if interface exists first
         check_cmd = ["ip", "link", "show", interface_name]
         result = await asyncio.create_subprocess_exec(
-            *check_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            *check_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
         stdout, stderr = await result.communicate()
 
         if result.returncode != 0:
             # Interface doesn't exist, that's fine
-            logger.debug(f"Interface {interface_name} doesn't exist, nothing to bring down")
+            logger.debug(
+                f"Interface {interface_name} doesn't exist, nothing to bring down"
+            )
             return True
 
         # Check if interface is UP
@@ -144,9 +145,7 @@ async def _bring_interface_down_safe(interface_name: str) -> bool:
         logger.info(f"Bringing interface {interface_name} down before USB reset")
         down_cmd = ["ip", "link", "set", interface_name, "down"]
         result = await asyncio.create_subprocess_exec(
-            *down_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            *down_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
         stdout, stderr = await result.communicate()
 
@@ -154,7 +153,9 @@ async def _bring_interface_down_safe(interface_name: str) -> bool:
             logger.info(f"Interface {interface_name} brought down successfully")
             return True
         else:
-            logger.warning(f"Failed to bring interface {interface_name} down: {stderr.decode().strip()}")
+            logger.warning(
+                f"Failed to bring interface {interface_name} down: {stderr.decode().strip()}"
+            )
             return False
 
     except Exception as e:
@@ -165,21 +166,31 @@ async def _bring_interface_down_safe(interface_name: str) -> bool:
 def _is_running_in_vm() -> bool:
     """Detect if we're running in a virtual machine"""
     try:
-        # Check common VM indicators
-        vm_indicators = [
-            '/sys/class/dmi/id/product_name',
-            '/sys/class/dmi/id/sys_vendor',
-            '/sys/class/dmi/id/board_vendor'
-        ]
+        if is_x86():
+            vm_indicators = [
+                '/sys/class/dmi/id/product_name',
+                '/sys/class/dmi/id/sys_vendor',
+                '/sys/class/dmi/id/board_vendor',
+            ]
 
-        for path in vm_indicators:
-            try:
-                with open(path, 'r') as f:
-                    content = f.read().lower()
-                    if any(vm in content for vm in ['qemu', 'kvm', 'virtualbox', 'vmware', 'xen', 'hyper-v']):
-                        return True
-            except (OSError, IOError):
-                continue
+            for path in vm_indicators:
+                try:
+                    with open(path, 'r') as f:
+                        content = f.read().lower()
+                        if any(
+                            vm in content
+                            for vm in [
+                                'qemu',
+                                'kvm',
+                                'virtualbox',
+                                'vmware',
+                                'xen',
+                                'hyper-v',
+                            ]
+                        ):
+                            return True
+                except (OSError, IOError):
+                    continue
 
         # Check for VM-specific devices
         try:
@@ -193,9 +204,10 @@ def _is_running_in_vm() -> bool:
     except Exception:
         return False
 
-async def modem_reset(interface_number: int, *,
-                       prefer_hardware: bool = False,
-                       allow_nuclear: bool = True) -> bool:
+
+async def modem_reset(
+    interface_number: int, *, prefer_hardware: bool = False, allow_nuclear: bool = True
+) -> bool:
     """
     Perform hardware reset of the modem for the specified interface.
 
@@ -224,12 +236,18 @@ async def modem_reset(interface_number: int, *,
 
     # VM CRASH PROTECTION: Disable hardware resets in VMs
     if _is_running_in_vm():
-        logger.warning(f"VM detected - hardware reset disabled for safety (interface {interface_number})")
+        logger.warning(
+            f"VM detected - hardware reset disabled for safety (interface {interface_number})"
+        )
         if not allow_nuclear:
-            logger.warning("Nuclear reset disallowed for this caller (e.g. SIM "
-                           "switch) — no usable reset method in VM")
+            logger.warning(
+                "Nuclear reset disallowed for this caller (e.g. SIM "
+                "switch) — no usable reset method in VM"
+            )
             return False
-        logger.info("Using nuclear reset (ModemManager restart) instead of hardware reset")
+        logger.info(
+            "Using nuclear reset (ModemManager restart) instead of hardware reset"
+        )
         return await modem_reset_nuclear(interface_number)
 
     try:
@@ -250,20 +268,28 @@ async def modem_reset(interface_number: int, *,
 
         for label, method in standard_methods:
             if await method(interface_number):
-                logger.info(f"{label} reset successful for interface {interface_number}")
+                logger.info(
+                    f"{label} reset successful for interface {interface_number}"
+                )
                 _count_hardware_reset(interface_number)
                 return True
 
         # Nuclear option - restart ModemManager (last resort, opt-out).
         if not allow_nuclear:
-            logger.error(f"All hardware reset methods failed for interface "
-                         f"{interface_number} and nuclear reset is disallowed "
-                         "for this caller (SIM switch) — not restarting ModemManager")
+            logger.error(
+                f"All hardware reset methods failed for interface "
+                f"{interface_number} and nuclear reset is disallowed "
+                "for this caller (SIM switch) — not restarting ModemManager"
+            )
             return False
 
-        logger.warning(f"All standard reset methods failed for interface {interface_number}, trying nuclear option...")
+        logger.warning(
+            f"All standard reset methods failed for interface {interface_number}, trying nuclear option..."
+        )
         if await modem_reset_nuclear(interface_number):
-            logger.info(f"Nuclear reset (ModemManager restart) successful for interface {interface_number}")
+            logger.info(
+                f"Nuclear reset (ModemManager restart) successful for interface {interface_number}"
+            )
             return True
 
         logger.error(f"All reset methods failed for interface {interface_number}")
@@ -282,9 +308,7 @@ async def _try_modemmanager_reset(interface_number: int) -> bool:
         # Use mmcli to find and reset the modem
         find_cmd = ["mmcli", "-L"]
         result = await asyncio.create_subprocess_exec(
-            *find_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            *find_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
         stdout, stderr = await result.communicate()
 
@@ -315,14 +339,14 @@ async def _try_modemmanager_reset(interface_number: int) -> bool:
         logger.info(f"Disabling modem {modem_id} before reset")
         disable_cmd = ["mmcli", "-m", modem_id, "--disable"]
         result = await asyncio.create_subprocess_exec(
-            *disable_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            *disable_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
         stdout, stderr = await result.communicate()
 
         if result.returncode != 0:
-            logger.warning(f"Modem disable failed (continuing with reset): {stderr.decode().strip()}")
+            logger.warning(
+                f"Modem disable failed (continuing with reset): {stderr.decode().strip()}"
+            )
         else:
             logger.info(f"Modem {modem_id} disabled successfully")
             # Wait a moment for clean shutdown
@@ -332,9 +356,7 @@ async def _try_modemmanager_reset(interface_number: int) -> bool:
         logger.info(f"Resetting modem {modem_id}")
         reset_cmd = ["mmcli", "-m", modem_id, "--reset"]
         result = await asyncio.create_subprocess_exec(
-            *reset_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            *reset_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
         stdout, stderr = await result.communicate()
 
@@ -379,8 +401,10 @@ async def _try_board_modem_reset(interface_number: int) -> bool:
         # visible text: when the board GPIO reset throws, the caller silently
         # falls through to the next method (or nuclear), so a hidden reason
         # here makes a broken hardware-reset path look like "no reset method".
-        logger.warning(f"Board hardware reset failed for {modem_name} "
-                       f"({type(e).__name__}: {e})")
+        logger.warning(
+            f"Board hardware reset failed for {modem_name} "
+            f"({type(e).__name__}: {e})"
+        )
         return False
 
     # A reset pulse alone is not enough — wait until the modem is back in a
@@ -388,7 +412,9 @@ async def _try_board_modem_reset(interface_number: int) -> bool:
     if await _wait_for_modemmanager_reenumeration(interface_number):
         return True
 
-    logger.warning(f"Board hardware reset completed but modem did not re-enumerate in ModemManager for interface {interface_number}")
+    logger.warning(
+        f"Board hardware reset completed but modem did not re-enumerate in ModemManager for interface {interface_number}"
+    )
     return False
 
 
@@ -404,7 +430,7 @@ async def _try_usb_reset(interface_number: int) -> bool:
         device_patterns = [
             f"ttyUSB{interface_number}",
             f"cdc-wdm{interface_number}",
-            f"wwan{interface_number}"
+            f"wwan{interface_number}",
         ]
 
         # Find USB device associated with this interface
@@ -423,7 +449,9 @@ async def _try_usb_reset(interface_number: int) -> bool:
 
                             # Disable and re-enable device
                             try:
-                                logger.info(f"Performing USB reset on device {device_dir.name}")
+                                logger.info(
+                                    f"Performing USB reset on device {device_dir.name}"
+                                )
 
                                 # Deauthorize device (this makes USB device disappear)
                                 reset_file.write_text("0")
@@ -433,7 +461,9 @@ async def _try_usb_reset(interface_number: int) -> bool:
                                 reset_file.write_text("1")
                                 await asyncio.sleep(3)
 
-                                logger.info(f"USB reset completed for device {device_dir.name}")
+                                logger.info(
+                                    f"USB reset completed for device {device_dir.name}"
+                                )
                                 return True
                             except PermissionError:
                                 logger.debug("Permission denied for USB reset")
@@ -454,7 +484,7 @@ async def _try_gpio_reset(interface_number: int) -> bool:
             f"/sys/class/gpio/modem{interface_number}_reset",
             f"/sys/class/gpio/wwan{interface_number}_reset",
             "/sys/class/gpio/modem_reset",
-            "/sys/class/gpio/cellular_reset"
+            "/sys/class/gpio/cellular_reset",
         ]
 
         for gpio_path in gpio_paths:
@@ -495,9 +525,10 @@ async def _try_usb_power_cycle(interface_number: int) -> bool:
 
         # Try to find uhubctl
         which_result = await asyncio.create_subprocess_exec(
-            "which", "uhubctl",
+            "which",
+            "uhubctl",
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            stderr=asyncio.subprocess.PIPE,
         )
         await which_result.communicate()
 
@@ -513,9 +544,7 @@ async def _try_usb_power_cycle(interface_number: int) -> bool:
 
         # Execute power cycle
         result = await asyncio.create_subprocess_exec(
-            *uhubctl_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            *uhubctl_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
         await result.communicate()
 
@@ -540,7 +569,7 @@ def get_interface_device_path(interface_number: int) -> str:
         f"/dev/ttyUSB{interface_number}",
         f"/dev/cdc-wdm{interface_number}",
         f"/dev/wwan{interface_number}",
-        f"/dev/ttyACM{interface_number}"
+        f"/dev/ttyACM{interface_number}",
     ]
 
     for pattern in common_patterns:
@@ -562,7 +591,7 @@ def get_interface_sysfs_path(interface_number: int) -> str:
     """
     common_patterns = [
         f"/sys/class/net/wwan{interface_number}",
-        f"/sys/class/wwan/wwan{interface_number}"
+        f"/sys/class/wwan/wwan{interface_number}",
     ]
 
     for pattern in common_patterns:
@@ -604,7 +633,9 @@ async def wait_for_interface_ready(interface_number: int, timeout: int = 30) -> 
     return False
 
 
-async def _wait_for_modemmanager_reenumeration(interface_number: int, timeout: int = 60) -> bool:
+async def _wait_for_modemmanager_reenumeration(
+    interface_number: int, timeout: int = 60
+) -> bool:
     """Wait until ModemManager sees the modem again after a hardware reset."""
     deadline = time.time() + timeout
     modem_name = f"modem{interface_number}"
@@ -618,16 +649,21 @@ async def _wait_for_modemmanager_reenumeration(interface_number: int, timeout: i
         # Then verify ModemManager can enumerate at least one modem again.
         try:
             result = await asyncio.create_subprocess_exec(
-                "mmcli", "-L",
+                "mmcli",
+                "-L",
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
             )
             stdout, stderr = await result.communicate()
             if result.returncode == 0 and "/Modem/" in stdout.decode():
-                logger.info(f"ModemManager re-detected modem after reset for {modem_name}")
+                logger.info(
+                    f"ModemManager re-detected modem after reset for {modem_name}"
+                )
                 return True
         except Exception as e:
-            logger.debug(f"ModemManager re-enumeration check failed for {modem_name}: {e}")
+            logger.debug(
+                f"ModemManager re-enumeration check failed for {modem_name}: {e}"
+            )
 
         await asyncio.sleep(1)
 
@@ -670,16 +706,16 @@ async def modem_reset_nuclear(interface_number: int) -> bool:
     Returns:
         bool: True if ModemManager restart succeeded, False otherwise
     """
-    logger.warning(f"Attempting nuclear reset (ModemManager restart) for interface {interface_number}")
+    logger.warning(
+        f"Attempting nuclear reset (ModemManager restart) for interface {interface_number}"
+    )
 
     try:
         # Step 1: Stop ModemManager
         logger.info("Stopping ModemManager service...")
         stop_cmd = ["sudo", "systemctl", "stop", "ModemManager"]
         result = await asyncio.create_subprocess_exec(
-            *stop_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            *stop_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
         await result.communicate()
 
@@ -695,9 +731,7 @@ async def modem_reset_nuclear(interface_number: int) -> bool:
         logger.info("Starting ModemManager service...")
         start_cmd = ["sudo", "systemctl", "start", "ModemManager"]
         result = await asyncio.create_subprocess_exec(
-            *start_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            *start_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
         await result.communicate()
 
@@ -717,7 +751,9 @@ async def modem_reset_nuclear(interface_number: int) -> bool:
                 pass
             return True
 
-        logger.warning(f"Modem did not re-enumerate after ModemManager restart for interface {interface_number}")
+        logger.warning(
+            f"Modem did not re-enumerate after ModemManager restart for interface {interface_number}"
+        )
         return False
 
     except Exception as e:
