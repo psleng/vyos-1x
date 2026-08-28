@@ -22,11 +22,19 @@ shutdown, otherwise the part may momentarily drive a wrong combination onto
 the bus during the transition (RS-485 contention, RS-232 receiver glitch).
 ``serial_protocol`` therefore always:
 
-1. asserts SHUT_N=0 first (force transceiver into shutdown),
+1. drives SHUT_N to its shutdown level first (physical LOW), forcing the
+   transceiver off the bus,
 2. waits a short settle window for the driver to actually disable,
 3. programs M2/M1/M0/TERM/SLR to the new values,
-4. drives SHUT_N to the target state (1 for active protocols, 0 for
-   ``isolate``).
+4. drives SHUT_N to the target physical level (HIGH for active protocols,
+   LOW for ``isolate``).
+
+The SHUT levels above are *physical* line levels. ``set_pin`` takes a
+*logical* level and applies the pin's ``active_low``, so when the pinmap
+declares the ``_SHUT_N`` pin ``active_low`` (the natural ``_N`` convention)
+``serial_protocol`` converts each physical level to the logical value that
+yields it — otherwise enabling a protocol would drive the transceiver into
+shutdown instead of onto the bus.
 
 The pin map (:mod:`vyos.hardware.pinmap`) ships a small ``VARIANT='test'``
 stub in vyos-1x; on real hardware images vyos-build overlays a per-flavor pin
@@ -789,12 +797,29 @@ class IgosBoard(Board):
         plan, final_shut = handler.plan(proto, term=term, slr=slr)
         shut_pin = roles["shut"]  # presence guaranteed by discovery
 
+        # The SHUT sequence is defined in terms of the *physical*
+        # transceiver-enable level (physical LOW = shutdown, HIGH = active),
+        # matching the cold-boot safety check in _discover_serial_ports.
+        # set_pin(), however, takes a *logical* level and applies the pin's
+        # active_low inversion. A _SHUT_N line is naturally declared
+        # active_low (the '_N' convention), so passing the physical level
+        # straight through would invert it — driving the transceiver into
+        # shutdown when a protocol is enabled. Translate each intended
+        # physical level into the logical value set_pin() maps back to it, so
+        # the port is driven correctly regardless of the pin's polarity.
+        shut_active_low = self.PINS[shut_pin].active_low
+
+        def _shut(physical_high: int) -> int:
+            # physical_high: 1 = drive line HIGH (transceiver active),
+            #                0 = drive line LOW  (transceiver shutdown).
+            return (1 - physical_high) if shut_active_low else physical_high
+
         with self._serial_lock(port):
-            # 1. Force transceiver into shutdown BEFORE touching any
-            #    mode/term/slr pins. Universal across all transceiver
-            #    types — boards boot in shutdown and software brings
-            #    each port up explicitly here.
-            self.set_pin(shut_pin, 0)
+            # 1. Force transceiver into shutdown (drive the enable line
+            #    physically LOW) BEFORE touching any mode/term/slr pins.
+            #    Universal across all transceiver types — boards boot in
+            #    shutdown and software brings each port up explicitly here.
+            self.set_pin(shut_pin, _shut(0))
 
             # 2. Let the driver actually disable. set_pin() returns once
             #    the line is latched, so this delay is wall-clock real.
@@ -807,9 +832,10 @@ class IgosBoard(Board):
                 if pin_name is not None:
                     self.set_pin(pin_name, value)
 
-            # 4. Drive SHUT to its final level (1 for active protocols,
-            #    0 for 'isolate').
-            self.set_pin(shut_pin, final_shut)
+            # 4. Drive SHUT to its final physical level (HIGH for active
+            #    protocols, LOW for 'isolate'); _shut() applies the pin's
+            #    active_low so the physical line lands at the intended level.
+            self.set_pin(shut_pin, _shut(final_shut))
 
 
 class _NoPinmapBoard(Board):
