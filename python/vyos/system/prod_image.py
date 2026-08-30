@@ -100,6 +100,17 @@ def copy_image(version: str, dest: str):
         log('dm-verity: installing baked initrd for version image')
         copy(baked_initrd, f'{BOOT}/{version}/initrd.img')
 
+        # secure-boot: carry the detached signatures for kernel + initrd when
+        # the image was signed by 29-igos-sign-boot.binary. Best-effort --
+        # unsigned verity builds simply have no .sig files to copy.
+        for _sig_src, _sig_dst in (
+            (f'{LIVE}/initrd.img.sig', f'{BOOT}/{version}/initrd.img.sig'),
+            (f'{LIVE}/vmlinuz.sig', f'{BOOT}/{version}/vmlinuz.sig'),
+        ):
+            if Path(_sig_src).exists():
+                log(f'secure-boot: installing signature {Path(_sig_dst).name}')
+                copy(_sig_src, _sig_dst)
+
 
 def setup_default_firmware():
     default_name = "default-firmware"
@@ -125,6 +136,16 @@ def setup_default_firmware():
     if get_image_dm_verity() and Path(baked_initrd).exists():
         log('dm-verity: installing baked initrd for default-firmware')
         copy(baked_initrd, f'{BOOT}/{default_name}/initrd.img')
+
+        # secure-boot: carry detached signatures for the default-firmware
+        # kernel + initrd too (best-effort; unsigned builds have no .sig).
+        for _sig_src, _sig_dst in (
+            (f'{LIVE}/initrd.img.sig', f'{BOOT}/{default_name}/initrd.img.sig'),
+            (f'{LIVE}/vmlinuz.sig', f'{BOOT}/{default_name}/vmlinuz.sig'),
+        ):
+            if Path(_sig_src).exists():
+                log(f'secure-boot: installing signature {Path(_sig_dst).name}')
+                copy(_sig_src, _sig_dst)
 
     return default_name
 

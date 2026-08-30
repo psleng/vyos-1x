@@ -159,6 +159,10 @@ FILE_ROOTFS_SRC: str = '/usr/lib/live/mount/medium/live/filesystem.squashfs'
 # dm-verity: sibling of FILE_ROOTFS_SRC on the live medium; carries the root
 # hash baked by 28-igos-dm-verity.binary (the squashfs-internal initrd does not).
 FILE_INITRD_SRC: str = '/usr/lib/live/mount/medium/live/initrd.img'
+# secure-boot: detached signature of the kernel on the live medium (sibling of
+# the baked initrd), written by 29-igos-sign-boot.binary. Present only on signed
+# builds; the initrd signature is FILE_INITRD_SRC + '.sig'.
+FILE_KERNEL_SIG_SRC: str = '/usr/lib/live/mount/medium/live/vmlinuz.sig'
 ISO_DOWNLOAD_PATH: str = ''
 
 external_download_script: str = f'{base_dir}/simple-download.py'
@@ -1107,6 +1111,19 @@ def install_image() -> None:
             copy(FILE_INITRD_SRC,
                  f'{DIR_DST_ROOT}/boot/{image_name}/initrd.img')
 
+            # secure-boot: carry the detached signatures for kernel + initrd when
+            # the image was signed by 29-igos-sign-boot.binary. Best-effort --
+            # unsigned verity builds simply have no .sig files to copy.
+            for _sig_src, _sig_dst in (
+                (f'{FILE_INITRD_SRC}.sig',
+                 f'{DIR_DST_ROOT}/boot/{image_name}/initrd.img.sig'),
+                (FILE_KERNEL_SIG_SRC,
+                 f'{DIR_DST_ROOT}/boot/{image_name}/vmlinuz.sig'),
+            ):
+                if Path(_sig_src).exists():
+                    print(f'Installing boot signature {Path(_sig_dst).name}')
+                    copy(_sig_src, _sig_dst)
+
         # PSL - copy the whole DTB tree (any vendor subdir: ti/, perle/, ...)
         if Path(f"{DIR_KERNEL_SRC}/dtb").exists():
             print('Copying DTB files')
@@ -1174,6 +1191,18 @@ def install_image() -> None:
             print('Installing dm-verity baked initrd for default-firmware')
             copy(FILE_INITRD_SRC,
                  f'{DIR_DST_ROOT}/boot/{default_image_name}/initrd.img')
+
+            # secure-boot: carry detached signatures for the default-firmware
+            # kernel + initrd too (best-effort; unsigned builds have no .sig).
+            for _sig_src, _sig_dst in (
+                (f'{FILE_INITRD_SRC}.sig',
+                 f'{DIR_DST_ROOT}/boot/{default_image_name}/initrd.img.sig'),
+                (FILE_KERNEL_SIG_SRC,
+                 f'{DIR_DST_ROOT}/boot/{default_image_name}/vmlinuz.sig'),
+            ):
+                if Path(_sig_src).exists():
+                    print(f'Installing boot signature {Path(_sig_dst).name}')
+                    copy(_sig_src, _sig_dst)
 
         grub.version_add(default_image_name, DIR_DST_ROOT)
         grub.set_factory_default(default_image_name, DIR_DST_ROOT)
