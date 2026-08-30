@@ -10,13 +10,18 @@ from shutil import copy, copytree, rmtree
 from vyos.system import grub
 from vyos.system import image
 from vyos.template import render
+from vyos.flavor import get_image_dm_verity
 
 
 # -------------------------------
 # Constants
 # -------------------------------
 DEFAULT_BOOT_VARS: dict[str, str] = {
-    'timeout': '0',
+    # TEMP (dm-verity bring-up): show the GRUB menu for 10s so an older image can
+    # be selected if a verity image fails to boot. Restore to '0' (and drop
+    # timeout_style) to hide/suppress the menu again after testing.
+    'timeout': '10',
+    'timeout_style': 'menu',
     'console_type': 'tty',
     'console_num': '0',
     'console_speed': '115200',
@@ -86,6 +91,15 @@ def copy_image(version: str, dest: str):
     copy(f'{LIVE}/filesystem.squashfs',
          f'{BOOT}/{version}/{version}.squashfs')
 
+    # dm-verity: the root hash is baked ONLY into the live medium's initrd
+    # (28-igos-dm-verity.binary), not the squashfs-internal /boot copied above.
+    # Re-source the version initrd from /live so the fail-closed verity-open
+    # hook finds its params. No-op for non-verity images (identical initrd).
+    baked_initrd = f'{LIVE}/initrd.img'
+    if get_image_dm_verity() and Path(baked_initrd).exists():
+        log('dm-verity: installing baked initrd for version image')
+        copy(baked_initrd, f'{BOOT}/{version}/initrd.img')
+
 
 def setup_default_firmware():
     default_name = "default-firmware"
@@ -105,6 +119,12 @@ def setup_default_firmware():
 
     copy(f'{LIVE}/filesystem.squashfs',
          f'{BOOT}/{default_name}/{default_name}.squashfs')
+
+    # dm-verity: baked initrd for the factory default-firmware entry too.
+    baked_initrd = f'{LIVE}/initrd.img'
+    if get_image_dm_verity() and Path(baked_initrd).exists():
+        log('dm-verity: installing baked initrd for default-firmware')
+        copy(baked_initrd, f'{BOOT}/{default_name}/initrd.img')
 
     return default_name
 

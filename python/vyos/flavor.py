@@ -67,3 +67,16 @@ def get_image_serial_console(fname=flavor_file):
     console_num = get_flavor_data(fname=fname).get('console_num', '')
     console_speed = get_flavor_data(fname=fname).get('console_speed', '')
     return (console_type, console_num, console_speed)
+
+def get_image_dm_verity(fname=flavor_file):
+    """
+    Get whether the image flavor seals its root squashfs with dm-verity.
+
+    Args:
+        file (str): path to the flavor file
+
+    Returns:
+        bool: True if the image was built with dm_verity = true, else False
+        (also False for images/flavors that predate the flag).
+    """
+    return bool(get_flavor_data(fname=fname).get('dm_verity', False))

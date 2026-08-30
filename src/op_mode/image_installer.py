@@ -53,6 +53,7 @@ from vyos.defaults import base_dir
 from vyos.defaults import directories
 from vyos.defaults import activation_hint
 from vyos.flavor import get_image_serial_console
+from vyos.flavor import get_image_dm_verity
 from vyos.remote import download
 from vyos.system import disk
 from vyos.system import grub
@@ -155,6 +156,9 @@ DIR_ISO_MOUNT: str = f'{DIR_INSTALLATION}/iso_src'
 DIR_DST_ROOT: str = f'{DIR_INSTALLATION}/disk_dst'
 DIR_KERNEL_SRC: str = '/boot'
 FILE_ROOTFS_SRC: str = '/usr/lib/live/mount/medium/live/filesystem.squashfs'
+# dm-verity: sibling of FILE_ROOTFS_SRC on the live medium; carries the root
+# hash baked by 28-igos-dm-verity.binary (the squashfs-internal initrd does not).
+FILE_INITRD_SRC: str = '/usr/lib/live/mount/medium/live/initrd.img'
 ISO_DOWNLOAD_PATH: str = ''
 
 external_download_script: str = f'{base_dir}/simple-download.py'
@@ -163,9 +167,12 @@ external_latest_image_url_script: str = f'{base_dir}/latest-image-url.py'
 (flavor_sercon_type, flavor_sercon_num, flavor_sercon_speed) = get_image_serial_console()
 
 # default boot variables
-# PSL - timeout = 0 in combination with timeout_style-hidden to suppress grub menu/timeout
+# PSL - TEMP (dm-verity bring-up): show the GRUB menu for 10s so an older image
+# can be selected if a verity image fails to boot. Restore timeout '0' and drop
+# timeout_style (or set it 'hidden') to suppress the menu again after testing.
 DEFAULT_BOOT_VARS: dict[str, str] = {
-    'timeout': '0',
+    'timeout': '10',
+    'timeout_style': 'menu',
     'console_type': 'tty',
     'console_num': flavor_sercon_num,
     'console_speed': flavor_sercon_speed,
@@ -1092,6 +1099,14 @@ def install_image() -> None:
         copy(FILE_ROOTFS_SRC,
              f'{DIR_DST_ROOT}/boot/{image_name}/{image_name}.squashfs')
 
+        # dm-verity: re-source the version initrd from the live medium (baked
+        # with the root hash by 28-igos-dm-verity.binary); the /boot copytree
+        # above carries only the squashfs-internal initrd. No-op for non-verity.
+        if get_image_dm_verity() and Path(FILE_INITRD_SRC).exists():
+            print('Installing dm-verity baked initrd for image')
+            copy(FILE_INITRD_SRC,
+                 f'{DIR_DST_ROOT}/boot/{image_name}/initrd.img')
+
         # PSL - copy the whole DTB tree (any vendor subdir: ti/, perle/, ...)
         if Path(f"{DIR_KERNEL_SRC}/dtb").exists():
             print('Copying DTB files')
@@ -1153,6 +1168,12 @@ def install_image() -> None:
 
         copy(FILE_ROOTFS_SRC,
             f'{DIR_DST_ROOT}/boot/{default_image_name}/default-firmware.squashfs')
+
+        # dm-verity: baked initrd for the factory default-firmware entry too.
+        if get_image_dm_verity() and Path(FILE_INITRD_SRC).exists():
+            print('Installing dm-verity baked initrd for default-firmware')
+            copy(FILE_INITRD_SRC,
+                 f'{DIR_DST_ROOT}/boot/{default_image_name}/initrd.img')
 
         grub.version_add(default_image_name, DIR_DST_ROOT)
         grub.set_factory_default(default_image_name, DIR_DST_ROOT)
