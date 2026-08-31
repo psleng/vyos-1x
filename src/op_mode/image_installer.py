@@ -26,6 +26,7 @@ from shutil import rmtree
 from shutil import copytree
 from shutil import disk_usage
 from glob import glob
+from tempfile import TemporaryDirectory
 from sys import exit
 from os import environ
 from os import readlink
@@ -1310,6 +1311,33 @@ def migrate_known_hosts(target_dir: str):
         _mkdir_and_copy_file(known_hosts_file, target_known_hosts)
 
 
+def _image_dm_verity(squashfs_file: str) -> bool | None:
+    """Read the dm-verity flavor flag from an image's own squashfs.
+
+    The GRUB entry for a newly added image must reflect THAT image's dm-verity
+    setting, not the running system's, so upgrades and downgrades between
+    verity and non-verity images seal (or unseal) correctly. dm-verity is
+    integrity protection, not encryption, so the squashfs mounts read-only and
+    stays readable offline even for sealed images.
+
+    Returns None if the flag cannot be determined, letting the caller fall back
+    to the running image's flavor.
+    """
+    if not Path(squashfs_file).exists():
+        return None
+    try:
+        with TemporaryDirectory() as squashfs_mounted:
+            if not disk.partition_mount(squashfs_file, squashfs_mounted, 'squashfs'):
+                return None
+            try:
+                flavor_json = f'{squashfs_mounted}/usr/share/vyos/flavor.json'
+                return get_image_dm_verity(fname=flavor_json)
+            finally:
+                disk.partition_umount(squashfs_file)
+    except Exception:
+        return None
+
+
 @compat.grub_cfg_update
 def add_image(image_path: str, vrf: str = None, username: str = '',
               password: str = '', no_prompt: bool = False, force: bool = False) -> None:
@@ -1469,7 +1497,14 @@ def add_image(image_path: str, vrf: str = None, username: str = '',
         cleanup([str(iso_path)])
 
         # add information about version
-        grub.version_add(image_name, root_dir)
+        #
+        # dm-verity: seal/unseal the GRUB entry to match the IMAGE BEING ADDED,
+        # not the running one, by reading dm_verity from the new image's own
+        # flavor.json inside its just-copied squashfs. Falls back to the running
+        # image's flavor (version_add default) if it cannot be read.
+        target_dm_verity = _image_dm_verity(
+            f'{root_dir}/boot/{image_name}/{image_name}.squashfs')
+        grub.version_add(image_name, root_dir, dm_verity=target_dm_verity)
         if set_as_default:
             # PSL - grub.set_default(image_name, root_dir)
             grub.set_current_default(image_name, root_dir)

@@ -50,7 +50,7 @@ def get_flavor_data(fname=flavor_file):
     is an implementation detail and may change in the future, while the interface
     of this module will stay the same.
     """
-    return read_json(flavor_file, {})
+    return read_json(fname, {})
 
 def get_image_serial_console(fname=flavor_file):
     """
