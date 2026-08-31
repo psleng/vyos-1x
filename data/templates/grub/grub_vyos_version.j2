@@ -29,6 +29,7 @@ menuentry "{{ version_name }}" --id {{ version_uuid }} {
     else
         set boot_opts="${boot_opts} ${console_opts}"
     fi
-    linux "/boot/{{ version_name }}/vmlinuz" ${boot_opts}
+    devicetree "/boot/{{ version_name }}/dtb/perle/${prod_id}-${model}.dtb"
+    linux "/boot/{{ version_name }}/vmlinux" ${boot_opts}
     initrd "/boot/{{ version_name }}/initrd.img"
 }
