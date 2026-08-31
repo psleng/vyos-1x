@@ -103,15 +103,6 @@ def verify(wireguard):
     if len(private_keys) != 1:
         raise ConfigError('Wireguard private-key defined multiple times')
 
-    if 'private_key_file' in wireguard:
-        # Validation done here instead of in xml constraint due to permission issues
-        # File can technically exist, but the constraint is checked without sudo permission
-        if not os.path.exists(wireguard['private_key_file']):
-            raise ConfigError('Wireguard private-key-file cannot be located')
-        with open(wireguard['private_key_file']) as f:
-            wireguard['private_key'] = f.read().strip()
-        del wireguard['private_key_file']
-
     elif 'private_key_tpm' in wireguard:
         if tpm.tpm_exist():
             save_file = wireguard['private_key_tpm']

@@ -59,11 +59,6 @@
               #include <include/constraint/wireguard-keys.xml.i>
             </properties>
           </leafNode>
-          <leafNode name="private-key-file">
-            <properties>
-              <help>Path to file holding private key</help>
-            </properties>
-          </leafNode>
           <leafNode name="private-key-tpm">
             <properties>
               <help>File name with .pub and .priv files containing tpm sealed key</help>
