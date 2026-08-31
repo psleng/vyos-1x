@@ -20,6 +20,7 @@ from pathlib import Path
 
 default_pcrs = ['0','2','4','7']
 tpm_handle = 0x81000000
+tpm_key_save_dir = "/config/auth/wireguard/"
 
 def init_tpm(clear=False):
     """
@@ -108,7 +109,7 @@ def read_tpm_key_file(public_obj, private_obj):
             raise Exception('read_tpm_key: Failed to re-create primary key')
 
         load_context_file = os.path.join(tpm_dir, 'load.ctx')
-        code, output = rc_cmd(f'tpm2_load -C {primary_context_file} -u {public_obj} -r {private_obj} -c {load_context_file}')
+        code, output = rc_cmd(f'tpm2_load -C {primary_context_file} -u {tpm_key_save_dir + public_obj} -r {tpm_key_save_dir + private_obj} -c {load_context_file}')
         if code != 0:
             print(output)
             raise Exception('read_tpm_key: Failed to load object')
@@ -137,10 +138,10 @@ def write_tpm_key_file(key, save_file):
         with open(key_file, 'wb') as f:
             f.write(key)
 
-        public_obj = save_file + '.pub'
-        private_obj = save_file + '.priv'
-        dir_path = Path(os.path.dirname(save_file))
-        dir_path.mkdir(parents=True, exist_ok=True)
+        public_obj = tpm_key_save_dir + save_file + '.pub'
+        private_obj = tpm_key_save_dir + save_file + '.priv'
+        dir_path = Path(tpm_key_save_dir + save_file)
+        dir_path.parent.mkdir(parents=True, exist_ok=True)
         code, output = rc_cmd(
             f'tpm2_create -g sha256 \
             -u {public_obj} -r {private_obj} \

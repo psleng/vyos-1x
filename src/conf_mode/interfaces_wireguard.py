@@ -108,6 +108,12 @@ def verify(wireguard):
             save_file = wireguard['private_key_tpm']
             pub = save_file + '.pub'
             priv = save_file + '.priv'
+            # We will save all tpm sealed private keys in /config/auth/wireguard
+            save_dir = "/config/auth/wireguard/"
+
+            if not os.path.exists(save_dir + pub) or not os.path.exists(save_dir + priv):
+                raise ConfigError('Wireguard private-key-tpm .pub/.priv files cannot be located')
+
             reread_key = base64.b64encode(tpm.read_tpm_key_file(pub, priv)).decode("utf-8")
             wireguard['private_key'] = reread_key
             del wireguard['private_key_tpm']

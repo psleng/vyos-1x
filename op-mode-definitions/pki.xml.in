@@ -311,7 +311,7 @@
               </node>
               <tagNode name="key-pair-tpm">
                 <properties>
-                  <help>Generate WireGuard public/private key-pair, sealing private key via tpm in specified file.pub and file.priv</help>
+                  <help>Generate WireGuard public/private key-pair, sealing private key via tpm in specified file.pub and file.priv, saved in /config/auth/wireguard</help>
                   <completionHelp>
                     <list>&lt;filename&gt;</list>
                   </completionHelp>

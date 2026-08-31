@@ -330,9 +330,12 @@ def install_wireguard_key(interface, private_key, public_key, tpm_enabled=None):
 
     # Check if we are running in a config session - if yes, we can directly write to the CLI
     if tpm_enabled:
+        private_key_path = "/config/auth/wireguard/"
         install_into_config(
             conf, [f"interfaces wireguard {interface} private-key-tpm '{private_key}'"]
         )
+        print(f"Sealed private-key .pub file created: '{private_key_path}{private_key}.pub'")
+        print(f"Sealed private-key .priv file created: '{private_key_path}{private_key}.priv'")
     else:
         install_into_config(
             conf, [f"interfaces wireguard {interface} private-key '{private_key}'"]
