@@ -5,7 +5,7 @@
   </properties>
   <children>
     #include <include/serial/service/utils/idle-timeout.xml.i>
-    #include <include/serial/service/utils/modem.xml.i>
+    #include <include/serial/service/utils/modem-in-out.xml.i>
     #include <include/serial/service/utils/banner.xml.i>
     #include <include/serial/service/utils/motd.xml.i>
     #include <include/serial/service/utils/session-timeout.xml.i>

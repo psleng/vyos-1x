@@ -7,7 +7,7 @@
     #include <include/serial/service/utils/idle-timeout.xml.i>
     #include <include/serial/service/utils/keepalive.xml.i>
     #include <include/serial/service/utils/session-timeout.xml.i>
-    #include <include/serial/service/utils/modem.xml.i>
+    #include <include/serial/service/utils/modem-in-out.xml.i>
     #include <include/serial/service/utils/transmit-string-all.xml.i>
     <node name="client">
       <properties>
