@@ -52,6 +52,7 @@
                   #include <include/serial/service/vmodem-profileable.xml.i>
                   #include <include/serial/service/ppp.xml.i>
                   #include <include/serial/service/slip.xml.i>
+                  #include <include/serial/service/printer.xml.i>
                 </children>
               </tagNode>
             </children>
@@ -107,6 +108,7 @@
               #include <include/serial/service/vmodem-not-profileable.xml.i>
               #include <include/serial/service/ppp.xml.i>
               #include <include/serial/service/slip.xml.i>
+              #include <include/serial/service/printer.xml.i>
             </children>
           </tagNode>
         </children>
