@@ -19,10 +19,11 @@
 
 from argparse import ArgumentParser, Namespace
 from pathlib import Path
-from shutil import rmtree
+from shutil import copy, disk_usage, rmtree
 from sys import exit
 from typing import Optional, Literal, TypeAlias, get_args
 
+from vyos.flavor import get_image_dm_verity
 from vyos.system import disk, grub, image, compat
 from vyos.utils.io import ask_yes_no, select_entry
 
@@ -32,6 +33,9 @@ DELETE_IMAGE_LIST_MSG: str = 'The following images are installed:'
 DELETE_IMAGE_PROMPT_MSG: str = 'Select an image to delete:'
 MSG_DELETE_IMAGE_RUNNING: str = 'Currently running image cannot be deleted; reboot into another image first'
 MSG_DELETE_IMAGE_DEFAULT: str = 'Default image cannot be deleted; set another image as default first'
+FACTORY_IMAGE_NAME: str = 'default-firmware'
+SET_FACTORY_LIST_MSG: str = 'The following images are available:'
+SET_FACTORY_PROMPT_MSG: str = 'Select an image to copy as the factory-default image:'
 
 ConsoleType: TypeAlias = Literal['tty', 'ttyS', 'ttyAMA']
 
@@ -149,6 +153,101 @@ def set_image(image_name: Optional[str] = None,
 
 
 @compat.grub_cfg_update
+def set_factory_image(image_name: Optional[str] = None,
+                      no_prompt: bool = False) -> None:
+    """Copy an installed image over the factory-default (recovery) image.
+
+    Produces a standalone, configuration-less copy (squashfs + kernel + initrd,
+    no rw/ overlay) so the factory image survives deletion of the source image
+    and localized corruption. Its dm-verity verdict follows the SOURCE image
+    (image-intrinsic): a verity source yields a verity factory image, a
+    non-verity source a non-verity one.
+    """
+    available_images: list[str] = [name for name in grub.version_list()
+                                   if name != FACTORY_IMAGE_NAME]
+    format_selection = define_format(available_images)
+    if image_name is None:
+        if no_prompt:
+            exit('An image name is required to set the factory-default image')
+        image_name = select_entry(available_images,
+                                  SET_FACTORY_LIST_MSG,
+                                  SET_FACTORY_PROMPT_MSG,
+                                  format_selection)
+    if image_name not in available_images:
+        exit(f'The image "{image_name}" cannot be found')
+
+    persistence_storage: str = disk.find_persistence()
+    if not persistence_storage:
+        exit('Persistence storage cannot be found')
+
+    source_dir: Path = Path(f'{persistence_storage}/boot/{image_name}')
+    source_squashfs: Path = source_dir / f'{image_name}.squashfs'
+    if not source_squashfs.is_file():
+        exit(f'The image "{image_name}" has no squashfs at {source_squashfs}')
+
+    if (not no_prompt and not ask_yes_no(
+            f'This copies "{image_name}" over the factory-default (recovery) '
+            'image, without any configuration. Continue?', default=False)):
+        exit()
+
+    # Build the new copy alongside the current factory image and swap it in only
+    # at the end, so a failed copy never destroys the existing recovery image.
+    needed: int = source_squashfs.stat().st_size + 100 * 1024**2
+    free: int = disk_usage(persistence_storage).free
+    if free < needed:
+        exit(f'Not enough free space for the factory image: need ~'
+             f'{needed // 1024**2} MiB, have {free // 1024**2} MiB')
+
+    # dm-verity verdict of the SOURCE image (image-intrinsic). The running
+    # image's own squashfs is busy (loop-mounted), so read the running flavor
+    # directly; otherwise mount the source squashfs and read its flavor.
+    if image_name == image.get_running_image():
+        source_dm_verity = get_image_dm_verity()
+    else:
+        source_dm_verity = image.image_dm_verity(source_squashfs.as_posix())
+
+    factory_dir: Path = Path(f'{persistence_storage}/boot/{FACTORY_IMAGE_NAME}')
+    staging_dir: Path = Path(
+        f'{persistence_storage}/boot/.{FACTORY_IMAGE_NAME}.new')
+
+    print(f'Copying "{image_name}" as the factory-default image...')
+    try:
+        if staging_dir.exists():
+            rmtree(staging_dir)
+        staging_dir.mkdir(parents=True)
+        # Boot artifacts only -- squashfs, kernel, initrd and their detached
+        # signatures. Deliberately NO rw/ overlay, so the factory image carries
+        # no configuration.
+        copy(source_squashfs.as_posix(),
+             (staging_dir / f'{FACTORY_IMAGE_NAME}.squashfs').as_posix())
+        for artifact in ('vmlinuz', 'vmlinuz.sig',
+                         'initrd.img', 'initrd.img.sig'):
+            source_artifact: Path = source_dir / artifact
+            if source_artifact.is_file():
+                copy(source_artifact.as_posix(),
+                     (staging_dir / artifact).as_posix())
+        # Swap into place: drop the old factory image, promote the staged copy.
+        if factory_dir.exists():
+            rmtree(factory_dir)
+        staging_dir.rename(factory_dir)
+    except Exception as err:
+        rmtree(staging_dir, ignore_errors=True)
+        exit(f'Unable to build the factory-default image: {err}')
+
+    # Point the factory boot entry at the new image, carrying the SOURCE's
+    # dm-verity verdict so a verity source boots verity (and non-verity boots
+    # plainly).
+    try:
+        grub.version_add(FACTORY_IMAGE_NAME, persistence_storage,
+                         dm_verity=source_dm_verity)
+        grub.set_factory_default(FACTORY_IMAGE_NAME, persistence_storage)
+    except Exception as err:
+        exit(f'Factory image copied but updating its boot entry failed: {err}')
+
+    print(f'"{image_name}" is now the factory-default image')
+
+
+@compat.grub_cfg_update
 def rename_image(name_old: str, name_new: str) -> None:
     """Rename installed image
 
@@ -236,8 +335,9 @@ def parse_arguments() -> Namespace:
     """
     parser: ArgumentParser = ArgumentParser(description='Manage system images')
     parser.add_argument('--action',
-                        choices=['delete', 'set', 'set_console_type',
-                                 'rename', 'list', 'list_console_types'],
+                        choices=['delete', 'set', 'set_factory',
+                                 'set_console_type', 'rename', 'list',
+                                 'list_console_types'],
                         required=True,
                         help='action to perform with an image')
     parser.add_argument('--no-prompt', action='store_true',
@@ -264,6 +364,8 @@ if __name__ == '__main__':
             delete_image(args.image_name, args.no_prompt)
         if args.action == 'set':
             set_image(args.image_name)
+        if args.action == 'set_factory':
+            set_factory_image(args.image_name, args.no_prompt)
         if args.action == 'set_console_type':
             set_console_type(args.console_type)
         if args.action == 'rename':

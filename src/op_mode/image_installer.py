@@ -1324,17 +1324,26 @@ def _image_dm_verity(squashfs_file: str) -> bool | None:
     to the running image's flavor.
     """
     if not Path(squashfs_file).exists():
+        print(f'WARNING: dm-verity: image squashfs {squashfs_file} not found; '
+              'cannot read its verity flag (grub entry falls back to the '
+              'running image flavor)')
         return None
     try:
         with TemporaryDirectory() as squashfs_mounted:
             if not disk.partition_mount(squashfs_file, squashfs_mounted, 'squashfs'):
+                print(f'WARNING: dm-verity: could not mount {squashfs_file} to '
+                      'read its verity flag (grub entry falls back to the '
+                      'running image flavor)')
                 return None
             try:
                 flavor_json = f'{squashfs_mounted}/usr/share/vyos/flavor.json'
                 return get_image_dm_verity(fname=flavor_json)
             finally:
                 disk.partition_umount(squashfs_file)
-    except Exception:
+    except Exception as e:
+        print(f'WARNING: dm-verity: error reading verity flag from '
+              f'{squashfs_file}: {e} (grub entry falls back to the running '
+              'image flavor)')
         return None
 
 

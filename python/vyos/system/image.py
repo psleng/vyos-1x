@@ -100,6 +100,34 @@ def get_image_tools_version(mount_path: str) -> int:
     return system_cfg_ver
 
 
+def image_dm_verity(squashfs_file: str) -> bool | None:
+    """Read the dm-verity flag baked into an image's own squashfs.
+
+    dm-verity is integrity protection, not encryption, so a sealed squashfs
+    still mounts read-only and its ``dm_verity`` flavor flag can be read
+    offline. Callers use this so an image's GRUB entry reflects THAT image's
+    verity verdict rather than the running system's.
+
+    Returns None if it cannot be determined (file missing, busy, or
+    unreadable), leaving the fallback decision to the caller.
+    """
+    from vyos.flavor import get_image_dm_verity
+    if not Path(squashfs_file).exists():
+        return None
+    try:
+        with TemporaryDirectory() as squashfs_mounted:
+            if not disk.partition_mount(squashfs_file, squashfs_mounted,
+                                        'squashfs'):
+                return None
+            try:
+                flavor_json = f'{squashfs_mounted}/usr/share/vyos/flavor.json'
+                return get_image_dm_verity(fname=flavor_json)
+            finally:
+                disk.partition_umount(squashfs_file)
+    except Exception:
+        return None
+
+
 def get_versions(image_name: str, root_dir: str = '') -> dict[str, str]:
     """Return versions of image and image-tools
 
