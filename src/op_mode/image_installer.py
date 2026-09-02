@@ -1410,7 +1410,8 @@ def add_image(image_path: str, vrf: str = None, username: str = '',
             if Path(f"{DIR_ISO_MOUNT}/boot/dtb").exists():
                 print('Copying DTB files')
                 # copytree(f"{DIR_ISO_MOUNT}/boot/dtb", f"{root_dir}/boot/dtb", dirs_exist_ok=True)
-                copytree(f"{DIR_ISO_MOUNT}/boot/dtb", f"{root_dir}/boot/{image_name}/dtb", dirs_exist_ok=True)
+                copytree(f"{DIR_ISO_MOUNT}/boot/dtb", f"{root_dir}/boot/{image_name}/dtb", 
+                         dirs_exist_ok=True, symlinks=True)
 
         # unmount an ISO and cleanup
         cleanup([str(iso_path)])
