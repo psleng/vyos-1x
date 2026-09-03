@@ -35,6 +35,7 @@ from os import sync
 
 # PSL - access to additional routines
 from shutil import move
+from platform import machine
 # PSL - access to additional routines
 
 from json import loads
@@ -1077,13 +1078,9 @@ def install_image() -> None:
                  symlinks=True)
 
         # PSL - from previous copytree() the dtb and grub directories were copied to the
-        #       installation directory, so we can remove them so the installation looks
-        #       EXACTLY like an iso installation using "add system image <isoname>"
-        tmppath = Path(f'{DIR_DST_ROOT}/boot/{image_name}/dtb')
-        if tmppath.exists():
-            print(f"Pruning unused {image_name}/dtb directory")
-            rmtree(tmppath, ignore_errors=True)
-
+        #       installation directory, so we can leave the release specific DTBs but
+        #       remove the grub directory so the installation looks EXACTLY like 
+        #       an iso installation using "add system image <iso_name>"
         tmppath = Path(f'{DIR_DST_ROOT}/boot/{image_name}/grub')
         if tmppath.exists():
             print(f"Pruning unused {image_name}/grub directory")
@@ -1092,12 +1089,12 @@ def install_image() -> None:
         copy(FILE_ROOTFS_SRC,
              f'{DIR_DST_ROOT}/boot/{image_name}/{image_name}.squashfs')
 
-        # PSL - copy the whole DTB tree (any vendor subdir: ti/, perle/, ...)
-        if Path(f"{DIR_KERNEL_SRC}/dtb").exists():
-            print('Copying DTB files')
-            copytree(
-                f"{DIR_KERNEL_SRC}/dtb", f"{DIR_DST_ROOT}/boot/dtb", dirs_exist_ok=True
-            )
+        # PSL - no longer copy the whole DTB tree (any vendor subdir: ti/, perle/, ...) to global /boot/dtb
+        # if Path(f"{DIR_KERNEL_SRC}/dtb").exists():
+        #     print('Copying DTB files')
+        #     copytree(
+        #         f"{DIR_KERNEL_SRC}/dtb", f"{DIR_DST_ROOT}/boot/dtb", dirs_exist_ok=True
+        #    )
 
         # copy saved config data and SSH keys
         # owner restored on copy of config data by chmod_2775, above
@@ -1141,10 +1138,10 @@ def install_image() -> None:
             dirs_exist_ok=True,
             symlinks=True)
 
-        tmppath = Path(f'{DIR_DST_ROOT}/boot/{default_image_name}/dtb')
-        if tmppath.exists():
-            print(f"Pruning unused {default_image_name}/dtb directory")
-            rmtree(tmppath, ignore_errors=True)
+        # tmppath = Path(f'{DIR_DST_ROOT}/boot/{default_image_name}/dtb')
+        # if tmppath.exists():
+        #     print(f"Pruning unused {default_image_name}/dtb directory")
+        #     rmtree(tmppath, ignore_errors=True)
 
         tmppath = Path(f'{DIR_DST_ROOT}/boot/{default_image_name}/grub')
         if tmppath.exists():
@@ -1408,12 +1405,13 @@ def add_image(image_path: str, vrf: str = None, username: str = '',
         move(f'{root_dir}/boot/{image_name}/filesystem.squashfs',
              f'{root_dir}/boot/{image_name}/{image_name}.squashfs')
 
-        # PSL - copy the whole DTB tree (any vendor subdir: ti/, perle/, ...)
-        if Path(f"{DIR_ISO_MOUNT}/boot/dtb").exists():
-            print('Copying DTB files')
-            copytree(
-                f"{DIR_ISO_MOUNT}/boot/dtb", f"{root_dir}/boot/dtb", dirs_exist_ok=True
-            )
+        # PSL - for arm64 - copy the whole DTB tree (any vendor subdir: ti/, perle/, ...) to firmware directory
+        if machine() == 'aarch64':
+            if Path(f"{DIR_ISO_MOUNT}/boot/dtb").exists():
+                print('Copying DTB files')
+                # copytree(f"{DIR_ISO_MOUNT}/boot/dtb", f"{root_dir}/boot/dtb", dirs_exist_ok=True)
+                copytree(f"{DIR_ISO_MOUNT}/boot/dtb", f"{root_dir}/boot/{image_name}/dtb", 
+                         dirs_exist_ok=True, symlinks=True)
 
         # unmount an ISO and cleanup
         cleanup([str(iso_path)])

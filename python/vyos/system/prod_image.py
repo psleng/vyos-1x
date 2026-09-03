@@ -5,7 +5,8 @@
 import os
 import argparse
 from pathlib import Path
-from shutil import copy, copytree, rmtree
+from shutil import copytree, rmtree, move
+from platform import machine
 
 from vyos.system import grub
 from vyos.system import image
@@ -28,6 +29,7 @@ ROOTFS = "/"
 ISO = "/mnt/iso"
 
 SRC_DTB = f"{ISO}/boot/dtb"
+SRC_EFI = f"{ISO}/boot/grub/arm64-efi"
 LIVE = f"{ISO}/live"
 BOOT = f"{TARGET_P2}/boot"
 DST_DTB = f"{TARGET_P2}/boot/dtb"
@@ -58,7 +60,10 @@ def setup_grub(root_dir: str) -> None:
     grub_cfg_menu = f'{root_dir}/{grub.CFG_VYOS_MENU}'
 
     render(grub_cfg_main, grub.TMPL_GRUB_MAIN, {})
-    grub.common_write(root_dir)
+    # if X86_64, we add the serial/terminal modules
+    if machine() == "x86_64":
+        grub.common_write(root_dir)
+
     grub.vars_write(grub_cfg_vars, DEFAULT_BOOT_VARS)
     grub.modules_write(grub_cfg_modules, [])
     grub.write_cfg_ver(1, root_dir)
@@ -74,16 +79,23 @@ def copy_image(version: str, dest: str):
 
     log(f"Copying image for version: {version}")
 
-    copytree(f"{ROOTFS}boot/",
+    # copytree(f"{ROOTFS}boot/",
+    copytree(f"{LIVE}/",
              f"{BOOT}/{version}/",
              dirs_exist_ok=True,
              symlinks=True)
 
+    log(f"Copying DTB files for version: {version}")
+    copytree(f"{SRC_DTB}",
+             f"{BOOT}/{version}/dtb",
+             dirs_exist_ok=True,
+             symlinks=True)
+
     # prune unwanted dirs
-    safe_rmtree(Path(f'{BOOT}/{version}/dtb'))
+    # safe_rmtree(Path(f'{BOOT}/{version}/dtb'))
     safe_rmtree(Path(f'{BOOT}/{version}/grub'))
 
-    copy(f'{LIVE}/filesystem.squashfs',
+    move(f'{BOOT}/{version}/filesystem.squashfs',
          f'{BOOT}/{version}/{version}.squashfs')
 
 
@@ -95,15 +107,21 @@ def setup_default_firmware():
 
     log("Creating default firmware image")
 
-    copytree(f"{ROOTFS}boot/",
+    # copytree(f"{ROOTFS}boot/",
+    copytree(f"{LIVE}/",
              f"{BOOT}/{default_name}/",
              dirs_exist_ok=True,
              symlinks=True)
 
-    safe_rmtree(Path(f'{BOOT}/{default_name}/dtb'))
+    copytree(f"{SRC_DTB}",
+             f"{BOOT}/{default_name}/dtb",
+             dirs_exist_ok=True,
+             symlinks=True)
+
+    # safe_rmtree(Path(f'{BOOT}/{default_name}/dtb'))
     safe_rmtree(Path(f'{BOOT}/{default_name}/grub'))
 
-    copy(f'{LIVE}/filesystem.squashfs',
+    move(f'{BOOT}/{default_name}/filesystem.squashfs',
          f'{BOOT}/{default_name}/{default_name}.squashfs')
 
     return default_name
@@ -130,11 +148,12 @@ def main():
     # persistence config
     Path(f'{TARGET_P2}/persistence.conf').write_text('/ union\n')
 
-    # copy DTBs (whole tree; any vendor subdir: ti/, perle/, ...). Guarded so a
+    # Removed copying DTBs (whole tree; any vendor subdir: ti/, perle/, ...). Guarded so a
     # build without a /boot/dtb (e.g. a non-arm image) is a no-op, not a crash.
-    if Path(SRC_DTB).exists():
-        log("Copying DTB files")
-        copytree(SRC_DTB, DST_DTB, dirs_exist_ok=True)
+	# We now keep the local copy of DTBs per firmware directory keep in sync with firmware 
+    # if Path(SRC_DTB).exists():
+    #    log("Copying DTB files")
+    #    copytree(SRC_DTB, DST_DTB, dirs_exist_ok=True)
 
     # copy main image
     copy_image(version, BOOT)
@@ -158,6 +177,9 @@ def main():
     # sort inodes
     grub.sort_inodes(f'{TARGET_P2}/{grub.GRUB_DIR_VYOS}')
     grub.sort_inodes(f'{TARGET_P2}/{grub.GRUB_DIR_VYOS_VERS}')
+
+    log("Copying signature files for grub EFI modules")
+    copytree(f"{SRC_EFI}", f"{BOOT}/grub/arm64-efi/", dirs_exist_ok=True, symlinks=True)
 
     log("IGOS production image completed successfully.")
 

@@ -89,9 +89,11 @@ def install(drive_path: str, boot_dir: str, efi_dir: str, id: str = 'VyOS', chro
         f'{chroot_cmd} grub-install --no-floppy --recheck --target={efi_installation_arch}-efi \
             --force-extra-removable --boot-directory={boot_dir} \
             --efi-directory={efi_dir} --bootloader-id="{id}" \
-            --uefi-secure-boot --no-nvram'
+            --uefi-secure-boot --no-nvram --pubkey=/gpgkeys/perle.pubkey.bin \
+            --modules="normal loadenv regexp configfile test echo gzio linux probe search search_fs_uuid \
+                       part_gpt part_msdos ext2 fat serial terminal efi_gop pgp gcry_rsa gcry_sha256 gcry_sha512" '
+#            --uefi-secure-boot --no-nvram' 
     )
-
 
 def gen_version_uuid(version_name: str) -> str:
     """Generate unique ID from version name
