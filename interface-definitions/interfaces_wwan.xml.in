@@ -871,6 +871,12 @@
                   <valueless/>
                 </properties>
               </leafNode>
+              <leafNode name="legacy-dhcpv4-compat">
+                <properties>
+                  <help>Legacy DHCPv4 compatibility mode: use same-subnet router/netmask and suppress classless route option 121 for older clients that do not implement RFC 3442</help>
+                  <valueless/>
+                </properties>
+              </leafNode>
               <node name="router-advert">
                 <properties>
                   <help>Router Advertisement tuning for the downstream device (dnsmasq RA)</help>

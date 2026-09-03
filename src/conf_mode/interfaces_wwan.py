@@ -489,6 +489,10 @@ def _build_ip_passthrough(wwan):
         # clients that ignore DHCP option 26 / RA MTU.  Disable only for
         # PMTUD debugging.
         'mss_clamp_enabled': not _leaf_exists(ipt, 'disable_mss_clamp'),
+        # Legacy DHCPv4 compatibility mode (OFF by default): advertise a
+        # same-subnet router/netmask and suppress classless static route
+        # option 121 for older clients that ignore RFC 3442.
+        'legacy_dhcpv4_compat': _leaf_exists(ipt, 'legacy_dhcpv4_compat'),
         # Optional user-supplied DNS override (multi-value). When set,
         # these resolvers are advertised to the downstream device in
         # place of carrier-supplied DNS.

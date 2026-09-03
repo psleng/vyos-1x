@@ -93,6 +93,7 @@ interfaces
         │     ├── management-address-ipv6 <ipv6/prefix>   # FSM-provisioned mgmt v6 (default: fd00:6c61:6e30::1/64; same Policy B)
         │     ├── dns-server <ipv4|ipv6> (multi)          # override DNS advertised to downstream (precedence: user > carrier > 8.8.8.8/1.1.1.1)
         │     ├── disable-mss-clamp                       # valueless — turn off TCP MSS clamp-to-PMTU on WWAN egress (on by default)
+      │     ├── legacy-dhcpv4-compat                    # valueless — legacy mode: same-subnet v4 router/netmask, disable DHCP option 121
         │     └── router-advert                           # RA tuning for the downstream device (dnsmasq)
         │           ├── interval <4-1800>                 # unsolicited RA cadence, s (default: 60)
         │           ├── router-lifetime <0-9000>          # default-router lifetime, s (default: 1800; 0 = not a default router)
@@ -782,7 +783,11 @@ set interfaces wwan wwan0 dhcpv6-options pd 0 interface eth0 sla-id '0'
 >    change propagates within one renewal window.  The carrier-supplied
 >    DNS servers from the bearer's `Ip4Config` are advertised via DHCP
 >    option 6 (with `8.8.8.8/1.1.1.1` as a last-resort fallback if the
->    bearer didn't provide any).
+>    bearer didn't provide any).  **Default mode** advertises `/32` plus
+>    DHCP option 121 (RFC 3442 classless route) with the management address
+>    as gateway.  **Legacy mode** (`legacy-dhcpv4-compat`) instead advertises
+>    a same-subnet router + subnet mask and suppresses option 121 for older
+>    clients that do not implement RFC 3442.
 > 3. **DHCPv6 IA_NA + IA_PD + RA (M=1, O=1)** offers the carrier IPv6 to
 >    the same client.  RA advertises the FSM as the default gateway with
 >    DNS via option 23, again sourced from the bearer's `Ip6Config`.
@@ -904,6 +909,9 @@ set interfaces wwan wwan0 dhcpv6-options pd 0 interface eth0 sla-id '0'
 >    may be active.
 >  - The interface should be wired (not Wi-Fi) — DHCPFORCERENEW behaviour
 >    on wireless drivers is unreliable.
+>  - Legacy downstream products that ignore DHCP option 121 can use
+>    `ip-passthrough legacy-dhcpv4-compat`; keep it disabled for newer
+>    equipment so the default modern behavior is preserved.
 >  - **`connection-mode dial-on-demand` is rejected at commit time** when
 >    passthrough is configured.  Passthrough leases the carrier IP straight
 >    through to a downstream device and assumes an always-up bearer;
@@ -954,6 +962,11 @@ set interfaces wwan wwan0 ip-passthrough dns-server '2606:4700:4700::1111'
 #   uses --clamp-mss-to-pmtu so it auto-tracks the bearer MTU dynamically.
 #   Only disable for PMTUD black-hole debugging.
 # set interfaces wwan wwan0 ip-passthrough disable-mss-clamp
+
+# Optional: legacy DHCPv4 compatibility mode for older downstream clients.
+#   Enabled: same-subnet IPv4 gateway/netmask, suppress DHCP option 121.
+#   Disabled (default): modern /32 + option 121 mode.
+# set interfaces wwan wwan0 ip-passthrough legacy-dhcpv4-compat
 
 # Optional: tune the downstream Router Advertisements (dnsmasq).
 #   Defaults shown; omit any line to keep its default. router-lifetime must

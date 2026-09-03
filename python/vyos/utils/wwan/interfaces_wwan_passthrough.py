@@ -97,6 +97,10 @@ class PassthroughConfig:
     # / RA MTU) do not generate oversized frames that the kernel must
     # drop with ICMP Frag-Needed / Packet-Too-Big.
     mss_clamp_enabled: bool = True
+    # Legacy DHCPv4 compatibility mode (OFF by default).  When enabled,
+    # advertise a same-subnet router/netmask and suppress RFC 3442 option
+    # 121 so older downstream stacks that ignore classless routes still work.
+    legacy_dhcpv4_compat: bool = False
     # User-supplied DNS overrides.  When non-empty, these are advertised to
     # the downstream device instead of the carrier-supplied DNS list.
     # Mixed v4/v6 addresses are split internally.
@@ -125,6 +129,7 @@ class PassthroughConfig:
             mgmt_v4_ip=str(raw.get('mgmt_v4_ip', '') or ''),
             mgmt_v6_ip=str(raw.get('mgmt_v6_ip', '') or ''),
             mss_clamp_enabled=bool(raw.get('mss_clamp_enabled', True)),
+            legacy_dhcpv4_compat=bool(raw.get('legacy_dhcpv4_compat', False)),
             dns_servers=[str(d) for d in dns_raw if d],
             ra_interval=int(raw.get('ra_interval', 60) or 60),
             ra_router_lifetime=int(raw.get('ra_router_lifetime', 1800) or 1800),
@@ -650,12 +655,13 @@ class PassthroughManager:
 
         lease = self.cfg.lease_time
         # Choose a gateway IP for DHCPv4 option 3 / option 121 next-hop.
-        # RFC-strict clients (notably Windows) reject leases with router=
-        # 0.0.0.0, and option 121 next-hops of 0.0.0.0 are interpreted
-        # inconsistently across stacks.  Prefer the router's mgmt v4 IP
-        # (FSM-owned 192.168.200.1 by default, or the user's own ethernet
-        # address under Policy B).  Only fall back to 0.0.0.0 when the
-        # admin has explicitly removed every v4 address from the LAN port.
+        # Default mode uses the management IP and RFC 3442 option 121
+        # (host route to gateway + default via gateway).  Legacy mode is
+        # for older clients that ignore option 121: it advertises a
+        # same-subnet router + subnet mask and omits option 121.
+        #
+        # In both modes we still prefer a real, configured address over
+        # 0.0.0.0 so RFC-strict clients accept the lease.
         gw_v4 = self.cfg.mgmt_v4_ip or '0.0.0.0'
 
         # ── DHCPv4 ──
@@ -676,10 +682,23 @@ class PassthroughManager:
             # "no leases left" and NAKs every DHCPDISCOVER.  First-MAC-wins
             # for v4 is already naturally enforced by the single-IP
             # dhcp-range above (start == end == carrier_v4).
-            # Override DHCP options so the downstream device thinks it has the
-            # carrier IP as a host (/32) with the router's mgmt IP as default.
-            lines.append(f"dhcp-option=tag:{tag},1,255.255.255.255")     # netmask /32
-            lines.append(f"dhcp-option=tag:{tag},3,{gw_v4}")             # router
+            if self.cfg.legacy_dhcpv4_compat:
+                # Legacy compatibility mode: provide a same-subnet gateway
+                # and matching subnet mask so clients that do not implement
+                # RFC 3442 (option 121) can still route correctly.
+                legacy_gw = gw_v4
+                if self._shadow_v4:
+                    try:
+                        legacy_gw, _ = _split_cidr(self._shadow_v4)
+                    except ValueError:
+                        legacy_gw = gw_v4
+                lines.append(f"dhcp-option=tag:{tag},1,{netmask}")
+                lines.append(f"dhcp-option=tag:{tag},3,{legacy_gw}")
+            else:
+                # Default modern mode: carrier IP as /32 + classless route
+                # option 121 to the management gateway.
+                lines.append(f"dhcp-option=tag:{tag},1,255.255.255.255")
+                lines.append(f"dhcp-option=tag:{tag},3,{gw_v4}")
             # DNS option 6 — three-tier precedence:
             #   1. user override (CLI dns-server) — wins always
             #   2. carrier-supplied resolvers from the bearer
@@ -698,12 +717,12 @@ class PassthroughManager:
             if bearer_mtu and bearer_mtu > 0:
                 lines.append(f"dhcp-option=tag:{tag},26,{int(bearer_mtu)}")
             # Classless static route (option 121): host route to the gateway
-            # via dev (link-only), then default via gateway.  This pattern is
-            # standard among commercial CPE passthrough products and is
-            # accepted by Windows, macOS, iOS, Android, and Linux clients.
-            lines.append(
-                f"dhcp-option=tag:{tag},121,{gw_v4}/32,0.0.0.0,0.0.0.0/0,{gw_v4}"
-            )
+            # via dev (link-only), then default via gateway.  Kept in default
+            # mode; intentionally omitted in legacy compatibility mode.
+            if not self.cfg.legacy_dhcpv4_compat:
+                lines.append(
+                    f"dhcp-option=tag:{tag},121,{gw_v4}/32,0.0.0.0,0.0.0.0/0,{gw_v4}"
+                )
 
         # ── DHCPv6 + RA ──
         if carrier_v6:
