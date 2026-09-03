@@ -37,12 +37,29 @@ show
                           ├── addr                          # address events only
                           ├── neigh                         # neighbor table events only
                           └── rule                          # PBR rule events only
+  └── wwan
+        └── <wwanN>
+              └── firmware                               # compatible, downloaded, and running versions
 
 connect
   └── interface <wwanN>                                    # bring up WWAN bearer
 
 disconnect
   └── interface <wwanN>                                    # tear down WWAN bearer
+
+execute
+  └── wwan
+        └── stop-manager                                  # stop the WWAN manager service
+
+set
+  └── wwan
+        └── <wwanN>
+              └── firmware <version>                     # install an available firmware version
+
+delete
+  └── wwan
+        └── <wwanN>
+              └── firmware <version>                     # remove a downloaded firmware version
 
 generate
   └── interfaces
@@ -509,6 +526,121 @@ igos@igos:~$ disconnect interface wwan0
 
 ---
 
+## Execute Commands
+
+### `execute wwan stop-manager`
+
+Stop the WWAN manager service.
+
+```
+igos@igos:~$ execute wwan stop-manager
+```
+
+**Script:** `wwan_firmware.py execute_stop_manager`
+
+**Behavior:**
+- Stops the `igos-wwan-manager.service` systemd unit
+
+---
+
+## Firmware Commands
+
+The firmware commands are backed by `src/op_mode/wwan_firmware.py`. They identify the
+modem attached to the selected interface with AT commands, match it against an
+available `firmware-map.conf` rule below `/usr/lib/modem`, and operate only on
+versions allowed by that rule.
+
+### `show wwan <wwanN> firmware`
+
+Show the available firmware versions for the modem, whether each version is
+downloaded, and which version is running.
+
+```
+igos@igos:~$ show wwan wwan0 firmware
+Compatible Version      Downloaded    Running
+------------------      ----------    -------
+40.00.004               Yes           Yes
+40.00.005               No            No
+```
+
+**Script:** `wwan_firmware.py show_firmware --interface="$3"`
+
+The modem identity is read through a responding `ttyUSB` AT port using
+`AT+CGMI`, `AT+CGMM`, `AT#HWREV`, `AT+CGMR`, and `AT#SWPKGV`. A firmware-map
+entry must match both the modem model and hardware revision. The running
+version is derived from the modem software-package version.
+
+The Python handler also supports the following modes, which are used by CLI
+completion:
+
+- `--quiet`: print version strings only; return no output when modem detection
+  or compatibility lookup fails.
+- `--downloaded-only`: restrict the result to versions already installed below
+  `/usr/lib/modem`.
+- `--raw`: return structured data containing interface, vendor, model, variant,
+  hardware and firmware revisions, running version, and version status. This is
+  a handler option rather than a node exposed by the current XML command tree.
+
+Tab completion for `set wwan <wwanN> firmware` calls quiet mode, while completion
+for `delete wwan <wwanN> firmware` combines quiet and downloaded-only modes.
+
+### `set wwan <wwanN> firmware <version>`
+
+Install an available firmware version on a specific WWAN modem.
+
+```
+igos@igos:~$ set wwan wwan0 firmware 40.00.005
+```
+
+**Script:** `wwan_firmware.py set_firmware --interface="$3" --version="$5"`
+
+**Behavior:**
+
+- Rejects versions not listed as compatible for the detected model and
+  hardware revision.
+- Uses an already installed payload from
+  `/usr/lib/modem/<vendor>/<model>/<variant>/<hardware-revision>/<version>`.
+  If it is absent, downloads the matching architecture-specific firmware ZIP
+  from the configured Perle update server and reinstalls it as a Debian package.
+- Validates `manifest.json` fields (manufacturer, model, variant, hardware
+  revision, package version, installer, and payload), then verifies the payload
+  SHA-256. Directory payload hashes include each relative file name and digest;
+  empty directories and symbolic links are rejected.
+- Supports manifests selecting `uxfp` or `tfl` and verifies that the selected
+  installer is available.
+- Validates that `<wwanN>` exists, resolves its physical USB device, stops and
+  verifies `igos-wwan-manager.service`, and restricts diagnostic-port selection
+  to serial ports belonging to that modem.
+- For UXFP, obtains the compatible diagnostic port with
+  `uxfp --file <payload> --show-diag-ports`.
+- For TFL, loads `qcserial` when needed, validates with
+  `tfl <payload> --dry-run --debug`, and selects the highest-numbered `ttyUSB`
+  port in the modem's physical USB group as the diagnostic port.
+- Displays validated firmware metadata and the current modem identity, then
+  asks for confirmation. Cancellation or a pre-installation error restarts the
+  manager if this command stopped it.
+- Runs UXFP with `--port`, or TFL with `--port ... --force`. On successful
+  flashing the manager remains stopped; the command does not restart it.
+
+The handler has a `--no-prompt` argument for non-interactive callers, although
+the operational XML command does not expose it.
+
+### `delete wwan <wwanN> firmware <version>`
+
+Remove a downloaded, available firmware version and its owning Debian package.
+
+```
+igos@igos:~$ delete wwan wwan0 firmware 40.00.004
+```
+
+**Script:** `wwan_firmware.py delete_firmware --interface="$3" --version="$5"`
+
+The command deletes downloaded versions. It does not delete an unavailable
+version, the version currently running on the modem, or a version that is not
+downloaded.
+
+---
+
 ## SMS Commands
 
 ### `generate interfaces wwan <wwanN> sms number <phone> message <text>`
@@ -749,9 +881,11 @@ an HTTPS POST body, use `syslog-identifier igos-wwan-alertbus-json` and parse
 | `op-mode-definitions/clear-sms.xml.in` | XML: `clear interfaces wwan … sms` and `data-usage` commands |
 | `op-mode-definitions/connect.xml.in` | XML: `connect interface` (shared with PPPoE/SSTPC) |
 | `op-mode-definitions/disconnect.xml.in` | XML: `disconnect interface` (shared with PPPoE/SSTPC) |
+| `op-mode-definitions/wwan.xml.in` | XML: WWAN firmware show/set/delete commands and `execute wwan stop-manager` |
 | `src/op_mode/show_wwan.py` | Python: status, hardware, sim, signal, detail, clear data-usage handlers |
 | `src/op_mode/wwan_sms.py` | Python: send, list, read, delete SMS handlers |
 | `src/op_mode/connect_disconnect.py` | Python: connect/disconnect handler (shared) |
+| `src/op_mode/wwan_firmware.py` | Python: show/install/delete managed modem firmware and stop-manager handlers |
 | `python/vyos/utils/wwan/wwan_client.py` | Python: `WWANClientSync` D-Bus client library |
 | `python/vyos/utils/wwan/alert_adapters.py` | Python: AlertBus subscriber adapters (REST/MQTT/SNMP skeletons) |
 | `python/vyos/utils/wwan/interfaces_wwan_config.py` | Python: D-Bus service — per-interface methods |
@@ -779,6 +913,10 @@ an HTTPS POST body, use `syslog-identifier igos-wwan-alertbus-json` and parse
 | `show interfaces wwan wwan0 event-log link` | Link-state events only |
 | `connect interface wwan0` | Bring up WWAN bearer |
 | `disconnect interface wwan0` | Tear down WWAN bearer |
+| `execute wwan stop-manager` | Stop the WWAN manager service |
+| `show wwan wwan0 firmware` | List available versions and show downloaded/running status |
+| `set wwan wwan0 firmware 40.00.005` | Download if needed, validate, and install an available version |
+| `delete wwan wwan0 firmware 40.00.004` | Remove a downloaded version that is not running |
 | `generate interfaces wwan wwan0 sms number '+15551234567' message 'hello'` | Send an SMS |
 | `clear interfaces wwan wwan0 sms` | Clear all SMS messages |
 | `clear interfaces wwan wwan0 sms message 3` | Clear SMS message #3 |

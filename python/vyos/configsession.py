@@ -48,6 +48,12 @@ COMMIT_CONFIRM = ['/usr/bin/config-mgmt', 'commit_confirm', '-y']
 CONFIRM = ['/usr/bin/config-mgmt', 'confirm']
 DISCARD = '/opt/vyatta/sbin/my_discard'
 SHOW_CONFIG = ['/bin/cli-shell-api', 'showConfig']
+SHOW_CELLULAR_FIRMWARE = [
+    '/usr/libexec/vyos/op_mode/wwan_firmware.py',
+    'show_firmware',
+    '--raw',
+    '--interface',
+]
 LOAD_CONFIG = ['/bin/cli-shell-api', 'loadFile']
 MIGRATE_LOAD_CONFIG = ['/usr/libexec/vyos/vyos-load-config.py']
 MERGE_CONFIG = ['/usr/libexec/vyos/vyos-merge-config.py']
@@ -58,6 +64,18 @@ INSTALL_IMAGE = [
     'add',
     '--no-prompt',
     '--image-path',
+]
+SET_CELLULAR_FIRMWARE = [
+    '/usr/libexec/vyos/op_mode/wwan_firmware.py',
+    'set_firmware',
+    '--no-prompt',
+    '--version',
+]
+DELETE_CELLULAR_FIRMWARE = [
+    '/usr/libexec/vyos/op_mode/wwan_firmware.py',
+    'delete_firmware',
+    '--no-prompt',
+    '--version',
 ]
 IMPORT_PKI = ['/opt/vyatta/bin/vyatta-op-cmd-wrapper', 'import']
 IMPORT_PKI_NO_PROMPT = [
@@ -407,8 +425,26 @@ class ConfigSession(object):
         out = self.__run_command(SAVE_CONFIG + [file_path])
         return out
 
+    def show_cellular_firmware(self, interface):
+        out = self.__run_command(SHOW_CELLULAR_FIRMWARE + [interface])
+        return out
+
     def install_image(self, url):
         out = self.__run_command(INSTALL_IMAGE + [url])
+        return out
+
+    def set_cellular_firmware(self, version, interface=None):
+        command = SET_CELLULAR_FIRMWARE + [version]
+        if interface:
+            command.extend(['--interface', interface])
+        out = self.__run_command(command)
+        return out
+
+    def delete_cellular_firmware(self, version, interface=None):
+        command = DELETE_CELLULAR_FIRMWARE + [version]
+        if interface:
+            command.extend(['--interface', interface])
+        out = self.__run_command(command)
         return out
 
     def remove_image(self, name):
