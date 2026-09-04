@@ -16,9 +16,11 @@ import os
 import tempfile
 
 from vyos.utils.process import rc_cmd
+from pathlib import Path
 
 default_pcrs = ['0','2','4','7']
 tpm_handle = 0x81000000
+tpm_key_save_dir = "/config/auth/wireguard/"
 
 def init_tpm(clear=False):
     """
@@ -95,6 +97,61 @@ def write_tpm_key(key, index=0, pcrs=default_pcrs):
         if code != 0:
             raise Exception('write_tpm_key: Failed to write object to TPM')
 
+def read_tpm_key_file(public_obj, private_obj):
+    """
+    Read existing key on TPM with provided public and private files
+    """
+    with tempfile.TemporaryDirectory() as tpm_dir:
+
+        primary_context_file = os.path.join(tpm_dir, 'primary.ctx')
+        code, output = rc_cmd(f'tpm2_createprimary -C e -g sha256 -G rsa -c {primary_context_file}')
+        if code != 0:
+            raise Exception('read_tpm_key: Failed to re-create primary key')
+
+        load_context_file = os.path.join(tpm_dir, 'load.ctx')
+        code, output = rc_cmd(f'tpm2_load -C {primary_context_file} -u {tpm_key_save_dir + public_obj} -r {tpm_key_save_dir + private_obj} -c {load_context_file}')
+        if code != 0:
+            print(output)
+            raise Exception('read_tpm_key: Failed to load object')
+
+        tpm_key_file = os.path.join(tpm_dir, 'tpm_key.key')
+        code, output = rc_cmd(f'tpm2_unseal -c {load_context_file} -o {tpm_key_file}')
+        if code != 0:
+            raise Exception('read_tpm_key: Failed to read key from TPM')
+
+        with open(tpm_key_file, 'rb') as f:
+            tpm_key = f.read()
+
+        return tpm_key
+
+def write_tpm_key_file(key, save_file):
+    """
+    Write encrypted TPM key and saves them to save_file.pub and save_file.priv files
+    """
+    with tempfile.TemporaryDirectory() as tpm_dir:
+        primary_context_file = os.path.join(tpm_dir, 'primary.ctx')
+        code, output = rc_cmd(f'tpm2_createprimary -C e -g sha256 -G rsa -c {primary_context_file}')
+        if code != 0:
+            raise Exception('write_tpm_key: Failed to create primary key')
+
+        key_file = os.path.join(tpm_dir, 'crypt.key')
+        with open(key_file, 'wb') as f:
+            f.write(key)
+
+        public_obj = tpm_key_save_dir + save_file + '.pub'
+        private_obj = tpm_key_save_dir + save_file + '.priv'
+        dir_path = Path(tpm_key_save_dir + save_file)
+        dir_path.parent.mkdir(parents=True, exist_ok=True)
+        code, output = rc_cmd(
+            f'tpm2_create -g sha256 \
+            -u {public_obj} -r {private_obj} \
+            -C {primary_context_file} -i {key_file}')
+
+        if code != 0:
+            raise Exception('write_tpm_key: Failed to create object')
+
+        return public_obj, private_obj
+
 # PERLE - added check for tpm support
 
 from vyos.utils.process import cmd
@@ -139,7 +196,7 @@ def tpm_allowed():
     Note:
         For now, it returns True/False based on /sys/class/tpm/tpm0 existing or not.
     """
-    return tpm_enabled() and tpm_exist() 
+    return tpm_enabled() and tpm_exist()
 
 
 def tpm_enable():

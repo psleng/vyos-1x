@@ -59,6 +59,11 @@
               #include <include/constraint/wireguard-keys.xml.i>
             </properties>
           </leafNode>
+          <leafNode name="private-key-tpm">
+            <properties>
+              <help>File name with .pub and .priv files containing tpm sealed key</help>
+            </properties>
+          </leafNode>
           <tagNode name="peer">
             <properties>
               <help>peer alias</help>
