@@ -688,20 +688,103 @@ def show_monitor_alerts(raw: bool,
     return '\n'.join(line for line in lines if line)
 
 
-def clear_data_usage(raw: bool, interface: str, slot: int):
+def show_event_log(raw: bool,
+                   interface: str,
+                   limit: int = 100,
+                   severity: str = '',
+                   category: str = ''):
+    """Show recent WWAN alert/event history from AlertBus."""
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        raise ValueError('Limit must be an integer (1-500)')
+
+    if limit < 1 or limit > 500:
+        raise ValueError('Limit must be between 1 and 500')
+
+    severity = str(severity or '').strip().lower()
+    category = str(category or '').strip().lower()
+
+    if severity and severity not in ('info', 'warning', 'critical'):
+        raise ValueError('Severity must be one of: info, warning, critical')
+
+    if category and category not in ('connectivity', 'sim', 'usage'):
+        raise ValueError('Category must be one of: connectivity, sim, usage')
+
+    if_num = _require_interface(interface)
+    try:
+        client = _get_client()
+        alerts = client.get_recent_alerts(limit=limit, interface_number=if_num)
+    except Exception as e:
+        raise vyos.opmode.DataUnavailable(
+            f'Cannot read WWAN event log for {interface}: {e}'
+        )
+
+    if not isinstance(alerts, list):
+        alerts = []
+
+    if severity:
+        alerts = [a for a in alerts
+                  if isinstance(a, dict)
+                  and str(a.get('severity', '')).lower() == severity]
+    if category:
+        alerts = [a for a in alerts
+                  if isinstance(a, dict)
+                  and str(a.get('category', '')).lower() == category]
+
+    if raw:
+        return alerts
+
+    lines = [f'WWAN event log for {interface}: {len(alerts)} entr' +
+             ('y' if len(alerts) == 1 else 'ies')]
+    lines.append(_kv('Limit:', limit))
+    if severity:
+        lines.append(_kv('Severity filter:', severity))
+    if category:
+        lines.append(_kv('Category filter:', category))
+
+    if not alerts:
+        lines.append('  (no entries)')
+        return '\n'.join(lines)
+
+    for idx, alert in enumerate(alerts, start=1):
+        lines.append(_section(f'Entry {idx}'))
+        lines.append(_kv('Sequence:', alert.get('sequence', '')))
+        lines.append(_kv('Timestamp:', alert.get('timestamp', '')))
+        lines.append(_kv('Type:', alert.get('type', '')))
+        lines.append(_kv('Category:', alert.get('category', '')))
+        lines.append(_kv('Severity:', alert.get('severity', '')))
+        lines.extend(_kv_wrapped('Message:', str(alert.get('message', ''))))
+
+    return '\n'.join(line for line in lines if line)
+
+
+def clear_data_usage(raw: bool, interface: str, slot: int = None):
     """Zero the data-usage counters for a specific SIM slot.
 
     CLI: clear interfaces wwan <wwanN> data-usage slot <N>
 
-    The slot must be given explicitly so the reset is always unambiguous.
+    If no slot is specified, the currently active SIM slot is used.
     The previous counters are logged by the service before they are cleared.
     """
     if_num = _require_interface(interface)
 
-    try:
-        slot = int(slot)
-    except (TypeError, ValueError):
-        raise ValueError('SIM slot must be an integer')
+    if slot is None:
+        try:
+            client = _get_client()
+            status = client.get_status(if_num)
+            slot = int(status.get('active_sim_slot')
+                       or status.get('configured_sim_slot')
+                       or 1)
+        except Exception as e:
+            raise vyos.opmode.DataUnavailable(
+                f'Cannot determine active SIM slot for {interface}: {e}'
+            )
+    else:
+        try:
+            slot = int(slot)
+        except (TypeError, ValueError):
+            raise ValueError('SIM slot must be an integer')
 
     try:
         client = _get_client()
