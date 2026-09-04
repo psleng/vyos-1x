@@ -759,14 +759,26 @@ class InterfaceConfig(ServiceInterface):
         current_apn_dict = self._normalize_apn_config(current_apn)
         default_apn_dict = self._normalize_apn_config(default_apn)
 
-        # Merge: new -> current -> default
+        # Merge: new -> current -> default, but preserve explicit clears.
+        #
+        # NOTE: APN fields are strings where '' is a meaningful value
+        # (e.g. deleting APN/username/password/auth in config). A truthy-or
+        # merge treats '' as missing and silently resurrects previous values,
+        # so runtime never sees the intended change.
         merged_apn = {}
+        def _pick_with_empty(new_val, cur_val, default_val):
+            if new_val is not None:
+                return new_val
+            if cur_val is not None:
+                return cur_val
+            return default_val
+
         for key in default_apn_dict:
-            merged_apn[key] = (
-                new_apn_dict.get(key) if new_apn_dict.get(key) else None
-            ) or (
-                current_apn_dict.get(key) if current_apn_dict.get(key) else None
-            ) or default_apn_dict[key]
+            merged_apn[key] = _pick_with_empty(
+                new_apn_dict.get(key),
+                current_apn_dict.get(key),
+                default_apn_dict[key]
+            )
 
         return merged_apn
 

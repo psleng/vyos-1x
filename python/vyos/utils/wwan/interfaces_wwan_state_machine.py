@@ -6165,6 +6165,34 @@ class ModemStateMachine:
                 return
 
             config_sim_slot = self.config.get('primary_sim_slot', 1)
+
+            # Honor per-slot enablement. If the configured primary slot is
+            # disabled, prefer an enabled slot so runtime behavior matches
+            # operator intent (`sim slot N disable`).
+            sim_slots_cfg = self.config.get('sim_slots', []) if self.config else []
+            slot_enabled_map = {
+                int(s.get('slot')): bool(s.get('enabled', True))
+                for s in sim_slots_cfg if isinstance(s, dict) and s.get('slot')
+            }
+            if slot_enabled_map and not slot_enabled_map.get(config_sim_slot, True):
+                alternate = next((slot for slot, enabled in sorted(slot_enabled_map.items())
+                                  if enabled), None)
+                if alternate is not None:
+                    logger.warning(
+                        "Primary SIM slot %s is disabled in config - "
+                        "using enabled slot %s",
+                        config_sim_slot, alternate,
+                        extra={'interface_number': self.interface_number,
+                               'configured_primary_slot': config_sim_slot,
+                               'selected_slot': alternate})
+                    config_sim_slot = alternate
+                else:
+                    logger.warning(
+                        "All configured SIM slots are disabled - retaining "
+                        "primary slot %s as fallback",
+                        config_sim_slot,
+                        extra={'interface_number': self.interface_number,
+                               'configured_primary_slot': config_sim_slot})
             self.config_active_sim = config_sim_slot
 
             logger.info("Configuring SIM slot while disabled",
@@ -10578,7 +10606,8 @@ class ModemStateMachine:
         new_slot = new_slots.get(active_slot, {})
 
         connection_sim_params = ['apn', 'username', 'password', 'auth_type',
-                                 'pdp_type', 'roaming', 'supported_bands']
+                     'pdp_type', 'roaming', 'supported_bands',
+                     'enabled']
 
         for param in connection_sim_params:
             if old_slot.get(param) != new_slot.get(param):
@@ -12046,7 +12075,8 @@ class ModemStateMachine:
 
         try:
             # Monitor while connected
-            while self.machine.current_state == ModemState.CONNECTED.value:
+            while self.machine.current_state in (ModemState.CONNECTED.value,
+                                                 ModemState.USAGE_MONITORING.value):
                 try:
                     # Check data usage statistics from bearer
                     introspect = await self.bus.introspect(MODEM_MANAGER_SERVICE, self.bearer_path)
@@ -12154,7 +12184,7 @@ class ModemStateMachine:
                                     await self._handle_data_limit_failover()
                                     break
                                 elif data_action in ('disconnect', 'disable'):
-                                    self.transition(ModemEvent.USAGE_LIMIT_EXCEEDED)
+                                    await self._handle_data_limit_disconnect(data_action)
                                     break
                                 # 'none' (default) — log warning but take no action
                         else:
@@ -12219,6 +12249,33 @@ class ModemStateMachine:
             logger.error(f"Data limit failover failed: {e}",
                         extra={'interface_number': self.interface_number})
             self.transition(ModemEvent.CONNECTION_FAILED)
+
+    async def _handle_data_limit_disconnect(self, action: str):
+        """Enforce data-limit local disconnect/disable policies.
+
+        ``disable`` parks WWAN in airplane mode (RF off) until manually
+        re-enabled. ``disconnect`` holds the bearer down without forcing
+        airplane mode.
+        """
+        action = (action or 'disconnect').strip().lower()
+
+        logger.warning("Data limit action triggered: %s",
+                      action,
+                      extra={'interface_number': self.interface_number,
+                             'active_sim': self.current_active_sim})
+
+        # Keep the bearer down after this action unless/until explicitly
+        # reconnected by operator intent.
+        self.user_disconnected = True
+        self.bearer_requested = False
+
+        if action == 'disable':
+            await self.set_airplane_mode(True)
+            return
+
+        if self.machine.current_state in (ModemState.CONNECTED.value,
+                                          ModemState.USAGE_MONITORING.value):
+            self.transition(ModemEvent.DISCONNECT)
 
     # ── Per-SIM persistent usage tracking ────────────────────────────────────
 
@@ -19684,6 +19741,47 @@ class ModemStateMachine:
                                extra={'interface_number': self.interface_number})
                 ipv6_routed = await self._install_default_route(
                     6, ipv6_gateway, interface_name)
+
+                # IPv6-only bearer fallback for MTU application.  The primary
+                # MTU path lives in the IPv4 block (where most carriers report
+                # MTU), but on IPv6-only sessions we still need to honor
+                # per-SIM MTU and/or carrier-advertised IPv6 MTU.
+                if not bearer_ips.get('ipv4'):
+                    interface_mtu = self.config.get('mtu', 1420) if self.config else 1420
+
+                    sim_mtu = 0
+                    if self.config:
+                        sim_slots = self.config.get('sim_slots', [])
+                        active_slot = self.current_active_sim or self.config.get('primary_sim_slot', 1)
+                        sim_config = next((s for s in sim_slots if s['slot'] == active_slot), {})
+                        sim_mtu = sim_config.get('mtu', 0)
+
+                    if sim_mtu and sim_mtu > 0:
+                        effective_mtu = str(sim_mtu)
+                        mtu_source = 'per-sim'
+                    elif ipv6_mtu:
+                        effective_mtu = str(min(int(ipv6_mtu), interface_mtu))
+                        mtu_source = 'network' if int(ipv6_mtu) <= interface_mtu else 'network-capped'
+                    else:
+                        effective_mtu = str(interface_mtu)
+                        mtu_source = 'interface'
+
+                    result = await asyncio.create_subprocess_exec(
+                        'ip', 'link', 'set', 'dev', interface_name, 'mtu', effective_mtu,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                    stdout, stderr = await result.communicate()
+
+                    if result.returncode != 0:
+                        logger.warning(f"Failed to set MTU {effective_mtu} ({mtu_source}): {stderr.decode()}",
+                                     extra={'interface_number': self.interface_number})
+                    else:
+                        logger.info(f"Set interface MTU to {effective_mtu} (source: {mtu_source})",
+                                   extra={'interface_number': self.interface_number,
+                                          'mtu': effective_mtu,
+                                          'mtu_source': mtu_source,
+                                          'network_mtu': ipv6_mtu or 'not provided'})
 
             # ── IPv6 source enforcement: persistent egress prefix whitelist ──
             if new_ipv6:
