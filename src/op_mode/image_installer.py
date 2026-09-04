@@ -36,6 +36,7 @@ from os import sync
 
 # PSL - access to additional routines
 from shutil import move
+from platform import machine
 # PSL - access to additional routines
 
 from json import loads
@@ -149,6 +150,7 @@ CONST_RESERVED_SPACE: int = (2 + 1 + 256) * 1024**2
 
 # define directories and paths
 DIR_CONFIG: str = directories['config']
+DIR_TPM_REEFS: str = '/var/lib/tee'
 DIR_DATA: str = directories['data']
 DIR_INSTALLATION: str = '/mnt/installation'
 DIR_ROOTFS_SRC: str = f'{DIR_INSTALLATION}/root_src'
@@ -1089,13 +1091,9 @@ def install_image() -> None:
                  symlinks=True)
 
         # PSL - from previous copytree() the dtb and grub directories were copied to the
-        #       installation directory, so we can remove them so the installation looks
-        #       EXACTLY like an iso installation using "add system image <isoname>"
-        tmppath = Path(f'{DIR_DST_ROOT}/boot/{image_name}/dtb')
-        if tmppath.exists():
-            print(f"Pruning unused {image_name}/dtb directory")
-            rmtree(tmppath, ignore_errors=True)
-
+        #       installation directory, so we can leave the release specific DTBs but
+        #       remove the grub directory so the installation looks EXACTLY like 
+        #       an iso installation using "add system image <iso_name>"
         tmppath = Path(f'{DIR_DST_ROOT}/boot/{image_name}/grub')
         if tmppath.exists():
             print(f"Pruning unused {image_name}/grub directory")
@@ -1125,12 +1123,12 @@ def install_image() -> None:
                     print(f'Installing boot signature {Path(_sig_dst).name}')
                     copy(_sig_src, _sig_dst)
 
-        # PSL - copy the whole DTB tree (any vendor subdir: ti/, perle/, ...)
-        if Path(f"{DIR_KERNEL_SRC}/dtb").exists():
-            print('Copying DTB files')
-            copytree(
-                f"{DIR_KERNEL_SRC}/dtb", f"{DIR_DST_ROOT}/boot/dtb", dirs_exist_ok=True
-            )
+        # PSL - no longer copy the whole DTB tree (any vendor subdir: ti/, perle/, ...) to global /boot/dtb
+        # if Path(f"{DIR_KERNEL_SRC}/dtb").exists():
+        #     print('Copying DTB files')
+        #     copytree(
+        #         f"{DIR_KERNEL_SRC}/dtb", f"{DIR_DST_ROOT}/boot/dtb", dirs_exist_ok=True
+        #    )
 
         # copy saved config data and SSH keys
         # owner restored on copy of config data by chmod_2775, above
@@ -1174,10 +1172,10 @@ def install_image() -> None:
             dirs_exist_ok=True,
             symlinks=True)
 
-        tmppath = Path(f'{DIR_DST_ROOT}/boot/{default_image_name}/dtb')
-        if tmppath.exists():
-            print(f"Pruning unused {default_image_name}/dtb directory")
-            rmtree(tmppath, ignore_errors=True)
+        # tmppath = Path(f'{DIR_DST_ROOT}/boot/{default_image_name}/dtb')
+        # if tmppath.exists():
+        #     print(f"Pruning unused {default_image_name}/dtb directory")
+        #     rmtree(tmppath, ignore_errors=True)
 
         tmppath = Path(f'{DIR_DST_ROOT}/boot/{default_image_name}/grub')
         if tmppath.exists():
@@ -1432,6 +1430,7 @@ def add_image(image_path: str, vrf: str = None, username: str = '',
         # a config dir. It is the deepest one, so the command will
         # create all the rest in a single step
         target_config_dir: str = f'{root_dir}/boot/{image_name}/rw{DIR_CONFIG}/'
+        target_tpm_dir: str = f'{root_dir}/boot/{image_name}/rw{DIR_TPM_REEFS}/'
         # copy config
         if no_prompt or migrate_config():
             if Path('/dev/mapper/vyos_config').exists():
@@ -1466,6 +1465,14 @@ def add_image(image_path: str, vrf: str = None, username: str = '',
                 # This can be used for a future automatic rollback into the old image.
                 tmp = {'previous_image' : image.get_running_image()}
                 write_file(f'{target_config_dir}/first_boot', dumps(tmp))
+
+                print('Migrating TPM REEFS storage...')
+                # copytree preserves perms but not ownership:
+                Path(target_tpm_dir).mkdir(parents=True)
+                chown(target_tpm_dir, group='root')
+                # chmod_2775(target_tpm_dir)
+                copytree(f'{DIR_TPM_REEFS}/', target_tpm_dir, symlinks=True,
+                        copy_function=copy_preserve_owner, dirs_exist_ok=True)
         else:
             Path(target_config_dir).mkdir(parents=True)
             chown(target_config_dir, group='vyattacfg')
@@ -1495,12 +1502,13 @@ def add_image(image_path: str, vrf: str = None, username: str = '',
         move(f'{root_dir}/boot/{image_name}/filesystem.squashfs',
              f'{root_dir}/boot/{image_name}/{image_name}.squashfs')
 
-        # PSL - copy the whole DTB tree (any vendor subdir: ti/, perle/, ...)
-        if Path(f"{DIR_ISO_MOUNT}/boot/dtb").exists():
-            print('Copying DTB files')
-            copytree(
-                f"{DIR_ISO_MOUNT}/boot/dtb", f"{root_dir}/boot/dtb", dirs_exist_ok=True
-            )
+        # PSL - for arm64 - copy the whole DTB tree (any vendor subdir: ti/, perle/, ...) to firmware directory
+        if machine() == 'aarch64':
+            if Path(f"{DIR_ISO_MOUNT}/boot/dtb").exists():
+                print('Copying DTB files')
+                # copytree(f"{DIR_ISO_MOUNT}/boot/dtb", f"{root_dir}/boot/dtb", dirs_exist_ok=True)
+                copytree(f"{DIR_ISO_MOUNT}/boot/dtb", f"{root_dir}/boot/{image_name}/dtb", 
+                         dirs_exist_ok=True, symlinks=True)
 
         # unmount an ISO and cleanup
         cleanup([str(iso_path)])
