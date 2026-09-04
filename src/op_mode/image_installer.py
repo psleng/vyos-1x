@@ -1092,7 +1092,7 @@ def install_image() -> None:
 
         # PSL - from previous copytree() the dtb and grub directories were copied to the
         #       installation directory, so we can leave the release specific DTBs but
-        #       remove the grub directory so the installation looks EXACTLY like 
+        #       remove the grub directory so the installation looks EXACTLY like
         #       an iso installation using "add system image <iso_name>"
         tmppath = Path(f'{DIR_DST_ROOT}/boot/{image_name}/grub')
         if tmppath.exists():
@@ -1507,7 +1507,7 @@ def add_image(image_path: str, vrf: str = None, username: str = '',
             if Path(f"{DIR_ISO_MOUNT}/boot/dtb").exists():
                 print('Copying DTB files')
                 # copytree(f"{DIR_ISO_MOUNT}/boot/dtb", f"{root_dir}/boot/dtb", dirs_exist_ok=True)
-                copytree(f"{DIR_ISO_MOUNT}/boot/dtb", f"{root_dir}/boot/{image_name}/dtb", 
+                copytree(f"{DIR_ISO_MOUNT}/boot/dtb", f"{root_dir}/boot/{image_name}/dtb",
                          dirs_exist_ok=True, symlinks=True)
 
         # unmount an ISO and cleanup
