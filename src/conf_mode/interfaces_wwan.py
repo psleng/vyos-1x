@@ -329,6 +329,26 @@ def get_config(config=None):
         ),
     }
 
+    # Per-SIM data-limit live-tree presence flags.
+    #
+    # get_interface_dict() merges XML defaults, so absent per-SIM leaves can
+    # appear as if configured (e.g. size=0/action=none). That breaks intended
+    # global data-usage fallback semantics because those default-injected
+    # values would override globals. Capture explicit user-set presence from
+    # the live tree and use it in build_fsm_config() to decide overrides.
+    sim_dl_flags = {}
+    for slot_num in (1, 2):
+        slot = str(slot_num)
+        dl_path = iface_base + ['sim', 'slot', slot, 'data-limit']
+        sim_dl_flags[slot] = {
+            'node': conf.exists(dl_path),
+            'size': conf.exists(dl_path + ['size']),
+            'action': conf.exists(dl_path + ['action']),
+            'billing_date': conf.exists(dl_path + ['billing-date']),
+            'warning': conf.exists(dl_path + ['warning']),
+        }
+    wwan['_sim_data_limit_user_set'] = sim_dl_flags
+
     # ── Conflict guards (computed here while the Config object is live) ───
     # IP-passthrough: bind-interfaces dnsmasq cannot coexist with another
     # DHCP/RA service on, or bridge/bond enslavement of, the same LAN port.
@@ -525,6 +545,7 @@ def build_fsm_config(wwan):
     # ── SIM slots ────────────────────────────────────────────────────────
     sim_cfg = wwan.get('sim', {})
     slot_cfgs = sim_cfg.get('slot', {})
+    sim_dl_user_set = wwan.get('_sim_data_limit_user_set', {}) or {}
 
     # Global data-usage fallback values
     du = wwan.get('data_usage', {})
@@ -541,6 +562,7 @@ def build_fsm_config(wwan):
     for slot_num in (1, 2):
         s = slot_cfgs.get(str(slot_num), {})
         dl = s.get('data_limit', {})
+        dl_user = sim_dl_user_set.get(str(slot_num), {}) or {}
         sim_slots.append({
             'slot': slot_num,
             'enabled': not _leaf_exists(s, 'disable'),
@@ -563,14 +585,23 @@ def build_fsm_config(wwan):
             'enable_network_scan': _leaf_exists(s, 'enable_network_scan'),
             'mtu': _leaf_int(s, 'mtu', 0),
             # Per-SIM data limits, falling back to global
-            'data_limit_size': _leaf_int(dl, 'size', global_data_limit_size),
-            'data_limit_action': _leaf(dl, 'action', global_data_limit_action),
-            'data_limit_billing_date': _leaf_int(
-                dl, 'billing_date', global_data_limit_billing
+            # IMPORTANT: use live-tree presence flags so XML default-injected
+            # per-SIM values do not mask global data-usage settings.
+            'data_limit_size': (
+                _leaf_int(dl, 'size', global_data_limit_size)
+                if dl_user.get('size') else global_data_limit_size
+            ),
+            'data_limit_action': (
+                _leaf(dl, 'action', global_data_limit_action)
+                if dl_user.get('action') else global_data_limit_action
+            ),
+            'data_limit_billing_date': (
+                _leaf_int(dl, 'billing_date', global_data_limit_billing)
+                if dl_user.get('billing_date') else global_data_limit_billing
             ),
             'data_limit_warning': (
                 _csv_to_list(dl.get('warning', ''), int)
-                if dl.get('warning')
+                if dl_user.get('warning') and dl.get('warning')
                 else global_data_limit_warning
             ),
         })
