@@ -437,12 +437,22 @@ def _build_ip_passthrough(wwan):
     user_eth_addrs = ipt.get('_user_eth_addresses') or []
     user_owns_eth = bool(user_eth_addrs)
     mgmt_v4_cidr = (
-        '' if user_owns_eth
-        else _leaf(ipt, 'management_address', '192.168.200.1/24')
+        '' if user_owns_eth else (
+            _leaf(
+                ipt,
+                'passthrough_management_address',
+                _leaf(ipt, 'management_address', '192.168.200.1/24')
+            )
+        )
     )
     mgmt_v6_cidr = (
-        '' if user_owns_eth
-        else _leaf(ipt, 'management_address_ipv6', 'fd00:6c61:6e30::1/64')
+        '' if user_owns_eth else (
+            _leaf(
+                ipt,
+                'passthrough_management_address_ipv6',
+                _leaf(ipt, 'management_address_ipv6', 'fd00:6c61:6e30::1/64')
+            )
+        )
     )
 
     # Pre-resolve bare-IP forms (no /CIDR) for use as DHCPv4 option 3

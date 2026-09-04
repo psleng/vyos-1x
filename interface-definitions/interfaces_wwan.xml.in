@@ -822,7 +822,7 @@
                 </properties>
                 <defaultValue>60</defaultValue>
               </leafNode>
-              <leafNode name="management-address">
+              <leafNode name="passthrough-management-address">
                 <properties>
                   <help>Auto-provisioned IPv4 management address on the passthrough interface (Policy B: only applied if 'interfaces ethernet &lt;if&gt; address' is unset)</help>
                   <valueHelp>
@@ -835,7 +835,7 @@
                 </properties>
                 <defaultValue>192.168.200.1/24</defaultValue>
               </leafNode>
-              <leafNode name="management-address-ipv6">
+              <leafNode name="passthrough-management-address-ipv6">
                 <properties>
                   <help>Auto-provisioned IPv6 management address on the passthrough interface (Policy B: only applied if 'interfaces ethernet &lt;if&gt; address' is unset)</help>
                   <valueHelp>
