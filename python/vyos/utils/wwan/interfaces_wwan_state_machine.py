@@ -57,6 +57,7 @@ from vyos.utils.wwan.connection_manager import ConnectionManager
 from vyos.utils.wwan.state_transition_manager import StateTransitionManager
 from vyos.utils.wwan.interfaces_wwan_passthrough import PassthroughManager
 from vyos.utils.wwan.interfaces_wwan_bridging_radvd import BridgingRadvdManager
+from vyos.utils.network import get_vrf_tableid
 
 from vyos.utils.wwan.wwan_logging import setup_logging, reconfigure_logging
 
@@ -17506,7 +17507,8 @@ class ModemStateMachine:
                         extra={'interface_number': self.interface_number,
                                'initial_ip': self._last_known_ip})
 
-            while self.machine.current_state == ModemState.CONNECTED.value:
+            while self.machine.current_state in (ModemState.CONNECTED.value,
+                                                 ModemState.USAGE_MONITORING.value):
                 try:
                     current_ips = await self._get_current_ip()
                     bearer_ips = await self._get_bearer_expected_ips()
@@ -19458,6 +19460,41 @@ class ModemStateMachine:
         base = ['ip', '-6'] if family == 6 else ['ip']
         label = f"IPv{family}"
 
+        # If the WWAN interface lives in a VRF, force route install into that
+        # VRF's table. Otherwise, `ip route` defaults to main and the VRF table
+        # ends up showing only connected routes.
+        route_table = None
+        route_table_source = ''
+        try:
+            route_table = get_vrf_tableid(interface_name)
+            if route_table:
+                route_table_source = 'interface'
+        except Exception as vrf_e:
+            logger.debug("VRF table lookup by interface failed: %s", vrf_e,
+                        extra={'interface_number': self.interface_number,
+                               'interface_name': interface_name})
+
+        # Re-enumeration race fallback: if the recreated netdev has not yet
+        # been re-bound to VRF, consult the configured WWAN interface VRF name
+        # and resolve that VRF device's table directly.
+        if not route_table:
+            try:
+                from vyos.config import Config
+                conf = Config()
+                vrf_path = ['interfaces', 'wwan', interface_name, 'vrf']
+                if conf.exists(vrf_path):
+                    vrf_name = conf.return_value(vrf_path)
+                    if vrf_name:
+                        route_table = get_vrf_tableid(vrf_name)
+                        if route_table:
+                            route_table_source = f'configured-vrf:{vrf_name}'
+            except Exception as vrf_cfg_e:
+                logger.debug("Configured VRF table lookup failed: %s", vrf_cfg_e,
+                            extra={'interface_number': self.interface_number,
+                                   'interface_name': interface_name})
+
+        route_table_args = ['table', str(route_table)] if route_table else []
+
         # Metric for the carrier-assigned default route.  Default 220 keeps
         # cellular below a wired primary (failover/static metric 1, DHCP
         # default-route-distance 210) so the modem is a backup path, not the
@@ -19470,14 +19507,25 @@ class ModemStateMachine:
             # onlink: nexthop is directly reachable on this PtP device even
             # though the host-route addressing leaves no on-link subnet.
             cmd = base + ['route', 'replace', 'default', 'via', gateway,
-                          'dev', interface_name, 'onlink', 'metric', str(metric)]
+                          'dev', interface_name, 'onlink',
+                          *route_table_args, 'metric', str(metric)]
             success_msg = (f"{label} default route via {gateway} "
-                           f"dev {interface_name} (onlink, metric {metric})")
+                           f"dev {interface_name} (onlink, metric {metric}"
+                           f"{f', table {route_table}' if route_table else ''})")
         else:
             cmd = base + ['route', 'replace', 'default', 'dev', interface_name,
-                          'metric', str(metric)]
+                          *route_table_args, 'metric', str(metric)]
             success_msg = (f"{label} default route via device {interface_name} "
-                           f"(metric {metric})")
+                           f"(metric {metric}"
+                           f"{f', table {route_table}' if route_table else ''})")
+
+        if route_table:
+            logger.info("Installing %s default route in VRF table %s",
+                        label, route_table,
+                        extra={'interface_number': self.interface_number,
+                               'interface_name': interface_name,
+                               'vrf_table': route_table,
+                               'vrf_table_source': route_table_source or 'unknown'})
 
         result = await asyncio.create_subprocess_exec(
             *cmd,
@@ -19498,7 +19546,8 @@ class ModemStateMachine:
                 f"({stderr.decode().strip()}); falling back to device route",
                 extra={'interface_number': self.interface_number})
             fallback = base + ['route', 'replace', 'default',
-                               'dev', interface_name, 'metric', str(metric)]
+                               'dev', interface_name,
+                               *route_table_args, 'metric', str(metric)]
             result = await asyncio.create_subprocess_exec(
                 *fallback,
                 stdout=asyncio.subprocess.PIPE,
@@ -19507,7 +19556,8 @@ class ModemStateMachine:
             _, stderr = await result.communicate()
             if result.returncode == 0:
                 logger.info(f"{label} default route via device {interface_name} "
-                            f"(device-only fallback, metric {metric})",
+                            f"(device-only fallback, metric {metric}"
+                            f"{f', table {route_table}' if route_table else ''})",
                            extra={'interface_number': self.interface_number})
                 return True
 
