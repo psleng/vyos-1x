@@ -63,25 +63,6 @@
               #include <include/interface/base-reachable-time.xml.i>
               #include <include/interface/disable-forwarding.xml.i>
               #include <include/interface/source-validation.xml.i>
-            </children>
-          </node>
-          <!-- ── IPv6 management-address (FSM-stamped <prefix>::1 on wwanN) ── -->
-          <!--
-            Extends the standard `ipv6` node above with a `management-address`
-            sub-tree.  Opt-in: creating this node tells the FSM to stamp a
-            stable host address inside the carrier prefix directly on wwanN
-            (default `<prefix>::1`) so the router itself is reachable from
-            the public internet at a name you can pin to DDNS.  An
-            FSM-owned ip6tables chain locks the address down: ICMPv6,
-            ESTABLISHED/RELATED, and TCP 443 (VyOS HTTPS UI) are permitted
-            by default; everything else is dropped.  Use `disable-default-https`
-            to suppress the auto-443 rule, `permit-tcp` / `permit-udp` to
-            open additional ports, and `permit-source` to restrict all
-            permits to specific source prefixes.  Mutually exclusive with
-            `ip-passthrough`.
-          -->
-          <node name="ipv6">
-            <children>
               <node name="management-address">
                 <properties>
                   <help>Stable management address inside the carrier IPv6 prefix on this WWAN interface</help>
@@ -153,6 +134,21 @@
               </node>
             </children>
           </node>
+          <!-- ── IPv6 management-address (FSM-stamped <prefix>::1 on wwanN) ── -->
+          <!--
+            Extends the standard `ipv6` node above with a `management-address`
+            sub-tree.  Opt-in: creating this node tells the FSM to stamp a
+            stable host address inside the carrier prefix directly on wwanN
+            (default `<prefix>::1`) so the router itself is reachable from
+            the public internet at a name you can pin to DDNS.  An
+            FSM-owned ip6tables chain locks the address down: ICMPv6,
+            ESTABLISHED/RELATED, and TCP 443 (VyOS HTTPS UI) are permitted
+            by default; everything else is dropped.  Use `disable-default-https`
+            to suppress the auto-443 rule, `permit-tcp` / `permit-udp` to
+            open additional ports, and `permit-source` to restrict all
+            permits to specific source prefixes.  Mutually exclusive with
+            `ip-passthrough`.
+          -->
           #include <include/interface/dhcpv6-options.xml.i>
           <!-- ── Connection mode ─────────────────────────────────── -->
           <leafNode name="connection-mode">
