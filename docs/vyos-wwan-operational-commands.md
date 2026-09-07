@@ -509,6 +509,45 @@ igos@igos:~$ disconnect interface wwan0
 
 ---
 
+## Airplane Mode Commands
+
+### `change wwan <wwanN> airplane-mode enable`
+
+Put the modem into airplane mode: disconnect the bearer, tear down downstream
+LAN features, and power the modem RF **off** (`SetPowerState LOW`). The
+interface then parks and ignores modem/SIM events until released.
+
+```
+igos@igos:~$ change wwan wwan0 airplane-mode enable
+```
+
+**Script:** `wwan_airplane.py enable --interface "$3"`
+
+> **Non-persistent by design.** Airplane mode is an operational action and is
+> **never written to the configuration** — a reboot always returns to normal
+> operation. This is deliberate: on a unit whose only management path is the
+> cellular link, a persistent radio-off would be unrecoverable remotely, so a
+> power cycle is always a way back.
+
+### `change wwan <wwanN> airplane-mode disable`
+
+Power the modem RF back **on** and restart the connection from scratch.
+
+```
+igos@igos:~$ change wwan wwan0 airplane-mode disable
+```
+
+**Script:** `wwan_airplane.py disable --interface "$3"`
+
+> **Airplane mode vs `set … disable`:** airplane mode is a *runtime* radio
+> silence that keeps the interface configured; `set interfaces wwan <wwanN>
+> disable` is a *configuration* teardown (delete-style, purges history) that
+> recreates the interface when removed. Use airplane mode for transient RF-off
+> (transport, maintenance); use `disable` to keep the config but not run the
+> interface.
+
+---
+
 ## SMS Commands
 
 ### `generate interfaces wwan <wwanN> sms number <phone> message <text>`

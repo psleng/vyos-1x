@@ -3,7 +3,10 @@
      Replaces the upstream VyOS WWAN tree.  Legacy per-interface apn,
      authentication, connect-on-demand, address, and dhcp-options nodes are
      removed — those functions are handled per-SIM by the enhanced service.
-     PD is a direct child for FSM-native IPv6 prefix delegation (no dhcp6c).
+     ipv6-bridging copies the carrier-assigned IPv6 prefix (typically /64)
+     verbatim to a single downstream LAN interface (FSM-native, NOT DHCPv6
+     PD); real DHCPv6 prefix delegation uses the standard dhcpv6-options
+     nodes (handled by dhcp6c).
 -->
 <interfaceDefinition>
   <node name="interfaces">
@@ -36,16 +39,21 @@
           #include <include/interface/mirror.xml.i>
           #include <include/interface/ipv4-options.xml.i>
           <!-- ── IPv6 options (WWAN-specific) ──────────────────────────────
-               Reconstructed from include/interface/ipv6-options.xml.i and
-               ipv6-options-with-nd.xml.i but WITHOUT the host-SLAAC address
-               modes: `address autoconf`, `address eui64` and
-               `address interface-identifier`.  The Telit modem terminates
-               3GPP SLAAC internally and never relays a Router Advertisement
-               onto wwanN, so host SLAAC can never complete; the WWAN FSM
-               installs the carrier /128 from ModemManager Ip6Config and is
-               the sole owner of all RA/SLAAC/DAD sysctls (see
-               _harden_wwan_ipv6_sysctls).  Exposing those nodes would
-               advertise a capability the hardware cannot deliver. -->
+               A deliberately REDUCED subset of the standard VyOS interface
+               IPv6 options — only the knobs actually honoured on wwanN.  The
+               modem terminates 3GPP SLAAC internally, never relays a Router
+               Advertisement onto wwanN, and the WWAN FSM is the sole owner of
+               the interface's RA/SLAAC/DAD sysctls and link-local (see
+               _harden_wwan_ipv6_sysctls, which forces accept_ra / autoconf /
+               accept_dad / dad_transmits and a stable-privacy link-local).
+               Intentionally NOT exposed, because they would do nothing or
+               fight the FSM:
+                 - host-SLAAC address modes `address autoconf`, `address eui64`,
+                   `address interface-identifier` (host SLAAC can never complete);
+                 - `accept-dad` / `dup-addr-detect-transmits` (the FSM overrides
+                   these on every commit — see WWANIf.set_ipv6_dad_* guards);
+                 - `address no-default-link-local` (the FSM manages the wwanN
+                   link-local; removing it would break IPv6 NDP). -->
           <node name="ipv6">
             <properties>
               <help>IPv6 routing parameters</help>
@@ -54,36 +62,7 @@
               #include <include/interface/adjust-mss.xml.i>
               #include <include/interface/base-reachable-time.xml.i>
               #include <include/interface/disable-forwarding.xml.i>
-              #include <include/interface/ipv6-accept-dad.xml.i>
-              #include <include/interface/ipv6-dup-addr-detect-transmits.xml.i>
               #include <include/interface/source-validation.xml.i>
-              <node name="address">
-                <properties>
-                  <help>IPv6 address configuration modes</help>
-                </properties>
-                <children>
-                  #include <include/interface/ipv6-address-no-default-link-local.xml.i>
-                </children>
-              </node>
-            </children>
-          </node>
-          <!-- ── IPv6 management-address (FSM-stamped <prefix>::1 on wwanN) ── -->
-          <!--
-            Extends the standard `ipv6` node above with a `management-address`
-            sub-tree.  Opt-in: creating this node tells the FSM to stamp a
-            stable host address inside the carrier prefix directly on wwanN
-            (default `<prefix>::1`) so the router itself is reachable from
-            the public internet at a name you can pin to DDNS.  An
-            FSM-owned ip6tables chain locks the address down: ICMPv6,
-            ESTABLISHED/RELATED, and TCP 443 (VyOS HTTPS UI) are permitted
-            by default; everything else is dropped.  Use `disable-default-https`
-            to suppress the auto-443 rule, `permit-tcp` / `permit-udp` to
-            open additional ports, and `permit-source` to restrict all
-            permits to specific source prefixes.  Mutually exclusive with
-            `ip-passthrough`.
-          -->
-          <node name="ipv6">
-            <children>
               <node name="management-address">
                 <properties>
                   <help>Stable management address inside the carrier IPv6 prefix on this WWAN interface</help>
@@ -155,6 +134,21 @@
               </node>
             </children>
           </node>
+          <!-- ── IPv6 management-address (FSM-stamped <prefix>::1 on wwanN) ── -->
+          <!--
+            Extends the standard `ipv6` node above with a `management-address`
+            sub-tree.  Opt-in: creating this node tells the FSM to stamp a
+            stable host address inside the carrier prefix directly on wwanN
+            (default `<prefix>::1`) so the router itself is reachable from
+            the public internet at a name you can pin to DDNS.  An
+            FSM-owned ip6tables chain locks the address down: ICMPv6,
+            ESTABLISHED/RELATED, and TCP 443 (VyOS HTTPS UI) are permitted
+            by default; everything else is dropped.  Use `disable-default-https`
+            to suppress the auto-443 rule, `permit-tcp` / `permit-udp` to
+            open additional ports, and `permit-source` to restrict all
+            permits to specific source prefixes.  Mutually exclusive with
+            `ip-passthrough`.
+          -->
           #include <include/interface/dhcpv6-options.xml.i>
           <!-- ── Connection mode ─────────────────────────────────── -->
           <leafNode name="connection-mode">
@@ -226,6 +220,21 @@
               <help>Set the system clock from cellular network time (NITZ) at registration</help>
               <valueless/>
             </properties>
+          </leafNode>
+          <!-- ── Default route metric ────────────────────────────── -->
+          <leafNode name="default-route-metric">
+            <properties>
+              <help>Metric for the carrier-assigned default route(s) installed on this interface</help>
+              <valueHelp>
+                <format>u32:0-255</format>
+                <description>Route metric; lower wins. Default 220 keeps cellular below a wired primary (failover/static=1, DHCP=210)</description>
+              </valueHelp>
+              <constraint>
+                <validator name="numeric" argument="--range 0-255"/>
+              </constraint>
+              <constraintErrorMessage>Default route metric must be between 0 and 255</constraintErrorMessage>
+            </properties>
+            <defaultValue>220</defaultValue>
           </leafNode>
           <!-- ── SIM management ──────────────────────────────────── -->
           <node name="sim">
@@ -606,7 +615,7 @@
                             <description>RSRP in dBm (integer only, no unit suffix)</description>
                           </valueHelp>
                           <constraint>
-                            <validator name="numeric" argument="--range -140--44"/>
+                            <regex>^-(4[4-9]|[5-9][0-9]|1[0-3][0-9]|140)$</regex>
                           </constraint>
                           <constraintErrorMessage>RSRP threshold must be an integer from -140 to -44 (do not append dBm)</constraintErrorMessage>
                         </properties>
@@ -620,7 +629,7 @@
                             <description>RSSI in dBm (integer only, no unit suffix)</description>
                           </valueHelp>
                           <constraint>
-                            <validator name="numeric" argument="--range -120--50"/>
+                            <regex>^-(5[0-9]|[6-9][0-9]|1[01][0-9]|120)$</regex>
                           </constraint>
                           <constraintErrorMessage>RSSI threshold must be an integer from -120 to -50 (do not append dBm)</constraintErrorMessage>
                         </properties>
@@ -687,6 +696,82 @@
                 </properties>
                 <defaultValue>10</defaultValue>
               </leafNode>
+              <leafNode name="translate-prefix">
+                <properties>
+                  <help>Enable NPTv6 (RFC 6296) translation using this stable internal /64 instead of copying the carrier prefix; the LAN keeps this prefix across carrier renumbering</help>
+                  <valueHelp>
+                    <format>ipv6net</format>
+                    <description>Stable internal IPv6 prefix, must be a /64 (e.g. fd00:6c61:6e30::/64)</description>
+                  </valueHelp>
+                  <constraint>
+                    <validator name="ipv6-prefix"/>
+                  </constraint>
+                  <constraintErrorMessage>translate-prefix must be a valid IPv6 /64 prefix (e.g. fd00:6c61:6e30::/64)</constraintErrorMessage>
+                </properties>
+              </leafNode>
+              <node name="router-advert">
+                <properties>
+                  <help>Router Advertisement (RFC 4861) timers for the bridged prefix</help>
+                </properties>
+                <children>
+                  <leafNode name="min-interval">
+                    <properties>
+                      <help>Minimum time between unsolicited Router Advertisements (RFC 4861 MinRtrAdvInterval)</help>
+                      <valueHelp>
+                        <format>u32:3-1350</format>
+                        <description>Interval in seconds</description>
+                      </valueHelp>
+                      <constraint>
+                        <validator name="numeric" argument="--range 3-1350"/>
+                      </constraint>
+                      <constraintErrorMessage>Minimum interval must be 3-1350 seconds and no more than 0.75 x max-interval</constraintErrorMessage>
+                    </properties>
+                    <defaultValue>3</defaultValue>
+                  </leafNode>
+                  <leafNode name="max-interval">
+                    <properties>
+                      <help>Maximum time between unsolicited Router Advertisements (RFC 4861 MaxRtrAdvInterval)</help>
+                      <valueHelp>
+                        <format>u32:4-1800</format>
+                        <description>Interval in seconds</description>
+                      </valueHelp>
+                      <constraint>
+                        <validator name="numeric" argument="--range 4-1800"/>
+                      </constraint>
+                      <constraintErrorMessage>Maximum interval must be 4-1800 seconds</constraintErrorMessage>
+                    </properties>
+                    <defaultValue>10</defaultValue>
+                  </leafNode>
+                  <leafNode name="preferred-lifetime">
+                    <properties>
+                      <help>Preferred lifetime of the advertised prefix (RFC 4861 AdvPreferredLifetime)</help>
+                      <valueHelp>
+                        <format>u32:0-2592000</format>
+                        <description>Lifetime in seconds</description>
+                      </valueHelp>
+                      <constraint>
+                        <validator name="numeric" argument="--range 0-2592000"/>
+                      </constraint>
+                      <constraintErrorMessage>Preferred lifetime must be 0-2592000 seconds and no more than valid-lifetime</constraintErrorMessage>
+                    </properties>
+                    <defaultValue>1800</defaultValue>
+                  </leafNode>
+                  <leafNode name="valid-lifetime">
+                    <properties>
+                      <help>Valid lifetime of the advertised prefix (RFC 4861 AdvValidLifetime)</help>
+                      <valueHelp>
+                        <format>u32:1-2592000</format>
+                        <description>Lifetime in seconds</description>
+                      </valueHelp>
+                      <constraint>
+                        <validator name="numeric" argument="--range 1-2592000"/>
+                      </constraint>
+                      <constraintErrorMessage>Valid lifetime must be 1-2592000 seconds</constraintErrorMessage>
+                    </properties>
+                    <defaultValue>3600</defaultValue>
+                  </leafNode>
+                </children>
+              </node>
             </children>
           </node>
           <!-- ── IP Passthrough (DOCSIS-modem-style single-host) ── -->
@@ -733,7 +818,7 @@
                 </properties>
                 <defaultValue>60</defaultValue>
               </leafNode>
-              <leafNode name="management-address">
+              <leafNode name="passthrough-management-address">
                 <properties>
                   <help>Auto-provisioned IPv4 management address on the passthrough interface (Policy B: only applied if 'interfaces ethernet &lt;if&gt; address' is unset)</help>
                   <valueHelp>
@@ -746,7 +831,7 @@
                 </properties>
                 <defaultValue>192.168.200.1/24</defaultValue>
               </leafNode>
-              <leafNode name="management-address-ipv6">
+              <leafNode name="passthrough-management-address-ipv6">
                 <properties>
                   <help>Auto-provisioned IPv6 management address on the passthrough interface (Policy B: only applied if 'interfaces ethernet &lt;if&gt; address' is unset)</help>
                   <valueHelp>
@@ -782,6 +867,60 @@
                   <valueless/>
                 </properties>
               </leafNode>
+              <leafNode name="legacy-dhcpv4-compat">
+                <properties>
+                  <help>Legacy DHCPv4 compatibility mode: use same-subnet router/netmask and suppress classless route option 121 for older clients that do not implement RFC 3442</help>
+                  <valueless/>
+                </properties>
+              </leafNode>
+              <node name="router-advert">
+                <properties>
+                  <help>Router Advertisement tuning for the downstream device (dnsmasq RA)</help>
+                </properties>
+                <children>
+                  <leafNode name="interval">
+                    <properties>
+                      <help>Interval between unsolicited Router Advertisements (RFC 4861 MaxRtrAdvInterval)</help>
+                      <valueHelp>
+                        <format>u32:4-1800</format>
+                        <description>Interval in seconds</description>
+                      </valueHelp>
+                      <constraint>
+                        <validator name="numeric" argument="--range 4-1800"/>
+                      </constraint>
+                      <constraintErrorMessage>RA interval must be 4-1800 seconds</constraintErrorMessage>
+                    </properties>
+                    <defaultValue>60</defaultValue>
+                  </leafNode>
+                  <leafNode name="router-lifetime">
+                    <properties>
+                      <help>Default-router lifetime advertised downstream (RFC 4861 AdvDefaultLifetime; 0 = not a default router)</help>
+                      <valueHelp>
+                        <format>u32:0-9000</format>
+                        <description>Lifetime in seconds</description>
+                      </valueHelp>
+                      <constraint>
+                        <validator name="numeric" argument="--range 0-9000"/>
+                      </constraint>
+                      <constraintErrorMessage>Router lifetime must be 0-9000 seconds (0, or at least the RA interval)</constraintErrorMessage>
+                    </properties>
+                    <defaultValue>1800</defaultValue>
+                  </leafNode>
+                  <leafNode name="prefix-lifetime">
+                    <properties>
+                      <help>SLAAC / DHCPv6 address lifetime for the downstream device (default: the DHCP lease-time)</help>
+                      <valueHelp>
+                        <format>u32:0-2592000</format>
+                        <description>Lifetime in seconds</description>
+                      </valueHelp>
+                      <constraint>
+                        <validator name="numeric" argument="--range 0-2592000"/>
+                      </constraint>
+                      <constraintErrorMessage>Prefix lifetime must be 0-2592000 seconds</constraintErrorMessage>
+                    </properties>
+                  </leafNode>
+                </children>
+              </node>
             </children>
           </node>
           <!-- ── Reconnection ────────────────────────────────────── -->
@@ -809,7 +948,7 @@
                         <description>RSRP in dBm (integer only, no unit suffix)</description>
                       </valueHelp>
                       <constraint>
-                        <validator name="numeric" argument="--range -140--44"/>
+                        <regex>^-(4[4-9]|[5-9][0-9]|1[0-3][0-9]|140)$</regex>
                       </constraint>
                       <constraintErrorMessage>RSRP threshold must be an integer from -140 to -44 (do not append dBm)</constraintErrorMessage>
                     </properties>
@@ -823,7 +962,7 @@
                         <description>RSSI in dBm (integer only, no unit suffix)</description>
                       </valueHelp>
                       <constraint>
-                        <validator name="numeric" argument="--range -120--50"/>
+                        <regex>^-(5[0-9]|[6-9][0-9]|1[01][0-9]|120)$</regex>
                       </constraint>
                       <constraintErrorMessage>RSSI threshold must be an integer from -120 to -50 (do not append dBm)</constraintErrorMessage>
                     </properties>
@@ -1255,13 +1394,13 @@
                 <properties>
                   <help>Cooldown between hardware reset attempts</help>
                   <valueHelp>
-                    <format>u32:60-3600</format>
+                    <format>u32:180-3600</format>
                     <description>Cooldown in seconds</description>
                   </valueHelp>
                   <constraint>
-                    <validator name="numeric" argument="--range 60-3600"/>
+                    <validator name="numeric" argument="--range 180-3600"/>
                   </constraint>
-                  <constraintErrorMessage>Cooldown must be 60-3600 seconds</constraintErrorMessage>
+                  <constraintErrorMessage>Cooldown must be 180-3600 seconds</constraintErrorMessage>
                 </properties>
                 <defaultValue>300</defaultValue>
               </leafNode>
@@ -1284,14 +1423,14 @@
                   <help>Stepped backoff intervals from FAILED state</help>
                   <valueHelp>
                     <format>txt</format>
-                    <description>Comma-separated seconds (default: 600,1800,3600,7200)</description>
+                    <description>Comma-separated seconds (default: 30,60,120,300,600,1800,3600)</description>
                   </valueHelp>
                   <constraint>
                     <regex>^[0-9]+(,[0-9]+)*$</regex>
                   </constraint>
-                  <constraintErrorMessage>Intervals must be comma-separated integers (e.g. 600,1800,3600,7200)</constraintErrorMessage>
+                  <constraintErrorMessage>Intervals must be comma-separated integers (e.g. 30,60,120,300,600,1800,3600)</constraintErrorMessage>
                 </properties>
-                <defaultValue>600,1800,3600,7200</defaultValue>
+                <defaultValue>30,60,120,300,600,1800,3600</defaultValue>
               </leafNode>
               <leafNode name="max-interval">
                 <properties>

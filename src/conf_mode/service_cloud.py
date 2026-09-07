@@ -25,7 +25,35 @@ from vyos import airbag
 airbag.enable()
 
 config_file = r'/etc/igos-cloud-proxy/igos-cloud-proxy.conf'
+persistent_config_file = r'/config/igos-cloud-proxy/igos-cloud-proxy.conf'
 service_name = 'igos-cloud-proxy'
+
+
+def _read_registration_pin(path):
+    try:
+        with open(path) as config_fd:
+            current_config = json.load(config_fd)
+        registration_code = current_config.get('tmpDeviceRegistrationPIN')
+        if isinstance(registration_code, str) and registration_code:
+            return registration_code
+    except (OSError, json.JSONDecodeError, AttributeError):
+        pass
+    return None
+
+
+def _write_persistent_registration_pin(registration_code):
+    if not isinstance(registration_code, str) or not registration_code:
+        return
+
+    persistent_config_dir = os.path.dirname(persistent_config_file)
+    if not os.path.exists(persistent_config_dir):
+        os.makedirs(persistent_config_dir)
+
+    config = {'tmpDeviceRegistrationPIN': registration_code}
+    with open(persistent_config_file, 'w') as config_fd:
+        json.dump(config, config_fd, indent=4)
+        config_fd.write('\n')
+    os.chmod(persistent_config_file, 0o600)
 
 
 def get_config(config=None):
@@ -58,14 +86,14 @@ def generate(cloud):
         os.makedirs(config_dir)
 
     config = {}
-    try:
-        with open(config_file) as config_fd:
-            current_config = json.load(config_fd)
-        registration_code = current_config.get('tmpDeviceRegistrationPIN')
-        if isinstance(registration_code, str) and registration_code:
-            config['tmpDeviceRegistrationPIN'] = registration_code
-    except (OSError, json.JSONDecodeError, AttributeError):
-        pass
+    registration_code = _read_registration_pin(persistent_config_file)
+    if registration_code is None:
+        registration_code = _read_registration_pin(config_file)
+        if registration_code is not None:
+            _write_persistent_registration_pin(registration_code)
+
+    if registration_code is not None:
+        config['tmpDeviceRegistrationPIN'] = registration_code
 
     if 'override_device_url' in cloud:
         config['perleCloudURL_OVERRIDE'] = cloud['override_device_url']

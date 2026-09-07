@@ -32,7 +32,11 @@ from dbus_next.message import Message  # pylint: disable=import-error
 from dbus_next.errors import DBusError  # pylint: disable=import-error
 from dbus_next import Variant  # pylint: disable=import-error
 from automaton import machines  # pylint: disable=import-error
-from vyos.utils.wwan.interfaces_wwan_util import modem_reset
+from vyos.utils.wwan.interfaces_wwan_util import (
+    modem_reset,
+    modem_reset_quiesced,
+    restart_modemmanager_only,
+)
 from vyos.utils.wwan import interfaces_wwan_diag as wwan_diag
 from vyos.utils.wwan.sim_controller import make_sim_controller
 
@@ -53,6 +57,7 @@ from vyos.utils.wwan.connection_manager import ConnectionManager
 from vyos.utils.wwan.state_transition_manager import StateTransitionManager
 from vyos.utils.wwan.interfaces_wwan_passthrough import PassthroughManager
 from vyos.utils.wwan.interfaces_wwan_bridging_radvd import BridgingRadvdManager
+from vyos.utils.network import get_vrf_tableid
 
 from vyos.utils.wwan.wwan_logging import setup_logging, reconfigure_logging
 
@@ -376,8 +381,9 @@ class ModemStateMachine:
         # __runtime_state__ and restored before config is applied.
         self.bearer_requested = False
         self._shutting_down = False         # Set by shutdown() to suppress recovery
-        self._airplane_mode_requested = False  # Set when disable=true is applied
+        self._airplane_mode_requested = False  # airplane requested (may be pending modem bind)
         self._airplane_mode_active = False     # True once SetPowerState(LOW) succeeded
+        self._admin_disabled = False           # parked in airplane mode: stay down, ignore modem/SIM events
         # Timers/tasks referenced by _admin_disable() →
         # _stop_network_interface_monitoring() before any config is applied.
         # _apply_parsed_configuration() re-initializes these to None as well,
@@ -431,6 +437,14 @@ class ModemStateMachine:
         self.last_failover_time = 0          # Timestamp of last SIM failover
         self.failover_count = 0              # Number of failovers since last stable connection
         self.lifetime_failover_count = 0     # Total failovers since boot (never reset by stable connection)
+        # SNMP failover-table detail (surfaced in _build_status)
+        self.failback_count = 0              # Failbacks to primary since boot
+        self.last_failover_from_slot = 0     # Slot the last failover/failback switched FROM
+        self.last_failover_to_slot = 0       # Slot the last failover/failback switched TO
+        self.last_failover_reason = ''       # Reason string for the last failover/failback
+        # Last emitted alert/event (SNMP IfLastEventTime/Description)
+        self._last_event_time = 0
+        self._last_event_description = ''
         self.failover_cooldown_seconds = 600 # 10 minute cooldown between failovers (carrier-friendly)
         self.max_failovers_before_backoff = 3 # Max failovers before extended backoff
         self.failover_backoff_seconds = 3600 # 1 hour extended backoff after max failovers (carrier-friendly)
@@ -574,6 +588,14 @@ class ModemStateMachine:
         self.hardware_reset_enabled = True
         self.max_hardware_resets = 3
         self.hardware_reset_attempts = 0
+        # Forever-failsafe reset cadence.  After the frequent phase
+        # (max_hardware_resets resets spaced by reset_cooldown_seconds) is
+        # spent, the modem is NOT abandoned: resets continue INDEFINITELY at
+        # this slower interval until a stable connection clears the counter
+        # (_reset_failover_counters).  So a prolonged outage (e.g. hours with no
+        # signal) can never permanently exhaust recovery — it just slows to
+        # this cadence, then resumes the fast burst once the modem connects.
+        self.failsafe_reset_interval = 1800   # 30 min slow-retry, forever
 
         # Service-initiated modem operations tracking (improved reset-aware)
         self.service_initiated_disable = False  # Flag to prevent false SIM missing detection
@@ -606,7 +628,11 @@ class ModemStateMachine:
         self._failed_retry_operation_started_at = 0.0
         self._failed_retry_operation_timeout = 300.0
         self._failed_retry_enabled = True    # Overridden by config in _apply_parsed_configuration
-        self._failed_retry_intervals = [600, 1800, 3600, 7200]  # 10, 30, 60, 120 min (carrier-friendly)
+        # Fast early retries recover from TRANSIENT failures (e.g. signal/antenna
+        # loss then return) within ~30-60s instead of waiting out a long
+        # carrier-friendly interval; the tail (10/30/60 min, cap 2 hr) still
+        # avoids hammering the carrier on a PERSISTENT failure (dead data plan).
+        self._failed_retry_intervals = [30, 60, 120, 300, 600, 1800, 3600]  # 30s,1m,2m,5m,10m,30m,60m
         self._failed_retry_max_interval = 7200  # Cap at 2 hr (carrier-friendly)
         # Upper bound on the shutdown bearer-disconnect D-Bus call.  dbus_next
         # has no client-side timeout, and Simple.Disconnect() on a
@@ -643,6 +669,27 @@ class ModemStateMachine:
 
         # Modem removal flag — lets CancelledError handlers log the right reason
         self._modem_removed = False
+
+        # Post-enumeration settle.  A Telit FN920C04 appears on the USB bus
+        # ~15s after a reset but is not actually ready to service QMI/AT
+        # operations (SIM read, enable, connect) for roughly another ~35s.
+        # Poking it inside that window causes spurious failures (empty SIM
+        # path, cancelled enable, connect errors) and the recovery churn that
+        # follows.  Active configuration waits out the remainder of this
+        # window — measured from when the modem was last detected — before
+        # touching the modem, INCLUDING at initial startup.  Configurable;
+        # set to 0 to disable.
+        self._modem_settle_seconds = 40.0
+        self._modem_detected_at = 0.0
+
+        # Unprobed settle window for the QUIESCED escalation reset
+        # (modem_reset_quiesced): ModemManager is stopped, the modem is
+        # PERST-reset, then left to boot its QMI/AT command stack for this many
+        # seconds with nobody probing it, before MM is started to classify it
+        # on the first pass.  Sized to the modem's ready-to-register time
+        # (~65s observed on the FN920C04) with margin.  Set to 0 to fall back
+        # to a plain (MM-live) reset.
+        self._modem_reset_settle_seconds = 70.0
 
         # SIM switch in-progress flag — suppresses modem-removed handler during
         # expected modem disappearance caused by SetPrimarySimSlot (Telit LN920
@@ -733,6 +780,9 @@ class ModemStateMachine:
         self._bridging_carrier_prefix = None      # IPv6Network
         self._bridging_carrier_prefix_len = None  # int
         self._bridging_bearer_addr = None         # bearer's own /128 (excluded from LAN host bit)
+        self._bridging_dns_servers = []           # carrier IPv6 DNS list (advertised via RDNSS)
+        self._bridging_translate_net = None       # NPTv6: stable internal /64 (None = verbatim bridging)
+        self._bridging_nptv6_active = False       # True when the nft NPTv6 prefix map is installed
         self._bridging_saved_sysctls = {}         # {path: original_value} for teardown
         self._bridging_proxy_entries = set()      # IPv6 addrs proxied on the wwan side
         self._bridging_ndp_task = None            # neighbor-watch task on the LAN side
@@ -938,6 +988,10 @@ class ModemStateMachine:
 
     def _emit_alert(self, alert_type: str, severity: str, message: str, **extra_fields):
         """Emit a normalized alert envelope through the manager-owned alert bus."""
+        # Record last event for SNMP IfLastEventTime/Description (regardless of
+        # whether an alert emitter is currently attached).
+        self._last_event_time = time.time()
+        self._last_event_description = message
         if not self.alert_emitter:
             return
 
@@ -960,29 +1014,52 @@ class ModemStateMachine:
                                'alert_type': alert_type})
 
     def _is_reset_allowed(self) -> bool:
-        """Check if hardware reset is allowed (not in cooldown period)"""
+        """Gate hardware resets with a two-tier cadence that NEVER gives up.
+
+        Tier 1 (frequent burst): up to ``max_hardware_resets`` resets, each
+        spaced by ``reset_cooldown_seconds`` — the fast recovery attempts.
+        Tier 2 (forever failsafe): once that budget is spent we do NOT stop
+        (a wedged modem would then stay dead forever, e.g. after a long
+        no-signal outage).  Resets instead continue INDEFINITELY at the slower
+        ``failsafe_reset_interval`` until a stable connection clears the counter
+        (_reset_failover_counters), at which point the fast burst is available
+        again.  So recovery always eventually happens once conditions allow,
+        without hammering a dead modem.
+        """
         if not self.hardware_reset_enabled:
             logger.warning("Hardware reset blocked - feature disabled by configuration",
                           extra={'interface_number': self.interface_number})
             return False
 
-        if self.hardware_reset_attempts >= self.max_hardware_resets:
-            logger.warning("Hardware reset blocked - max attempts reached",
-                          extra={'interface_number': self.interface_number,
-                                 'attempts': self.hardware_reset_attempts,
-                                 'max_attempts': self.max_hardware_resets})
-            return False
+        in_failsafe = self.hardware_reset_attempts >= self.max_hardware_resets
+        required_gap = (self.failsafe_reset_interval if in_failsafe
+                        else self.reset_cooldown_seconds)
 
         current_time = time.time()
         time_since_last_reset = current_time - self.last_reset_time
 
-        if time_since_last_reset < self.reset_cooldown_seconds:
-            remaining_cooldown = self.reset_cooldown_seconds - time_since_last_reset
-            logger.warning(f"Hardware reset blocked by cooldown - {remaining_cooldown:.1f}s remaining",
-                          extra={'interface_number': self.interface_number,
-                                'last_reset': self.last_reset_time,
-                                'cooldown_seconds': self.reset_cooldown_seconds})
+        if time_since_last_reset < required_gap:
+            remaining = required_gap - time_since_last_reset
+            logger.warning(
+                "Hardware reset blocked by %s - %.1fs remaining",
+                "forever-failsafe cadence" if in_failsafe else "cooldown",
+                remaining,
+                extra={'interface_number': self.interface_number,
+                       'last_reset': self.last_reset_time,
+                       'gap_seconds': required_gap,
+                       'in_failsafe': in_failsafe,
+                       'attempts': self.hardware_reset_attempts,
+                       'max_attempts': self.max_hardware_resets})
             return False
+
+        if in_failsafe:
+            logger.warning(
+                "Hardware reset budget (%d) spent — continuing on the "
+                "forever-failsafe cadence (every %.0fs) until the modem "
+                "recovers",
+                self.max_hardware_resets, self.failsafe_reset_interval,
+                extra={'interface_number': self.interface_number,
+                       'attempts': self.hardware_reset_attempts})
         return True
 
     def _record_reset(self):
@@ -1041,7 +1118,17 @@ class ModemStateMachine:
             "modem to recover",
             extra={'interface_number': self.interface_number})
         try:
-            ok = await modem_reset(self.interface_number)
+            # Quiesce ModemManager around the pulse so it re-probes an
+            # already-ready modem.  A bare MM-live reset re-probes the modem
+            # before its command stack is up and lands right back in
+            # unknown-capabilities (observed).  Fall back to the plain reset
+            # only if the settle window is disabled.
+            if self._modem_reset_settle_seconds > 0:
+                ok = await modem_reset_quiesced(
+                    self.interface_number,
+                    settle_seconds=self._modem_reset_settle_seconds)
+            else:
+                ok = await modem_reset(self.interface_number)
             self._record_reset()
             if not ok:
                 logger.warning(
@@ -1063,8 +1150,12 @@ class ModemStateMachine:
     def _start_failed_retry(self):
         """Launch background retry loop when FSM enters FAILED.
 
-        Uses exponential backoff (5, 10, 20, 30, 30, 30 ... min) to
-        reattempt the APN connection cascade.  Covers:
+        Uses escalating backoff (30s, 1, 2, 5, 10, 30, 60 min, then a 2 hr
+        cap) to reattempt the APN connection cascade.  Fast early intervals
+        recover quickly from TRANSIENT faults (signal/antenna loss then
+        return); the long tail stays carrier-friendly for PERSISTENT faults.
+        Covers:
+        - Signal/antenna loss then return (fast early retry)
         - Data plan topped up / monthly rollover
         - Carrier provisioning delay for new SIM
         - Transient network-side errors
@@ -1314,6 +1405,27 @@ class ModemStateMachine:
                             if await self._reset_modem_for_capability_fault():
                                 continue
                             # reset blocked or failed → fall through and defer
+                    # Modem is DISABLED (state 3) — re-enable it so it can
+                    # attempt registration again.  Without this the loop would
+                    # defer forever on a modem left DISABLED (e.g. after a SIM
+                    # failover to an empty primary slot, or a registration
+                    # timeout that deregistered it): nothing else re-enables it,
+                    # so a returning signal/antenna is never noticed and the
+                    # link never recovers on its own.  This is the automatic
+                    # equivalent of a manual `mmcli -m N --enable`.
+                    if mm_state == 3:  # MM_MODEM_STATE_DISABLED
+                        try:
+                            modem_iface = self.proxy.get_interface(MODEM_INTERFACE)
+                            await modem_iface.call_enable(True)
+                            logger.info(
+                                "Failed-state retry: re-enabled DISABLED modem "
+                                "so it can re-register",
+                                extra={'interface_number': self.interface_number})
+                        except Exception as en_e:
+                            logger.warning(
+                                "Failed-state retry: could not re-enable modem: "
+                                f"{en_e}",
+                                extra={'interface_number': self.interface_number})
                     logger.info(
                         f"Modem not ready (state {mm_state}), "
                         "deferring retry to next interval",
@@ -1672,9 +1784,52 @@ class ModemStateMachine:
         INITIAL_SCAN_INTERVAL = 5   # Start checking every 5 seconds
         MAX_SCAN_INTERVAL = 60      # Maximum 60 seconds between scans
         MAX_FAST_SCANS = 12         # Fast scans for first minute (12 * 5 = 60s)
+        # No-modem hardware-reset escalation.  If ModemManager never exposes
+        # our modem — e.g. it enumerates on USB but its AT/QMI command stack is
+        # wedged so MM cannot classify/probe it — a pure poll loop would wait
+        # forever.  Once the modem has been absent for one configured reset
+        # cooldown (self.reset_cooldown_seconds — the SAME `hardware-reset
+        # cooldown` value that spaces these reboots), escalate to a hardware
+        # reset, gated by the SAME cooldown/max-attempt rules as the recovery
+        # loop (_is_reset_allowed/_record_reset) so it can never reset in a
+        # tight loop.  Generic — applies to every modem, not one model.
+        # Upper bound on the escalation reset call.  The quiesced reset (stop
+        # MM -> PERST -> unprobed settle -> start MM -> re-enum wait)
+        # legitimately runs longer than the old MM-live reset, so size the cap
+        # to the settle plus stop/start/re-enum overhead; the scan-stall
+        # watchdog (_scan_stall_timeout) is raised to match for the duration of
+        # the call (below) so it cannot cancel the scan mid-reset.  A settle of
+        # 0 (quiesce disabled) keeps the old 90s bound.
+        no_modem_reset_timeout = (
+            self._modem_reset_settle_seconds + 150.0
+            if self._modem_reset_settle_seconds > 0 else 90.0)
 
         current_interval = INITIAL_SCAN_INTERVAL
         scan_count = 0
+
+        # Earliest monotonic time we may issue the next no-modem escalation
+        # reset.  The initial wait AND the spacing between attempts both use the
+        # configurable reset cooldown (self.reset_cooldown_seconds), so
+        # _is_reset_allowed() is not polled (nor its block-warnings logged) on
+        # every scan iteration.
+        scan_start = time.monotonic()
+        next_escalation_at = scan_start + self.reset_cooldown_seconds
+
+        # Cheap first-line recovery: restart ONLY ModemManager (no hardware
+        # reset) before escalating to the board PERST.  ModemManager sometimes
+        # invalidates and drops the modem object after consecutive control-port
+        # timeouts while the modem itself is alive; a fresh MM probe then
+        # re-detects it.  This fires earlier than the hardware reset, is capped
+        # separately, and does NOT consume the hardware-reset budget.  A genuine
+        # command-stack wedge won't answer the re-probe and falls through to the
+        # gated hardware escalation below.
+        mm_restart_max = 2               # cheap MM restarts before hardware reset
+        mm_restart_after_s = 45.0        # first MM restart after this much no-modem
+        mm_restart_interval_s = 60.0     # spacing between MM restarts
+        mm_restart_reenum_s = 30         # wait this long for the modem to re-appear
+        mm_restart_timeout = mm_restart_reenum_s + 25.0  # overall bound on the call
+        mm_restart_attempts = 0
+        next_mm_restart_at = scan_start + mm_restart_after_s
 
         # Capture the bus generation at entry.  If the FSM is re-bound to a
         # fresh ModemManager (update_bus_connection) while this loop is running,
@@ -1699,6 +1854,11 @@ class ModemStateMachine:
                 return
             scan_count += 1
             self._scan_last_progress_at = time.monotonic()
+            # True once ModemManager answers this scan, so a "no modem" result
+            # means the modem is genuinely absent from a RESPONSIVE MM (the
+            # wedge case) rather than a D-Bus/MM error — only the former
+            # escalates to a reset.
+            scan_ok = False
 
             try:
                 msg = Message(
@@ -1721,6 +1881,7 @@ class ModemStateMachine:
                     path for path, interfaces in managed_objects.items()
                     if MODEM_INTERFACE in interfaces
                 ]
+                scan_ok = True  # MM responded; a missing modem below is real
 
                 if paths:
                     logger.debug("Found modem paths during scan",
@@ -1811,6 +1972,148 @@ class ModemStateMachine:
                 logger.error(f"Scan error: {e}",
                             extra={'interface_number': self.interface_number,
                                    'scan_count': scan_count})
+
+            # ── MM-restart rung (cheap; recovers "MM gave up on the modem") ──
+            # Before any hardware reset, try restarting ModemManager only.  MM
+            # can invalidate and drop the modem object after consecutive
+            # control-port timeouts while the modem's command stack is actually
+            # alive; a fresh MM probe then re-detects it.  This never
+            # power-cycles the modem and does NOT consume the hardware-reset
+            # budget; a real firmware wedge won't answer the re-probe and falls
+            # through to the gated hardware reset below.
+            if (scan_ok
+                    and not getattr(self, '_admin_disabled', False)
+                    and mm_restart_attempts < mm_restart_max
+                    and time.monotonic() >= next_mm_restart_at):
+                mm_restart_attempts += 1
+                next_mm_restart_at = time.monotonic() + mm_restart_interval_s
+                logger.warning(
+                    "ModemManager exposes no modem after %.0fs — restarting "
+                    "ModemManager only (attempt %d/%d) before any hardware reset",
+                    time.monotonic() - scan_start,
+                    mm_restart_attempts, mm_restart_max,
+                    extra={'interface_number': self.interface_number,
+                           'scan_count': scan_count})
+                # Raise the scan-stall watchdog for the bounded restart window
+                # so it cannot cancel the scan mid-restart; restore in finally.
+                self._scan_last_progress_at = time.monotonic()
+                saved_stall_timeout = self._scan_stall_timeout
+                self._scan_stall_timeout = max(
+                    self._scan_stall_timeout, mm_restart_timeout + 30.0)
+                mm_ok = False
+                try:
+                    mm_ok = await asyncio.wait_for(
+                        restart_modemmanager_only(
+                            self.interface_number,
+                            reenumerate_timeout=mm_restart_reenum_s),
+                        timeout=mm_restart_timeout)
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "ModemManager-restart recovery did not complete within "
+                        "%.0fs — falling through to hardware reset",
+                        mm_restart_timeout,
+                        extra={'interface_number': self.interface_number})
+                except Exception as mm_e:  # noqa: BLE001 -- best-effort
+                    logger.error(
+                        f"ModemManager-restart recovery failed: {mm_e}",
+                        extra={'interface_number': self.interface_number})
+                finally:
+                    self._scan_stall_timeout = saved_stall_timeout
+                    self._scan_last_progress_at = time.monotonic()
+                if mm_ok:
+                    logger.info(
+                        "ModemManager restart recovered the modem; resuming "
+                        "fast scan to pick it up",
+                        extra={'interface_number': self.interface_number})
+                    scan_count = 0
+                    current_interval = INITIAL_SCAN_INTERVAL
+                    self._scan_last_progress_at = time.monotonic()
+                    continue
+
+            # No-modem hardware-reset escalation — gated EXACTLY like the
+            # recovery loop.  Fires only when MM answered but still exposes no
+            # modem for us, the interface is not admin-disabled, and the modem
+            # has been absent for at least one reset cooldown
+            # (self.reset_cooldown_seconds).  _is_reset_allowed()
+            # enforces hardware_reset_enabled + max_hardware_resets +
+            # reset_cooldown_seconds (shared with every other reset path), so it
+            # can never reset in a tight loop and stops once the shared cap is
+            # hit; the cap clears when the modem finally connects
+            # (_reset_failover_counters).  The board GPIO PERST is the reset
+            # that actually un-wedges a modem whose command stack is hung, so we
+            # prefer it and do NOT let a routine scan restart ModemManager
+            # (allow_nuclear=False).
+            if (scan_ok
+                    and not getattr(self, '_admin_disabled', False)
+                    and time.monotonic() >= next_escalation_at):
+                if self._is_reset_allowed():
+                    logger.warning(
+                        "ModemManager still exposes no modem after %.0fs of "
+                        "scanning — escalating to a gated hardware reset (the "
+                        "modem may be enumerated but unresponsive to probing)",
+                        time.monotonic() - scan_start,
+                        extra={'interface_number': self.interface_number,
+                               'scan_count': scan_count})
+                    # Count the attempt and arm the cooldown up-front so the
+                    # rate limit holds even if the reset call times out/raises.
+                    self._record_reset()
+                    next_escalation_at = (time.monotonic()
+                                          + self.reset_cooldown_seconds)
+                    # Refresh the scan progress stamp AND raise the scan-stall
+                    # watchdog for the duration: the quiesced reset (stop MM ->
+                    # PERST -> unprobed settle -> start MM -> re-enum wait) runs
+                    # legitimately longer than the normal 120s watchdog, so we
+                    # must stop it cancelling this scan mid-reset, then restore.
+                    self._scan_last_progress_at = time.monotonic()
+                    saved_stall_timeout = self._scan_stall_timeout
+                    self._scan_stall_timeout = max(
+                        self._scan_stall_timeout,
+                        no_modem_reset_timeout + 30.0)
+                    reset_ok = False
+                    try:
+                        if self._modem_reset_settle_seconds > 0:
+                            # Quiesce MM around the pulse so it probes an
+                            # already-ready modem (first-pass classification).
+                            reset_coro = modem_reset_quiesced(
+                                self.interface_number,
+                                settle_seconds=self._modem_reset_settle_seconds)
+                        else:
+                            reset_coro = modem_reset(self.interface_number,
+                                                     prefer_hardware=True,
+                                                     allow_nuclear=False)
+                        reset_ok = await asyncio.wait_for(
+                            reset_coro, timeout=no_modem_reset_timeout)
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "No-modem escalation reset did not complete within "
+                            "%.0fs — will retry after cooldown",
+                            no_modem_reset_timeout,
+                            extra={'interface_number': self.interface_number})
+                    except Exception as reset_e:  # noqa: BLE001 -- best-effort
+                        logger.error(
+                            f"No-modem escalation reset failed: {reset_e}",
+                            extra={'interface_number': self.interface_number})
+                    finally:
+                        self._scan_stall_timeout = saved_stall_timeout
+                        self._scan_last_progress_at = time.monotonic()
+                    if reset_ok:
+                        # Board reset already waited for re-enumeration, so the
+                        # modem should be visible now — resume fast scanning to
+                        # pick it up on the next pass instead of the backed-off
+                        # interval.
+                        logger.info(
+                            "No-modem escalation reset succeeded; resuming fast "
+                            "scan for the re-enumerated modem",
+                            extra={'interface_number': self.interface_number})
+                        scan_count = 0
+                        current_interval = INITIAL_SCAN_INTERVAL
+                        self._scan_last_progress_at = time.monotonic()
+                        continue
+                else:
+                    # Blocked (disabled / max attempts / cooldown).  Re-check no
+                    # more than once per cooldown window to avoid log spam.
+                    next_escalation_at = (time.monotonic()
+                                          + self.reset_cooldown_seconds)
 
             # BACKOFF LOGIC: Start fast, then slow down for efficiency
             if scan_count <= MAX_FAST_SCANS:
@@ -2039,6 +2342,9 @@ class ModemStateMachine:
             return
         self._on_modem_found_in_progress = True
         try:
+            # Record this (re-)enumeration so active configuration waits out the
+            # post-enumeration settle window before poking the modem.
+            self._modem_detected_at = time.monotonic()
 
         # Set up a single PropertiesChanged handler for all interfaces on this proxy.
         # dbus_next delivers all PropertiesChanged signals through one callback;
@@ -2075,13 +2381,11 @@ class ModemStateMachine:
                             extra={'interface_number': self.interface_number,
                                    'current_state': self.machine.current_state})
 
-            # If config says the interface is admin-disabled, drive the
-            # modem to airplane mode now and stop — don't run the initial
-            # configuration cascade.  Covers the cold-start case where the
-            # FSM service restarted with cached `interface_disabled=True`.
-            if getattr(self, '_admin_disabled', False) or (
-                    self.config and self.config.get('interface_disabled')):
-                logger.info("Interface is admin-disabled — driving modem to airplane mode",
+            # If we bind to a modem while parked in airplane mode (e.g. the
+            # modem re-enumerated during airplane mode), drive it straight back
+            # to RF-off and stop -- don't run the initial connection cascade.
+            if getattr(self, '_admin_disabled', False):
+                logger.info("Interface is in airplane mode -- driving modem to RF off",
                            extra={'interface_number': self.interface_number})
                 self._admin_disabled = True
                 self.user_disconnected = True
@@ -2126,12 +2430,26 @@ class ModemStateMachine:
         so SIM-failover logic has a populated config to consult.
         """
         try:
+            # This cold-attach safety net must not race with the initial
+            # configuration task, which OWNS FAILED-at-attach recovery and now
+            # includes the post-enumeration settle.  Wait for that task to
+            # FINISH before reading state; if it is still running, defer to it
+            # entirely.  Acting while it configures/connects spawns a second
+            # connection attempt and the "bearer came up but FSM not connected
+            # — tearing down" churn.
             if self._initial_config_task is not None:
                 try:
                     await asyncio.wait_for(
-                        asyncio.shield(self._initial_config_task), timeout=30.0)
+                        asyncio.shield(self._initial_config_task),
+                        timeout=self._modem_settle_seconds + 90.0)
                 except (asyncio.TimeoutError, Exception):
-                    pass  # proceed regardless of config-task outcome
+                    pass
+                if not self._initial_config_task.done():
+                    logger.info(
+                        "Initial configuration still in progress — deferring "
+                        "cold-attach state dispatch to it",
+                        extra={'interface_number': self.interface_number})
+                    return
 
             if not self.proxy:
                 return
@@ -2620,6 +2938,18 @@ class ModemStateMachine:
                           'current_fsm_state': self.machine.current_state})
 
         current_fsm_state = self.machine.current_state
+
+        # ── Suppress ALL modem state events while parked in airplane mode ──
+        # The interface is intentionally down (RF off).  Nothing the modem
+        # emits -- including our own Enable(False) surfacing as DISABLED, or a
+        # SIM hotswap -- may revive it.  A dedicated early return here (rather
+        # than a flag checked inside each sub-branch) is what makes airplane
+        # mode robust against the SIM-missing -> failover path.
+        if getattr(self, '_admin_disabled', False):
+            logger.debug("Modem state %s ignored -- airplane mode", mm_state,
+                        extra={'interface_number': self.interface_number,
+                               'modem_state': mm_state})
+            return
 
         # ── Suppress modem state events during SIM switch ────────────
         # When a SIM switch is in progress the modem will cycle through
@@ -3227,41 +3557,21 @@ class ModemStateMachine:
 
     def apply_config(self, config: dict):
         """Apply configuration - handles all states properly"""
-        # ── Admin disable / enable transitions ──────────────────────────────
-        was_disabled = getattr(self, '_admin_disabled', False)
-        is_disabled = config.get('interface_disabled', False)
-
-        if is_disabled:
-            # Store config and flag; skip normal state processing
+        # ── Airplane mode is sticky against config commits ──
+        # Airplane mode (op-mode `change wwan wwanN airplane-mode enable`) is a
+        # runtime state driven via set_airplane_mode(), NOT via config.  If a
+        # config commit lands while parked in airplane mode, store it for when
+        # airplane mode is later cleared, but stay down -- a commit must never
+        # silently power the radio back on.  Exit is only via
+        # `airplane-mode disable` (or a reboot, since it is non-persistent).
+        if getattr(self, '_admin_disabled', False):
             if hasattr(self, 'config') and self.config:
                 self._previous_config = self.config.copy()
             self.config = config
-            self._admin_disabled = True
-            self._cancel_active_sim_removal_watchdog()
-            if not was_disabled:
-                logger.info("Interface administratively disabled",
-                           extra={'interface_number': self.interface_number})
-                self.user_disconnected = True
-                self._safe_create_task(self._admin_disable())
-            else:
-                logger.info("Interface remains disabled, configuration stored",
-                           extra={'interface_number': self.interface_number})
-            return
-
-        if was_disabled and not is_disabled:
-            self._admin_disabled = False
-            self.user_disconnected = False
-            logger.info("Interface re-enabled from admin-disabled state",
+            logger.info("Configuration stored while in airplane mode -- "
+                       "staying down until airplane mode is disabled",
                        extra={'interface_number': self.interface_number})
-            # Exit airplane mode (PowerState LOW → ON) before falling
-            # through to the normal apply path.  Scheduled as a task so
-            # the apply_config sync entry-point isn't blocked; the normal
-            # path's _ensure_modem_enabled also handles LOW→ON
-            # defensively if this hasn't completed in time.
-            if self._airplane_mode_requested or self._airplane_mode_active:
-                self._safe_create_task(self._exit_airplane_mode_if_needed())
-            # Fall through to normal apply logic — will trigger
-            # RECONFIGURE or initial config depending on current state.
+            return
 
         # ── Normal configuration path ───────────────────────────────────────
         # Store previous config for selective disconnection logic
@@ -3454,7 +3764,7 @@ class ModemStateMachine:
         self._current_bearer_ipv6 = None      # Last applied IPv6 address (bare, no prefix)
         self._current_bearer_ipv6_prefix = None  # e.g. '64' — length of the carrier prefix
         self._ipv6_egress_filter_active = False  # True when ip6tables whitelist chain is installed
-        self._ipv4_egress_filter_active = False  # True when iptables whitelist chain is installed
+        self._ipv4_egress_filter_active = False  # True when nft post-SNAT source guard is installed
         self._output_hygiene_active = False      # True when the OUTPUT egress-hygiene drops (v6 mcast + v4 mcast/bcast) are installed
         self._fsm_mss_clamp_v4_active = False    # FSM-owned mangle/FORWARD TCPMSS rule (v4)
         self._fsm_mss_clamp_v6_active = False    # FSM-owned mangle/FORWARD TCPMSS rule (v6)
@@ -3483,6 +3793,8 @@ class ModemStateMachine:
         self.hardware_reset_enabled = bool(self.parsed_config.raw_config.get('hardware_reset_enabled', True))
         self.max_hardware_resets = int(self.parsed_config.raw_config.get('max_hardware_resets', 3))
         self.reset_cooldown_seconds = int(self.parsed_config.raw_config.get('hardware_reset_cooldown', 300))
+        self.failsafe_reset_interval = int(self.parsed_config.raw_config.get(
+            'hardware_reset_failsafe_interval', 1800))
 
         logger.info("Applied timeout/reset runtime configuration",
                extra={'interface_number': self.interface_number,
@@ -3490,7 +3802,8 @@ class ModemStateMachine:
                   'registration_timeout': self.registration_timeout,
                   'hardware_reset_enabled': self.hardware_reset_enabled,
                   'max_hardware_resets': self.max_hardware_resets,
-                  'hardware_reset_cooldown': self.reset_cooldown_seconds})
+                  'hardware_reset_cooldown': self.reset_cooldown_seconds,
+                  'failsafe_reset_interval': self.failsafe_reset_interval})
 
         # Failed-state periodic retry configuration
         self._failed_retry_enabled = self.parsed_config.failed_retry.enabled
@@ -3527,10 +3840,29 @@ class ModemStateMachine:
         self._bridging_reconciliation_interval = int(
             self._bridging_config.get('reconciliation_interval', 10)
         )
+        # NPTv6 translate mode: an operator-chosen stable internal /64 that the
+        # LAN keeps across carrier renumbering; empty string = verbatim-copy
+        # bridging (the historical behaviour).
+        self._bridging_translate_net = None
+        _translate_prefix = (self._bridging_config or {}).get('translate_prefix') or ''
+        if _translate_prefix:
+            try:
+                self._bridging_translate_net = ipaddress.IPv6Network(
+                    _translate_prefix, strict=False)
+            except Exception as _e:
+                logger.warning(
+                    "IPv6 bridging translate-prefix %r invalid, ignoring: %s",
+                    _translate_prefix, _e,
+                    extra={'interface_number': self.interface_number})
         if self._bridging_config.get('enabled') and self._bridging_config.get('interface'):
-            logger.info("IPv6 bridging enabled → %s, reconciliation interval %ds",
+            logger.info("IPv6 bridging enabled → %s, reconciliation interval %ds, "
+                       "RA min/max %d/%ds, prefix pref/valid %d/%ds",
                        self._bridging_config['interface'],
                        self._bridging_reconciliation_interval,
+                       int(self._bridging_config.get('ra_min_interval', 3)),
+                       int(self._bridging_config.get('ra_max_interval', 10)),
+                       int(self._bridging_config.get('ra_preferred_lifetime', 1800)),
+                       int(self._bridging_config.get('ra_valid_lifetime', 3600)),
                        extra={'interface_number': self.interface_number})
 
         # IPv6 management-address (FSM-stamped <prefix>::host-id on wwanN).
@@ -3552,6 +3884,33 @@ class ModemStateMachine:
                 extra={'interface_number': self.interface_number},
             )
 
+    async def _await_modem_settle(self, reason: str = '') -> None:
+        """Wait out the post-enumeration settle window before active modem ops.
+
+        The FN920C04 appears on the USB bus ~15s after a reset but is not
+        actually ready to service QMI/AT operations for roughly another ~35s.
+        Acting inside that window causes spurious failures (empty SIM path,
+        cancelled enable, connect errors) and recovery churn.  Sleep the
+        remainder of ``self._modem_settle_seconds`` measured from the last
+        detection (``self._modem_detected_at``), so a modem that has already
+        been up a while is not delayed.  No-op once the window has passed or
+        when disabled (settle <= 0).
+        """
+        if self._modem_settle_seconds <= 0:
+            return
+        detected = self._modem_detected_at or time.monotonic()
+        remaining = self._modem_settle_seconds - (time.monotonic() - detected)
+        if remaining <= 0:
+            return
+        logger.info(
+            f"Post-enumeration settle: waiting {remaining:.0f}s for the modem "
+            "to become fully ready before active operations",
+            extra={'interface_number': self.interface_number,
+                   'reason': reason,
+                   'settle_seconds': self._modem_settle_seconds,
+                   'remaining_seconds': round(remaining, 1)})
+        await asyncio.sleep(remaining)
+
     async def _configure_modem_initial(self):
         """Initial modem configuration - configure SIM/bands/carrier BEFORE network operations"""
         try:
@@ -3566,6 +3925,11 @@ class ModemStateMachine:
 
             logger.info("Starting initial modem configuration",
                        extra={'interface_number': self.interface_number})
+
+            # Post-enumeration settle: the modem enumerates well before it is
+            # truly ready; wait out the remaining settle window before ANY
+            # active operation (state read, reset, SIM/band config, connect).
+            await self._await_modem_settle('initial_config')
 
             # Step 0: Check if modem is already in an active state (abnormal for service startup)
             props = self.proxy.get_interface("org.freedesktop.DBus.Properties")
@@ -4260,6 +4624,56 @@ class ModemStateMachine:
                           extra={'interface_number': self.interface_number})
             return {}
 
+    async def _wait_for_sim_ready(self, timeout: float = 20.0,
+                                  poll_interval: float = 1.0) -> 'str | None':
+        """Wait for the modem's SIM object to appear after a reset.
+
+        Right after a hardware reset / re-enumeration the FN920C04's SIM
+        interface is not ready for several seconds: Modem.Sim is transiently
+        '/' (empty) even though a SIM is physically present.  Reading it once
+        and declaring "No SIM" wrongly triggers a SIM failover (to an empty
+        primary slot) and a reset-churn loop.  Poll Modem.Sim until it exposes
+        a real object path or the window elapses.
+
+        Returns the SIM object path once one appears; '/' if it stays empty for
+        the whole window (genuinely absent); or None if Sim could never be read
+        (proxy gone / D-Bus errors throughout) — caller treats None as
+        inconclusive, NOT absent, and must not fail over on it.
+        """
+        deadline = time.monotonic() + timeout
+        last_err = None
+        read_ok = False
+        while True:
+            if not self.proxy:
+                return None
+            try:
+                props = self.proxy.get_interface(
+                    "org.freedesktop.DBus.Properties")
+                sim_variant = await props.call_get(MODEM_INTERFACE, "Sim")
+                sim_path = (sim_variant.value
+                            if hasattr(sim_variant, 'value') else sim_variant)
+                read_ok = True
+                if sim_path and sim_path != '/':
+                    logger.info("SIM interface ready",
+                               extra={'interface_number': self.interface_number,
+                                      'sim_path': sim_path})
+                    return sim_path
+            except Exception as e:  # noqa: BLE001 -- poll through transient errors
+                last_err = e
+            if time.monotonic() >= deadline:
+                if read_ok:
+                    logger.warning(
+                        "SIM interface still empty after settle window",
+                        extra={'interface_number': self.interface_number,
+                               'waited_seconds': round(timeout, 1)})
+                    return '/'
+                logger.warning(
+                    "Could not read SIM presence during settle window "
+                    f"(last error: {last_err})",
+                    extra={'interface_number': self.interface_number})
+                return None
+            await asyncio.sleep(poll_interval)
+
     async def _unlock_sim_if_needed(self):
         """Unlock SIM with PIN/PUK if required.
 
@@ -4287,6 +4701,31 @@ class ModemStateMachine:
             logger.info("Checking if SIM unlock is needed",
                        extra={'interface_number': self.interface_number,
                               'modem_state': state})
+
+            # Right after a hardware reset / re-enumeration the FN920C04's SIM
+            # interface is not ready for several seconds — Modem.Sim is
+            # transiently '/' even though a SIM is physically present.  When the
+            # modem reports NOT locked, wait for the SIM to actually appear
+            # before deciding it is absent; a first empty read would otherwise
+            # kick off a bogus SIM failover (to an empty primary slot) and a
+            # reset-churn loop.  Re-read State afterwards: the SIM may come up
+            # PIN-locked, in which case the state==2 branch below unlocks it.
+            if state != 2:
+                sim_path = await self._wait_for_sim_ready()
+                if sim_path == '/':
+                    logger.warning("⚠️ No SIM card detected in modem (Sim path is empty)",
+                                  extra={'interface_number': self.interface_number,
+                                         'modem_state': state,
+                                         'sim_path': sim_path})
+                    self.transition(ModemEvent.SIM_MISSING)
+                    self._safe_create_task(self._handle_sim_missing_failover())
+                    raise Exception("No SIM card present")
+                if sim_path is not None:
+                    try:
+                        state = (await props.call_get(
+                            MODEM_INTERFACE, "State")).value
+                    except Exception:
+                        pass
 
             # State 2 = LOCKED (needs PIN or PUK)
             if state == 2:
@@ -4323,32 +4762,13 @@ class ModemStateMachine:
                                   extra={'interface_number': self.interface_number,
                                          'unlock_required': unlock_required})
             else:
-                # Modem not locked - but check if SIM is actually present
-                # With no SIM, modem can still reach ENABLED state on some hardware
-                try:
-                    sim_path_variant = await props.call_get(MODEM_INTERFACE, "Sim")
-                    sim_path = sim_path_variant.value if hasattr(sim_path_variant, 'value') else sim_path_variant
-                    if not sim_path or sim_path == '/':
-                        logger.warning("⚠️ No SIM card detected in modem (Sim path is empty)",
-                                      extra={'interface_number': self.interface_number,
-                                             'modem_state': state,
-                                             'sim_path': sim_path})
-                        # Transition to WAITING_FOR_SIM
-                        self.transition(ModemEvent.SIM_MISSING)
-                        self._safe_create_task(self._handle_sim_missing_failover())
-                        raise Exception("No SIM card present")
-                    else:
-                        logger.info("SIM unlock not needed",
-                                   extra={'interface_number': self.interface_number,
-                                          'modem_state': state,
-                                          'sim_path': sim_path})
-                except DBusError as dbus_e:
-                    logger.warning(f"Could not check SIM presence: {dbus_e}",
-                                  extra={'interface_number': self.interface_number})
-                    # If we can't check, log but continue (don't block on D-Bus errors)
-                    logger.info("SIM unlock not needed (presence check inconclusive)",
-                               extra={'interface_number': self.interface_number,
-                                      'modem_state': state})
+                # Not locked and — per the settle-wait above — the SIM is
+                # present (or its presence was inconclusive).  The presence /
+                # absence decision was already made above, so there is nothing
+                # left to unlock here.
+                logger.info("SIM unlock not needed",
+                           extra={'interface_number': self.interface_number,
+                                  'modem_state': state})
 
         except Exception as e:
             if "No SIM card present" in str(e):
@@ -5746,6 +6166,34 @@ class ModemStateMachine:
                 return
 
             config_sim_slot = self.config.get('primary_sim_slot', 1)
+
+            # Honor per-slot enablement. If the configured primary slot is
+            # disabled, prefer an enabled slot so runtime behavior matches
+            # operator intent (`sim slot N disable`).
+            sim_slots_cfg = self.config.get('sim_slots', []) if self.config else []
+            slot_enabled_map = {
+                int(s.get('slot')): bool(s.get('enabled', True))
+                for s in sim_slots_cfg if isinstance(s, dict) and s.get('slot')
+            }
+            if slot_enabled_map and not slot_enabled_map.get(config_sim_slot, True):
+                alternate = next((slot for slot, enabled in sorted(slot_enabled_map.items())
+                                  if enabled), None)
+                if alternate is not None:
+                    logger.warning(
+                        "Primary SIM slot %s is disabled in config - "
+                        "using enabled slot %s",
+                        config_sim_slot, alternate,
+                        extra={'interface_number': self.interface_number,
+                               'configured_primary_slot': config_sim_slot,
+                               'selected_slot': alternate})
+                    config_sim_slot = alternate
+                else:
+                    logger.warning(
+                        "All configured SIM slots are disabled - retaining "
+                        "primary slot %s as fallback",
+                        config_sim_slot,
+                        extra={'interface_number': self.interface_number,
+                               'configured_primary_slot': config_sim_slot})
             self.config_active_sim = config_sim_slot
 
             logger.info("Configuring SIM slot while disabled",
@@ -6834,6 +7282,12 @@ class ModemStateMachine:
             trigger: Code path that triggered the event.
             extra_data: Optional dict of additional context.
         """
+        # Surface last failover/failback detail for the SNMP failover table.
+        self.last_failover_from_slot = from_sim or 0
+        self.last_failover_to_slot = to_sim or 0
+        self.last_failover_reason = reason or ''
+        if event_type == 'failback':
+            self.failback_count += 1
         event = {
             'timestamp': datetime.datetime.utcnow().isoformat() + 'Z',
             'event_type': event_type,
@@ -10153,7 +10607,8 @@ class ModemStateMachine:
         new_slot = new_slots.get(active_slot, {})
 
         connection_sim_params = ['apn', 'username', 'password', 'auth_type',
-                                 'pdp_type', 'roaming', 'supported_bands']
+                     'pdp_type', 'roaming', 'supported_bands',
+                     'enabled']
 
         for param in connection_sim_params:
             if old_slot.get(param) != new_slot.get(param):
@@ -11621,7 +12076,8 @@ class ModemStateMachine:
 
         try:
             # Monitor while connected
-            while self.machine.current_state == ModemState.CONNECTED.value:
+            while self.machine.current_state in (ModemState.CONNECTED.value,
+                                                 ModemState.USAGE_MONITORING.value):
                 try:
                     # Check data usage statistics from bearer
                     introspect = await self.bus.introspect(MODEM_MANAGER_SERVICE, self.bearer_path)
@@ -11729,7 +12185,7 @@ class ModemStateMachine:
                                     await self._handle_data_limit_failover()
                                     break
                                 elif data_action in ('disconnect', 'disable'):
-                                    self.transition(ModemEvent.USAGE_LIMIT_EXCEEDED)
+                                    await self._handle_data_limit_disconnect(data_action)
                                     break
                                 # 'none' (default) — log warning but take no action
                         else:
@@ -11794,6 +12250,33 @@ class ModemStateMachine:
             logger.error(f"Data limit failover failed: {e}",
                         extra={'interface_number': self.interface_number})
             self.transition(ModemEvent.CONNECTION_FAILED)
+
+    async def _handle_data_limit_disconnect(self, action: str):
+        """Enforce data-limit local disconnect/disable policies.
+
+        ``disable`` parks WWAN in airplane mode (RF off) until manually
+        re-enabled. ``disconnect`` holds the bearer down without forcing
+        airplane mode.
+        """
+        action = (action or 'disconnect').strip().lower()
+
+        logger.warning("Data limit action triggered: %s",
+                      action,
+                      extra={'interface_number': self.interface_number,
+                             'active_sim': self.current_active_sim})
+
+        # Keep the bearer down after this action unless/until explicitly
+        # reconnected by operator intent.
+        self.user_disconnected = True
+        self.bearer_requested = False
+
+        if action == 'disable':
+            await self.set_airplane_mode(True)
+            return
+
+        if self.machine.current_state in (ModemState.CONNECTED.value,
+                                          ModemState.USAGE_MONITORING.value):
+            self.transition(ModemEvent.DISCONNECT)
 
     # ── Per-SIM persistent usage tracking ────────────────────────────────────
 
@@ -13160,11 +13643,24 @@ class ModemStateMachine:
         status['interface_number'] = self.interface_number
         status['interface_name'] = getattr(self, 'interface_name', f"wwan{self.interface_number}")
         status['fsm_state'] = current_state
+        # Time in current FSM state (approximate — sampled when status is built).
+        if getattr(self, '_uptime_tracked_state', None) != current_state:
+            self._uptime_tracked_state = current_state
+            self._uptime_state_since = time.time()
+        status['fsm_state_uptime_seconds'] = int(time.time() - getattr(self, '_uptime_state_since', time.time()))
+        status['last_event_time'] = self._last_event_time or 0
+        status['last_event_description'] = self._last_event_description or ''
         status['modem_path'] = self.modem_path or ''
         status['bearer_path'] = self.bearer_path or ''
         status['config_applied'] = bool(self.config)
         status['user_disconnected'] = self.user_disconnected
         status['connect_requested'] = self.connect_requested
+        # Airplane mode (op-mode `change wwan wwanN airplane-mode enable`): the
+        # interface is parked with RF off.  Surfaced so `show` can report it.
+        status['airplane_mode'] = bool(
+            getattr(self, '_admin_disabled', False)
+            or getattr(self, '_airplane_mode_active', False)
+            or getattr(self, '_airplane_mode_requested', False))
 
         # ── 1a. Connection failure details ───────────────────────────────
         # These fields explain WHY the modem is in FAILED state so that
@@ -13821,6 +14317,15 @@ class ModemStateMachine:
         status['reconnect_attempt_count'] = self.reconnect_attempt_count
         status['reconnect_success_count'] = self.reconnect_success_count
         status['sim_switch_count'] = self.sim_switch_count
+        status['failover_in_progress'] = self._sim_failover_in_progress
+        status['failback_count'] = self.failback_count
+        status['last_failover_from_slot'] = self.last_failover_from_slot
+        status['last_failover_to_slot'] = self.last_failover_to_slot
+        status['last_failover_reason'] = self.last_failover_reason
+        status['failover_cooldown_remain'] = (
+            max(0, int(self.failover_cooldown_seconds - (time.time() - self.last_failover_time)))
+            if self.last_failover_time else 0
+        )
         status['total_bearer_downtime_seconds'] = self.total_bearer_downtime_seconds
         # A bearer-downtime window must never be reported while the bearer is
         # actually up: if a reconnect path forgot to call _record_bearer_up(),
@@ -13870,6 +14375,7 @@ class ModemStateMachine:
                 status[f"{prefix}_pdp_type"] = slot.get('pdp_type', 'ipv4v6')
                 apn_val = slot.get('apn', '')
                 status[f"{prefix}_apn"] = apn_val.get('name', '') if isinstance(apn_val, dict) else str(apn_val)
+                status[f"{prefix}_auth_type"] = apn_val.get('auth_type', 'none') if isinstance(apn_val, dict) else 'none'
                 status[f"{prefix}_preferred_carrier"] = slot.get('preferred_carrier', '')
                 status[f"{prefix}_data_limit_bytes"] = slot.get('data_limit_size', 0)
                 status[f"{prefix}_data_limit_action"] = slot.get('data_limit_action', 'none')
@@ -15035,12 +15541,12 @@ class ModemStateMachine:
                    extra={'interface_number': self.interface_number})
 
     async def _admin_disable(self):
-        """Administratively disable the interface.
+        """Tear down the interface for airplane mode.
 
-        Disconnects the bearer, cancels all monitoring and retry tasks,
-        and stops network interface monitoring.  The FSM stays in memory
-        so it can be re-enabled later via a config update with
-        ``interface_disabled: False``.
+        Disconnects the bearer, cancels all monitoring and retry tasks, tears
+        down downstream features and drives the modem RF off.  The FSM stays
+        in memory (parked via ``_admin_disabled``) so it can be re-enabled
+        later via ``set_airplane_mode(False)``.
         """
         try:
             # Cancel failed-state retry timer
@@ -15279,6 +15785,50 @@ class ModemStateMachine:
             logger.error(f"Error exiting airplane mode: {e}",
                         extra={'interface_number': self.interface_number})
             self._airplane_mode_active = False
+
+    async def set_airplane_mode(self, enabled: bool):
+        """Operator airplane-mode toggle (op-mode driven, NON-persistent).
+
+        ENABLE: disconnect the bearer, tear down downstream features, cancel
+        every monitor/retry task and drive the modem RF off
+        (SetPowerState LOW).  The FSM then parks: the `_admin_disabled`
+        guards across scan / liveness / on_modem_found / SIM-detect /
+        handle_modem_event make it ignore all modem+SIM events until released.
+        DISABLE: bring RF back on and restart the connection cascade from
+        scratch.
+
+        Airplane mode is never written to config, so a reboot always comes up
+        in normal operation -- deliberately, so a remote unit whose only link
+        is cellular can always be recovered with a power cycle.
+        """
+        if enabled:
+            if getattr(self, '_admin_disabled', False):
+                logger.info("Airplane mode already active",
+                           extra={'interface_number': self.interface_number})
+                return
+            logger.info("Airplane mode ENABLE -- tearing down and powering RF off",
+                       extra={'interface_number': self.interface_number})
+            self._admin_disabled = True
+            self.user_disconnected = True
+            self._cancel_active_sim_removal_watchdog()
+            await self._admin_disable()
+        else:
+            if not (getattr(self, '_admin_disabled', False)
+                    or self._airplane_mode_requested
+                    or self._airplane_mode_active):
+                logger.info("Airplane mode already inactive",
+                           extra={'interface_number': self.interface_number})
+                return
+            logger.info("Airplane mode DISABLE -- powering RF on and reconnecting",
+                       extra={'interface_number': self.interface_number})
+            self._admin_disabled = False
+            self.user_disconnected = False
+            await self._exit_airplane_mode_if_needed()
+            # Restart the connection cascade from scratch.  apply_config sees
+            # _admin_disabled=False now, so it takes the normal path and
+            # re-drives registration/connection from the current modem state.
+            if self.config:
+                self.apply_config(self.config)
 
     async def handle_disconnection_recovery(self, escalate=True,
                                               connectivity_triggered=False):
@@ -16957,7 +17507,8 @@ class ModemStateMachine:
                         extra={'interface_number': self.interface_number,
                                'initial_ip': self._last_known_ip})
 
-            while self.machine.current_state == ModemState.CONNECTED.value:
+            while self.machine.current_state in (ModemState.CONNECTED.value,
+                                                 ModemState.USAGE_MONITORING.value):
                 try:
                     current_ips = await self._get_current_ip()
                     bearer_ips = await self._get_bearer_expected_ips()
@@ -17564,77 +18115,95 @@ class ModemStateMachine:
         logger.info("WWAN egress hygiene removed from %s", interface_name,
                     extra={'interface_number': self.interface_number})
 
-    # ── IPv4 egress source whitelist ────────────────────────────────────
+    # ── IPv4 egress source enforcement (post-SNAT) ──────────────────────
     #
-    # Mirrors the IPv6 chain.  Even with VyOS NAT correctly pointed at the
-    # bearer, a stray PBR rule or a misconfigured `outbound-interface` can
-    # leak RFC1918 sources upstream — carriers count those as abuse signals.
-    # The chain accepts only the current bearer /32, drops DHCPv4 (no
-    # cellular bearer ever runs DHCPv4), and drops everything else.
+    # Carrier-abuse guard: nothing may leave wwan<N> with a source other than
+    # the current bearer /32.  A stray PBR rule or a missing masquerade rule
+    # can otherwise leak RFC1918 sources upstream, which carriers count as
+    # abuse signals.
+    #
+    # CRITICAL — this MUST run after SNAT, unlike the IPv6 twin.  IPv6 is
+    # routed (no NAT): the LAN holds GUAs inside the carrier prefix, so a
+    # forwarded packet's source already matches at the filter/FORWARD hook.
+    # IPv4 relies on NAT: a forwarded LAN packet still carries its private
+    # RFC1918 source at FORWARD time — masquerade only rewrites it to the
+    # bearer /32 in the *nat* POSTROUTING hook (priority srcnat = 100).
+    # Enforcing the source in filter/FORWARD therefore DROPS every NAT'd flow
+    # before translation, while the router's own traffic (OUTPUT, already
+    # sourced from the bearer) keeps working — i.e. "ping works but NAT does
+    # not".  We enforce in a dedicated nft filter chain hooked at postrouting
+    # priority 101 (srcnat + 1), where every legitimately-egressing packet —
+    # NAT'd or locally-originated — already carries the bearer source.  A
+    # private `ip <iface>_egress` table keeps the guard isolated from the
+    # VyOS-managed nft tables so it can never reorder firewall/NAT rules.
 
-    def _ipv4_chain_name(self, interface_name):
-        """Return the iptables chain name for v4 source enforcement."""
-        return f"{interface_name.upper()}_SRC_ENFORCE_V4"
+    def _ipv4_egress_table_name(self, interface_name):
+        """nft table holding the v4 post-SNAT source guard for one interface."""
+        return f"{interface_name}_egress"
 
     async def _install_ipv4_egress_filter(self, interface_name, ipv4_addr):
-        """Install or update a persistent iptables FORWARD chain that only
-        allows packets whose IPv4 source equals the current bearer /32.
+        """Install/refresh a post-SNAT nft chain that drops any packet leaving
+        <iface> whose IPv4 source is not the current bearer /32.
 
-        Chain structure:
-          FORWARD → -o <iface> -j <CHAIN>
-          <CHAIN>:
-            -p udp --sport 67  -j DROP      (outbound DHCPv4 server — never legal)
-            -p udp --sport 68  -j DROP      (outbound DHCPv4 client — cellular bearer
-                                             receives address via QMI/MBIM, not DHCP)
-            -s <bearer>/32     -j RETURN    (permit current bearer source)
-            -j DROP                          (drop RFC1918 leaks, 0.0.0.0, stale src, …)
+        Hooked at postrouting priority 101 (just after nat srcnat = 100) so the
+        source is evaluated AFTER masquerade has rewritten it.  Chain body:
+            oifname <iface> udp sport 67  drop            (outbound DHCPv4 server)
+            oifname <iface> udp sport 68  drop            (outbound DHCPv4 client —
+                                                           bearer gets its address via
+                                                           QMI/MBIM, never DHCP)
+            oifname <iface> ip saddr != <bearer>/32 drop  (RFC1918 / stale-src leak guard)
         """
         if not ipv4_addr:
             return
-        chain = self._ipv4_chain_name(interface_name)
+        table = self._ipv4_egress_table_name(interface_name)
+        chain = 'srcguard'
 
-        if self._ipv4_egress_filter_active:
-            # Chain already exists — flush and repopulate with new bearer /32
-            await self._run_ipcmd('iptables', '-F', chain)
-        else:
-            await self._run_ipcmd('iptables', '-N', chain)
-            await self._run_ipcmd(
-                'iptables', '-I', 'FORWARD', '1',
-                '-o', interface_name, '-j', chain,
-            )
-            self._ipv4_egress_filter_active = True
+        # Idempotent: (re)create table + chain, then flush and repopulate so an
+        # IP change or a restart-without-teardown can never stack duplicate
+        # rules.  `nft add` on an existing table/chain with the same spec is a
+        # no-op that returns success.
+        await self._run_ipcmd('nft', 'add', 'table', 'ip', table)
+        await self._run_ipcmd(
+            'nft', 'add', 'chain', 'ip', table, chain,
+            '{', 'type', 'filter', 'hook', 'postrouting',
+            'priority', '101', ';', 'policy', 'accept', ';', '}',
+        )
+        await self._run_ipcmd('nft', 'flush', 'chain', 'ip', table, chain)
 
         await self._run_ipcmd(
-            'iptables', '-A', chain,
-            '-p', 'udp', '--sport', '67', '-j', 'DROP',
+            'nft', 'add', 'rule', 'ip', table, chain,
+            'oifname', interface_name, 'udp', 'sport', '67', 'drop',
         )
         await self._run_ipcmd(
-            'iptables', '-A', chain,
-            '-p', 'udp', '--sport', '68', '-j', 'DROP',
+            'nft', 'add', 'rule', 'ip', table, chain,
+            'oifname', interface_name, 'udp', 'sport', '68', 'drop',
         )
         await self._run_ipcmd(
-            'iptables', '-A', chain, '-s', f"{ipv4_addr}/32", '-j', 'RETURN',
+            'nft', 'add', 'rule', 'ip', table, chain,
+            'oifname', interface_name, 'ip', 'saddr', '!=', f"{ipv4_addr}/32", 'drop',
         )
-        await self._run_ipcmd('iptables', '-A', chain, '-j', 'DROP')
+        self._ipv4_egress_filter_active = True
 
         logger.info(
-            "IPv4 egress filter updated: allow %s/32 on %s", ipv4_addr, interface_name,
+            "IPv4 egress filter updated (post-SNAT): allow %s/32 on %s",
+            ipv4_addr, interface_name,
             extra={'interface_number': self.interface_number},
         )
 
     async def _remove_ipv4_egress_filter(self, interface_name):
-        """Remove the persistent iptables FORWARD chain entirely."""
-        if not self._ipv4_egress_filter_active:
-            return
-        chain = self._ipv4_chain_name(interface_name)
-        await self._run_ipcmd(
-            'iptables', '-D', 'FORWARD', '-o', interface_name, '-j', chain,
-        )
-        await self._run_ipcmd('iptables', '-F', chain)
-        await self._run_ipcmd('iptables', '-X', chain)
+        """Remove the post-SNAT nft source-guard table entirely.
+
+        Unconditional: the delete is attempted even when our in-memory flag is
+        unset (e.g. an FSM restart lost the flag while the kernel table
+        survived) so a stale table can never linger.  Deleting an absent table
+        is a harmless no-op (logged at debug by _run_ipcmd).
+        """
+        table = self._ipv4_egress_table_name(interface_name)
+        await self._run_ipcmd('nft', 'delete', 'table', 'ip', table)
+        if self._ipv4_egress_filter_active:
+            logger.info("IPv4 egress filter removed from %s", interface_name,
+                        extra={'interface_number': self.interface_number})
         self._ipv4_egress_filter_active = False
-        logger.info("IPv4 egress filter removed from %s", interface_name,
-                    extra={'interface_number': self.interface_number})
 
     # ── FSM-wide TCP MSS clamp to PMTU ──────────────────────────────────
     #
@@ -17742,6 +18311,105 @@ class ModemStateMachine:
         iface = self._bridging_config.get('interface') or ''
         return iface or None
 
+    def _bridging_lan_net(self):
+        """Return (IPv6Network, prefix_len) for the DOWNSTREAM LAN prefix.
+
+        NPTv6 translate mode -> the operator's stable internal /64 (the LAN
+        never renumbers).  Verbatim-copy bridging -> the carrier prefix.
+        """
+        if self._bridging_translate_net is not None:
+            return (self._bridging_translate_net,
+                    self._bridging_translate_net.prefixlen)
+        return self._bridging_carrier_prefix, self._bridging_carrier_prefix_len
+
+    def _bridging_proxy_target(self, lan_addr):
+        """Map a LAN host address to the wwan-side address the carrier NSes for.
+
+        Verbatim bridging: the LAN address already is a carrier address, so we
+        proxy it unchanged.  NPTv6 translate mode: nftables `snat/dnat prefix
+        to` substitutes the /64 prefix bits and keeps the 64-bit interface
+        identifier (conntrack fixes the L4 checksums), so the carrier sees
+        <carrier-prefix> + the host's own IID -- proxy that.
+
+        NOTE: this assumes verbatim-IID prefix NAT (the VyOS nat66 construct),
+        not RFC 6296 checksum-neutral IID adjustment.  The proxy address is a
+        best-effort mirror and must be confirmed on real cellular hardware.
+        """
+        if self._bridging_translate_net is None or not self._bridging_carrier_prefix:
+            return lan_addr
+        try:
+            host = ipaddress.IPv6Address(lan_addr)
+            hostmask = (1 << (128 - self._bridging_translate_net.prefixlen)) - 1
+            iid = int(host) & hostmask
+            carrier_base = int(self._bridging_carrier_prefix.network_address)
+            return str(ipaddress.IPv6Address(carrier_base | iid))
+        except Exception:
+            return lan_addr
+
+    def _bridging_nptv6_table(self):
+        """Dedicated nft table name for this interface's NPTv6 prefix map."""
+        return f"wwan{self.interface_number}_nptv6"
+
+    async def _bridging_apply_nptv6(self, carrier_net):
+        """Install/refresh the stateless 1:1 NPTv6 prefix translation.
+
+        Maps the operator's stable internal /64 <-> the current carrier /64 in
+        a dedicated `ip6 <iface>_nptv6` table (isolated from vyos_nat), using
+        the same `snat/dnat prefix to` construct VyOS `nat66` uses:
+
+            postrouting (pri 100)  oifname wwanN ip6 saddr <internal> snat prefix to <carrier>
+            prerouting  (pri -100) iifname wwanN ip6 daddr <carrier>  dnat prefix to <internal>
+
+        Idempotent: the chains are flushed and repopulated on every carrier
+        prefix change so only the external prefix moves -- the LAN never
+        renumbers.  Needs nft_nat loaded (present whenever NAT/firewall is in
+        use); a missing module fails soft via _run_ipcmd and is logged.
+
+        DATAPATH CAVEAT: this IPv6 forwarding path (translation + proxy-NDP for
+        the translated addresses + the carrier's routed-vs-on-link /64
+        behaviour) cannot be exercised without live cellular hardware and must
+        be validated during board bring-up.
+        """
+        if self._bridging_translate_net is None:
+            return
+        internal = str(self._bridging_translate_net)
+        carrier = str(carrier_net)
+        wwan = f"wwan{self.interface_number}"
+        table = self._bridging_nptv6_table()
+        await self._run_ipcmd('nft', 'add', 'table', 'ip6', table)
+        await self._run_ipcmd(
+            'nft', 'add', 'chain', 'ip6', table, 'PREROUTING',
+            '{', 'type', 'nat', 'hook', 'prerouting', 'priority', '-100', ';',
+            'policy', 'accept', ';', '}')
+        await self._run_ipcmd(
+            'nft', 'add', 'chain', 'ip6', table, 'POSTROUTING',
+            '{', 'type', 'nat', 'hook', 'postrouting', 'priority', '100', ';',
+            'policy', 'accept', ';', '}')
+        await self._run_ipcmd('nft', 'flush', 'chain', 'ip6', table, 'PREROUTING')
+        await self._run_ipcmd('nft', 'flush', 'chain', 'ip6', table, 'POSTROUTING')
+        # Inbound: carrier -> internal (destination translation).
+        await self._run_ipcmd(
+            'nft', 'add', 'rule', 'ip6', table, 'PREROUTING',
+            'iifname', wwan, 'ip6', 'daddr', carrier, 'dnat', 'prefix', 'to', internal)
+        # Outbound: internal -> carrier (source translation).
+        await self._run_ipcmd(
+            'nft', 'add', 'rule', 'ip6', table, 'POSTROUTING',
+            'oifname', wwan, 'ip6', 'saddr', internal, 'snat', 'prefix', 'to', carrier)
+        self._bridging_nptv6_active = True
+        logger.info("IPv6 NPTv6 active on %s: internal %s <-> carrier %s",
+                    wwan, internal, carrier,
+                    extra={'interface_number': self.interface_number})
+
+    async def _bridging_remove_nptv6(self):
+        """Tear down the NPTv6 prefix map (no-op unless it was installed)."""
+        if not self._bridging_nptv6_active:
+            return
+        await self._run_ipcmd(
+            'nft', 'delete', 'table', 'ip6', self._bridging_nptv6_table())
+        self._bridging_nptv6_active = False
+        logger.info("IPv6 NPTv6 removed from wwan%d", self.interface_number,
+                    extra={'interface_number': self.interface_number})
+
     def _bridging_build_desired_state(self, carrier_net, carrier_prefix_len):
         """Compute the desired bridged address for the downstream interface.
 
@@ -17836,6 +18504,7 @@ class ModemStateMachine:
         Starts netlink watch and reconciliation timer if bridging is configured.
         """
         self._bridging_bearer_addr = bearer_addr
+        self._bridging_dns_servers = list(dns_servers or [])
         if not self._bridging_target_interface():
             return
 
@@ -17848,7 +18517,10 @@ class ModemStateMachine:
             (int(prev_net.network_address) != int(carrier_net.network_address)
              or prev_plen != carrier_prefix_len)
         )
-        if prefix_changed:
+        # In NPTv6 translate mode the LAN keeps a stable internal prefix, so a
+        # carrier prefix change must NOT deprecate/renumber the LAN address --
+        # only the nft translation's external prefix is refreshed below.
+        if prefix_changed and self._bridging_translate_net is None:
             await self._bridging_deprecate_previous()
 
         self._bridging_carrier_prefix = carrier_net
@@ -17860,7 +18532,10 @@ class ModemStateMachine:
         # the LAN side.  Saved values are restored in _bridging_remove_all.
         await self._bridging_apply_sysctls()
 
-        desired = self._bridging_build_desired_state(carrier_net, carrier_prefix_len)
+        # The LAN address + RA advertise the internal prefix in translate mode
+        # and the carrier prefix in verbatim-bridging mode (see _bridging_lan_net).
+        lan_net, lan_plen = self._bridging_lan_net()
+        desired = self._bridging_build_desired_state(lan_net, lan_plen)
         self._bridging_pending = set()
         self._bridging_applied = {}
 
@@ -17884,32 +18559,70 @@ class ModemStateMachine:
         if desired:
             self._bridging_start_background_tasks()
 
-        # FSM-owned radvd: start (or reload) advertising the current
-        # carrier prefix + carrier DNS on the LAN.  This replaces any
-        # need for the operator to configure `service router-advert`
-        # for the bridged interface — the prefix tracks the bearer.
-        lan = self._bridging_target_interface()
-        if lan and self._bridging_applied.get(lan):
+        # FSM-owned radvd: start (or reload) advertising the current carrier
+        # prefix + carrier DNS on the LAN.  Sourced from instance state via a
+        # shared helper so the late-appearing-interface paths (netlink watch,
+        # reconciliation loop) can start radvd too — apply-to-interface alone
+        # only adds the L3 address, which is not enough for SLAAC.
+        await self._bridging_apply_radvd()
+
+        # NPTv6 translate mode: (re)install the stateless 1:1 prefix map so the
+        # internal LAN prefix reaches the Internet via the current carrier /64.
+        # On a carrier prefix change only this rule's external prefix moves.
+        if self._bridging_translate_net is not None:
             try:
-                net_str = str(self._bridging_carrier_prefix.network_address)
-                await self._bridging_radvd.apply(
-                    lan=lan,
-                    prefix=net_str,
-                    plen=carrier_prefix_len,
-                    dns_servers=list(dns_servers or []),
-                )
+                await self._bridging_apply_nptv6(carrier_net)
             except Exception as e:
-                logger.error("IPv6 bridging radvd apply failed: %s", e,
+                logger.error("IPv6 NPTv6 apply failed: %s", e,
                             extra={'interface_number': self.interface_number})
 
         logger.info("IPv6 bridging apply complete: %d applied, %d pending",
                    len(self._bridging_applied), len(self._bridging_pending),
                    extra={'interface_number': self.interface_number})
 
+    async def _bridging_apply_radvd(self):
+        """Start or reload the FSM-owned radvd for the bridged LAN.
+
+        Sources everything from instance state so it can be called from the
+        initial apply (`_bridging_apply_all`), the netlink watch, and the
+        reconciliation loop alike.  No-op until the target LAN interface
+        actually holds the prefix — radvd cannot bind an interface that is
+        not yet up / applied, so late-appearing interfaces start radvd from
+        their apply transition instead.
+        """
+        lan = self._bridging_target_interface()
+        if not lan or not self._bridging_applied.get(lan) \
+                or not self._bridging_carrier_prefix:
+            return
+        # Advertise the LAN prefix: the stable internal /64 in NPTv6 translate
+        # mode, the carrier /64 in verbatim-bridging mode.
+        lan_net, lan_plen = self._bridging_lan_net()
+        try:
+            net_str = str(lan_net.network_address)
+            await self._bridging_radvd.apply(
+                lan=lan,
+                prefix=net_str,
+                plen=lan_plen,
+                dns_servers=list(self._bridging_dns_servers or []),
+                min_interval=int(self._bridging_config.get('ra_min_interval', 3)),
+                max_interval=int(self._bridging_config.get('ra_max_interval', 10)),
+                preferred_lft=int(self._bridging_config.get('ra_preferred_lifetime', 1800)),
+                valid_lft=int(self._bridging_config.get('ra_valid_lifetime', 3600)),
+            )
+        except Exception as e:
+            logger.error("IPv6 bridging radvd apply failed: %s", e,
+                        extra={'interface_number': self.interface_number})
+
     async def _bridging_remove_all(self):
         """Remove the bridged prefix from the downstream interface and reset state."""
         # Stop background tasks first so they don't race with cleanup.
         self._bridging_stop_background_tasks()
+        # Remove the NPTv6 prefix map (no-op unless translate mode installed it).
+        try:
+            await self._bridging_remove_nptv6()
+        except Exception as e:
+            logger.debug("IPv6 NPTv6 remove failed: %s", e,
+                        extra={'interface_number': self.interface_number})
         # Stop the FSM-owned radvd so it doesn't keep advertising a
         # prefix we no longer hold.
         try:
@@ -18385,16 +19098,22 @@ class ModemStateMachine:
             await self._bridging_del_proxy(addr)
 
     def _bridging_addr_eligible_for_proxy(self, addr_str):
-        """True if addr is inside the carrier prefix and not the bearer/router itself."""
+        """True if addr is a LAN host we should proxy on the wwan side.
+
+        The host lives in the carrier prefix (verbatim bridging) or in the
+        operator's internal prefix (NPTv6 translate mode); either way it must
+        not be the bearer's own address or the router's own LAN address.
+        """
         if not self._bridging_carrier_prefix:
             return False
+        lan_net = self._bridging_translate_net or self._bridging_carrier_prefix
         try:
             addr = ipaddress.IPv6Address(addr_str)
         except Exception:
             return False
         if addr.is_link_local or addr.is_multicast or addr.is_unspecified:
             return False
-        if addr not in self._bridging_carrier_prefix:
+        if addr not in lan_net:
             return False
         if self._bridging_bearer_addr:
             try:
@@ -18498,10 +19217,13 @@ class ModemStateMachine:
                                     break
                                 attr_offset += (rta_len + 3) & ~3
                             if dst and self._bridging_addr_eligible_for_proxy(dst):
+                                # In translate mode the carrier NSes for the
+                                # prefix-swapped address, so proxy that.
+                                target = self._bridging_proxy_target(dst)
                                 if nlmsg_type == RTM_NEWNEIGH:
-                                    await self._bridging_add_proxy(dst)
+                                    await self._bridging_add_proxy(target)
                                 else:
-                                    await self._bridging_del_proxy(dst)
+                                    await self._bridging_del_proxy(target)
                     offset += (nlmsg_len + 3) & ~3
 
         except asyncio.CancelledError:
@@ -18525,7 +19247,8 @@ class ModemStateMachine:
             for line in stdout.decode().splitlines():
                 addr = line.split()[0] if line.split() else ''
                 if addr and self._bridging_addr_eligible_for_proxy(addr):
-                    await self._bridging_add_proxy(addr)
+                    await self._bridging_add_proxy(
+                        self._bridging_proxy_target(addr))
         except Exception as e:
             logger.debug("IPv6 bridging proxy seed failed: %s", e,
                         extra={'interface_number': self.interface_number})
@@ -18540,10 +19263,8 @@ class ModemStateMachine:
                         not self._bridging_target_interface():
                     continue
 
-                desired = self._bridging_build_desired_state(
-                    self._bridging_carrier_prefix,
-                    self._bridging_carrier_prefix_len,
-                )
+                lan_net, lan_plen = self._bridging_lan_net()
+                desired = self._bridging_build_desired_state(lan_net, lan_plen)
 
                 newly_applied = []
                 for iface_name in list(self._bridging_pending):
@@ -18578,6 +19299,12 @@ class ModemStateMachine:
                     logger.info("IPv6 bridging reconciliation: applied to %s",
                                ', '.join(newly_applied),
                                extra={'interface_number': self.interface_number})
+
+                # If the radvd target interface just came up this tick, start
+                # the FSM-owned radvd on it (apply-to-interface only added the
+                # L3 address; radvd is what actually drives SLAAC on the LAN).
+                if self._bridging_target_interface() in newly_applied:
+                    await self._bridging_apply_radvd()
 
         except asyncio.CancelledError:
             pass
@@ -18673,10 +19400,8 @@ class ModemStateMachine:
             if not self._bridging_carrier_prefix or \
                     not self._bridging_target_interface():
                 return
-            desired = self._bridging_build_desired_state(
-                self._bridging_carrier_prefix,
-                self._bridging_carrier_prefix_len,
-            )
+            lan_net, lan_plen = self._bridging_lan_net()
+            desired = self._bridging_build_desired_state(lan_net, lan_plen)
             if iface_name in desired:
                 info = desired[iface_name]
                 ok = await self._bridging_apply_to_interface(
@@ -18693,16 +19418,18 @@ class ModemStateMachine:
                         "IPv6 bridging netlink: applied to newly-appeared %s",
                         iface_name,
                         extra={'interface_number': self.interface_number})
+                    # Start radvd now that the target LAN actually holds the
+                    # prefix — apply-to-interface only adds the L3 address.
+                    if iface_name == self._bridging_target_interface():
+                        await self._bridging_apply_radvd()
 
         elif msg_type == RTM_DELLINK and iface_name in self._bridging_applied:
             del self._bridging_applied[iface_name]
             if not self._bridging_carrier_prefix or \
                     not self._bridging_target_interface():
                 return
-            desired = self._bridging_build_desired_state(
-                self._bridging_carrier_prefix,
-                self._bridging_carrier_prefix_len,
-            )
+            lan_net, lan_plen = self._bridging_lan_net()
+            desired = self._bridging_build_desired_state(lan_net, lan_plen)
             if iface_name in desired:
                 self._bridging_pending.add(iface_name)
                 logger.info(
@@ -18733,16 +19460,72 @@ class ModemStateMachine:
         base = ['ip', '-6'] if family == 6 else ['ip']
         label = f"IPv{family}"
 
+        # If the WWAN interface lives in a VRF, force route install into that
+        # VRF's table. Otherwise, `ip route` defaults to main and the VRF table
+        # ends up showing only connected routes.
+        route_table = None
+        route_table_source = ''
+        try:
+            route_table = get_vrf_tableid(interface_name)
+            if route_table:
+                route_table_source = 'interface'
+        except Exception as vrf_e:
+            logger.debug("VRF table lookup by interface failed: %s", vrf_e,
+                        extra={'interface_number': self.interface_number,
+                               'interface_name': interface_name})
+
+        # Re-enumeration race fallback: if the recreated netdev has not yet
+        # been re-bound to VRF, consult the configured WWAN interface VRF name
+        # and resolve that VRF device's table directly.
+        if not route_table:
+            try:
+                from vyos.config import Config
+                conf = Config()
+                vrf_path = ['interfaces', 'wwan', interface_name, 'vrf']
+                if conf.exists(vrf_path):
+                    vrf_name = conf.return_value(vrf_path)
+                    if vrf_name:
+                        route_table = get_vrf_tableid(vrf_name)
+                        if route_table:
+                            route_table_source = f'configured-vrf:{vrf_name}'
+            except Exception as vrf_cfg_e:
+                logger.debug("Configured VRF table lookup failed: %s", vrf_cfg_e,
+                            extra={'interface_number': self.interface_number,
+                                   'interface_name': interface_name})
+
+        route_table_args = ['table', str(route_table)] if route_table else []
+
+        # Metric for the carrier-assigned default route.  Default 220 keeps
+        # cellular below a wired primary (failover/static metric 1, DHCP
+        # default-route-distance 210) so the modem is a backup path, not the
+        # preferred one; 0 restores the historical always-preferred behaviour.
+        # Configurable via `interfaces wwan wwanN default-route-metric`.
+        metric = (int(self.config.get('default_route_metric', 220))
+                  if self.config else 220)
+
         if gateway:
             # onlink: nexthop is directly reachable on this PtP device even
             # though the host-route addressing leaves no on-link subnet.
             cmd = base + ['route', 'replace', 'default', 'via', gateway,
-                          'dev', interface_name, 'onlink']
+                          'dev', interface_name, 'onlink',
+                          *route_table_args, 'metric', str(metric)]
             success_msg = (f"{label} default route via {gateway} "
-                           f"dev {interface_name} (onlink)")
+                           f"dev {interface_name} (onlink, metric {metric}"
+                           f"{f', table {route_table}' if route_table else ''})")
         else:
-            cmd = base + ['route', 'replace', 'default', 'dev', interface_name]
-            success_msg = f"{label} default route via device {interface_name}"
+            cmd = base + ['route', 'replace', 'default', 'dev', interface_name,
+                          *route_table_args, 'metric', str(metric)]
+            success_msg = (f"{label} default route via device {interface_name} "
+                           f"(metric {metric}"
+                           f"{f', table {route_table}' if route_table else ''})")
+
+        if route_table:
+            logger.info("Installing %s default route in VRF table %s",
+                        label, route_table,
+                        extra={'interface_number': self.interface_number,
+                               'interface_name': interface_name,
+                               'vrf_table': route_table,
+                               'vrf_table_source': route_table_source or 'unknown'})
 
         result = await asyncio.create_subprocess_exec(
             *cmd,
@@ -18763,7 +19546,8 @@ class ModemStateMachine:
                 f"({stderr.decode().strip()}); falling back to device route",
                 extra={'interface_number': self.interface_number})
             fallback = base + ['route', 'replace', 'default',
-                               'dev', interface_name]
+                               'dev', interface_name,
+                               *route_table_args, 'metric', str(metric)]
             result = await asyncio.create_subprocess_exec(
                 *fallback,
                 stdout=asyncio.subprocess.PIPE,
@@ -18772,7 +19556,8 @@ class ModemStateMachine:
             _, stderr = await result.communicate()
             if result.returncode == 0:
                 logger.info(f"{label} default route via device {interface_name} "
-                            f"(device-only fallback)",
+                            f"(device-only fallback, metric {metric}"
+                            f"{f', table {route_table}' if route_table else ''})",
                            extra={'interface_number': self.interface_number})
                 return True
 
@@ -19006,6 +19791,47 @@ class ModemStateMachine:
                                extra={'interface_number': self.interface_number})
                 ipv6_routed = await self._install_default_route(
                     6, ipv6_gateway, interface_name)
+
+                # IPv6-only bearer fallback for MTU application.  The primary
+                # MTU path lives in the IPv4 block (where most carriers report
+                # MTU), but on IPv6-only sessions we still need to honor
+                # per-SIM MTU and/or carrier-advertised IPv6 MTU.
+                if not bearer_ips.get('ipv4'):
+                    interface_mtu = self.config.get('mtu', 1420) if self.config else 1420
+
+                    sim_mtu = 0
+                    if self.config:
+                        sim_slots = self.config.get('sim_slots', [])
+                        active_slot = self.current_active_sim or self.config.get('primary_sim_slot', 1)
+                        sim_config = next((s for s in sim_slots if s['slot'] == active_slot), {})
+                        sim_mtu = sim_config.get('mtu', 0)
+
+                    if sim_mtu and sim_mtu > 0:
+                        effective_mtu = str(sim_mtu)
+                        mtu_source = 'per-sim'
+                    elif ipv6_mtu:
+                        effective_mtu = str(min(int(ipv6_mtu), interface_mtu))
+                        mtu_source = 'network' if int(ipv6_mtu) <= interface_mtu else 'network-capped'
+                    else:
+                        effective_mtu = str(interface_mtu)
+                        mtu_source = 'interface'
+
+                    result = await asyncio.create_subprocess_exec(
+                        'ip', 'link', 'set', 'dev', interface_name, 'mtu', effective_mtu,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                    stdout, stderr = await result.communicate()
+
+                    if result.returncode != 0:
+                        logger.warning(f"Failed to set MTU {effective_mtu} ({mtu_source}): {stderr.decode()}",
+                                     extra={'interface_number': self.interface_number})
+                    else:
+                        logger.info(f"Set interface MTU to {effective_mtu} (source: {mtu_source})",
+                                   extra={'interface_number': self.interface_number,
+                                          'mtu': effective_mtu,
+                                          'mtu_source': mtu_source,
+                                          'network_mtu': ipv6_mtu or 'not provided'})
 
             # ── IPv6 source enforcement: persistent egress prefix whitelist ──
             if new_ipv6:

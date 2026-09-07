@@ -24,6 +24,7 @@ from uuid import NAMESPACE_URL
 from uuid import UUID
 
 from vyos.flavor import get_image_serial_console
+from vyos.flavor import get_image_dm_verity
 from vyos.system import disk
 from vyos.template import render
 from vyos.utils.process import cmd
@@ -112,7 +113,8 @@ def gen_version_uuid(version_name: str) -> str:
 def version_add(version_name: str,
                 root_dir: str = '',
                 boot_opts: str = '',
-                boot_opts_config = None) -> None:
+                boot_opts_config = None,
+                dm_verity = None) -> None:
     """Add a new VyOS version to GRUB loader configuration
 
     Args:
@@ -121,9 +123,15 @@ def version_add(version_name: str,
         Defaults to empty.
         boot_opts (str): an optional boot options for Linux kernel.
         Defaults to empty.
+        dm_verity (bool): whether this image seals its root squashfs with
+        dm-verity. Defaults to None, meaning read it from the image flavor.
     """
     if not root_dir:
         root_dir = disk.find_persistence()
+    # dm-verity images boot the root squashfs via /dev/mapper/verity-root
+    # (see grub_vyos_version.j2); default to the flavor baked into the image.
+    if dm_verity is None:
+        dm_verity = get_image_dm_verity()
     version_config: str = f'{root_dir}/{GRUB_DIR_VYOS_VERS}/{version_name}.cfg'
     render(
         version_config, TMPL_VYOS_VERSION, {
@@ -131,7 +139,8 @@ def version_add(version_name: str,
             'version_uuid': gen_version_uuid(version_name),
             'boot_opts_default': BOOT_OPTS_STEM + version_name,
             'boot_opts': boot_opts,
-            'boot_opts_config': boot_opts_config
+            'boot_opts_config': boot_opts_config,
+            'dm_verity': dm_verity
         })
 
 

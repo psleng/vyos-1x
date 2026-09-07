@@ -68,12 +68,15 @@ class InterfaceConfig(ServiceInterface):
     # Centralized default configuration values
     DEFAULT_CONFIG = {
         # Interface-level settings
-        "interface_disabled": False,  # Admin disable — disconnect modem and suppress all activity
         "connection_mode": "always-on",  # always-on | connect-on-demand | dial-on-demand
         "primary_sim_slot": 1,  # Which SIM slot to use (1 or 2)
 
         # MTU settings — interface-level ceiling/default; per-SIM override in sim_slots
         "mtu": 1420,  # Interface MTU ceiling; also used as fallback when bearer provides none
+
+        # Default route metric for the carrier default route(s) the FSM
+        # installs; 220 keeps cellular below a wired primary (backup role).
+        "default_route_metric": 220,
 
         # APN discovery settings
         "android_apn_discovery": "disabled",
@@ -158,7 +161,7 @@ class InterfaceConfig(ServiceInterface):
         # Failed-state periodic retry settings
         "failed_retry": {
             "enabled": True,                          # Enable automatic retry from FAILED state
-            "intervals": [600, 1800, 3600, 7200],      # Backoff intervals in seconds (10, 30, 60, 120 min) — carrier-friendly
+            "intervals": [30, 60, 120, 300, 600, 1800, 3600],  # 30s,1m,2m,5m,10m,30m,60m — fast early recovery, carrier-friendly tail
             "max_interval": 7200,                      # Cap interval once list is exhausted (2 hr, carrier-friendly)
             "escalation_threshold": 3,                 # Consecutive failures before disable/enable cycle (0 = disabled)
         },
@@ -170,6 +173,16 @@ class InterfaceConfig(ServiceInterface):
             "enabled": False,
             "interface": "",
             "reconciliation_interval": 10,    # Seconds between safety-net re-checks
+            # NPTv6 (RFC 6296) translate mode: stable operator-chosen internal
+            # /64 that the LAN keeps across carrier renumbering.  Empty string
+            # = verbatim-copy bridging (carrier /64 handed to the LAN as-is).
+            "translate_prefix": "",
+            # RFC 4861 Router Advertisement timers for the bridged prefix.
+            # Short defaults so SLAAC clients renumber quickly on prefix change.
+            "ra_min_interval": 3,             # MinRtrAdvInterval (s)
+            "ra_max_interval": 10,            # MaxRtrAdvInterval (s)
+            "ra_preferred_lifetime": 1800,    # AdvPreferredLifetime (s)
+            "ra_valid_lifetime": 3600,        # AdvValidLifetime (s)
         },
 
         # IP Passthrough (DOCSIS-modem-style) — hand carrier IP to one
@@ -746,14 +759,26 @@ class InterfaceConfig(ServiceInterface):
         current_apn_dict = self._normalize_apn_config(current_apn)
         default_apn_dict = self._normalize_apn_config(default_apn)
 
-        # Merge: new -> current -> default
+        # Merge: new -> current -> default, but preserve explicit clears.
+        #
+        # NOTE: APN fields are strings where '' is a meaningful value
+        # (e.g. deleting APN/username/password/auth in config). A truthy-or
+        # merge treats '' as missing and silently resurrects previous values,
+        # so runtime never sees the intended change.
         merged_apn = {}
+        def _pick_with_empty(new_val, cur_val, default_val):
+            if new_val is not None:
+                return new_val
+            if cur_val is not None:
+                return cur_val
+            return default_val
+
         for key in default_apn_dict:
-            merged_apn[key] = (
-                new_apn_dict.get(key) if new_apn_dict.get(key) else None
-            ) or (
-                current_apn_dict.get(key) if current_apn_dict.get(key) else None
-            ) or default_apn_dict[key]
+            merged_apn[key] = _pick_with_empty(
+                new_apn_dict.get(key),
+                current_apn_dict.get(key),
+                default_apn_dict[key]
+            )
 
         return merged_apn
 
@@ -1357,13 +1382,6 @@ class InterfaceConfig(ServiceInterface):
                                      'validation_field': 'data_limit_size'})
                 raise ValueError("data_limit_size must be a non-negative integer (bytes, 0 = unlimited)")
 
-        # Validate interface_disabled
-        if 'interface_disabled' in config and not isinstance(config['interface_disabled'], bool):
-            logger.warning("Invalid interface_disabled",
-                          extra={'interface_number': self.interface_number,
-                                 'validation_field': 'interface_disabled'})
-            raise ValueError("interface_disabled must be true or false")
-
         # Validate APN discovery settings
         if 'android_apn_discovery' in config and config['android_apn_discovery'] not in ['enabled', 'disabled']:
             logger.warning("Invalid android_apn_discovery",
@@ -1388,11 +1406,11 @@ class InterfaceConfig(ServiceInterface):
 
         if 'hardware_reset_cooldown' in config:
             cooldown = config['hardware_reset_cooldown']
-            if not isinstance(cooldown, int) or cooldown < 30 or cooldown > 3600:
+            if not isinstance(cooldown, int) or cooldown < 180 or cooldown > 3600:
                 logger.warning("Invalid hardware_reset_cooldown",
                               extra={'interface_number': self.interface_number,
                                      'validation_field': 'hardware_reset_cooldown'})
-                raise ValueError("hardware_reset_cooldown must be between 30 and 3600 seconds")
+                raise ValueError("hardware_reset_cooldown must be between 180 and 3600 seconds")
 
         # Validate timeout settings
         if 'connection_timeout' in config:
@@ -1663,17 +1681,17 @@ class InterfaceConfig(ServiceInterface):
                 f"manually. Use connection-mode connect-on-demand or "
                 f"dial-on-demand for manual control.")
         try:
-            # Reject if the interface is administratively disabled (airplane
-            # mode).  Without this guard the request would silently queue
-            # via connect_requested and never fire until the operator runs
-            # 'delete interfaces wwan wwanN disable'.
-            if (getattr(self.fsm, '_airplane_mode_active', False)
+            # Reject if the interface is parked in airplane mode (RF off).
+            # Without this guard the request would silently queue via
+            # connect_requested and never fire until airplane mode is off.
+            if (getattr(self.fsm, '_admin_disabled', False)
+                    or getattr(self.fsm, '_airplane_mode_active', False)
                     or getattr(self.fsm, '_airplane_mode_requested', False)):
                 raise DBusError(
                     "com.igos.IgosModemManager.AdminDisabled",
-                    f"Interface {self.interface_number} is administratively "
-                    f"disabled (airplane mode). Run 'delete interfaces wwan "
-                    f"wwan{self.interface_number} disable' to re-enable.")
+                    f"Interface {self.interface_number} is in airplane mode "
+                    f"(RF off). Run 'change wwan wwan{self.interface_number} "
+                    f"airplane-mode disable' to reconnect.")
 
             current_state = (
                 getattr(self.fsm.machine, 'current_state', 'UNKNOWN')
@@ -1832,6 +1850,26 @@ class InterfaceConfig(ServiceInterface):
             raise DBusError("com.igos.IgosModemManager.DisconnectionError", str(e))
 
     @method()
+    async def SetAirplaneMode(self, enabled: 'b') -> 's':  # type: ignore[name-defined]  # noqa: F821, F722
+        """Op-mode airplane toggle: RF off + park (True) or RF on + reconnect (False).
+
+        Non-persistent -- the operator drives this at runtime; it is never
+        written to config, so a reboot always comes up in normal operation.
+        """
+        try:
+            logger.info("Airplane mode request",
+                       extra={'interface_number': self.interface_number,
+                              'enabled': bool(enabled)})
+            await self.fsm.set_airplane_mode(bool(enabled))
+            return (f"Airplane mode {'enabled' if enabled else 'disabled'} "
+                    f"on interface {self.interface_number}")
+        except Exception as e:
+            logger.error("Airplane mode error",
+                        extra={'interface_number': self.interface_number,
+                               'error': str(e)})
+            raise DBusError("com.igos.IgosModemManager.AirplaneModeError", str(e))
+
+    @method()
     async def get_bearer_status(self) -> 's':  # type: ignore[name-defined]  # noqa: F821
         """Lightweight bearer status poll.
 
@@ -1892,17 +1930,17 @@ class InterfaceConfig(ServiceInterface):
                 f"manually. Use connection-mode connect-on-demand or "
                 f"dial-on-demand for manual control.")
         try:
-            # Reject if the interface is administratively disabled (airplane
-            # mode).  Without this guard the request would silently queue
-            # via connect_requested and never fire until the operator runs
-            # 'delete interfaces wwan wwanN disable'.
-            if (getattr(self.fsm, '_airplane_mode_active', False)
+            # Reject if the interface is parked in airplane mode (RF off).
+            # Without this guard the request would silently queue via
+            # connect_requested and never fire until airplane mode is off.
+            if (getattr(self.fsm, '_admin_disabled', False)
+                    or getattr(self.fsm, '_airplane_mode_active', False)
                     or getattr(self.fsm, '_airplane_mode_requested', False)):
                 raise DBusError(
                     "com.igos.IgosModemManager.AdminDisabled",
-                    f"Interface {self.interface_number} is administratively "
-                    f"disabled (airplane mode). Run 'delete interfaces wwan "
-                    f"wwan{self.interface_number} disable' to re-enable.")
+                    f"Interface {self.interface_number} is in airplane mode "
+                    f"(RF off). Run 'change wwan wwan{self.interface_number} "
+                    f"airplane-mode disable' to reconnect.")
 
             from vyos.utils.wwan.interfaces_wwan_state_machine import ModemEvent, ModemState
             current_state = (

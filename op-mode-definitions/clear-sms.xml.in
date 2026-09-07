@@ -49,6 +49,7 @@
                     <properties>
                       <help>Clear per-SIM data-usage counters</help>
                     </properties>
+                    <command>${vyos_op_scripts_dir}/show_wwan.py clear_data_usage --interface="$4"</command>
                     <children>
                       <node name="slot">
                         <properties>

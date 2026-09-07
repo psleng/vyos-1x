@@ -131,10 +131,10 @@ rather than touching any other RTC.
 test hardware show serial
 test hardware show modem
 test hardware show pin
-test hardware show pin name modem0_reset
+test hardware show pin name MODEM0_UNCOND_RESET
 
-# Switch serial port 0 to RS-485 half-duplex with termination
-test hardware serial port0 protocol rs485h termination on
+# Switch serial port UARTC2 to RS-485 half-duplex with termination
+test hardware serial UARTC2 protocol rs485h termination on
 
 # Same thing, addressed by tty path instead of port name
 test hardware serial /dev/ttyS2 protocol rs485h termination on
@@ -145,8 +145,8 @@ test hardware modem modem0 sim 1
 test hardware modem modem0 reset
 
 # Raw GPIO poke
-test hardware pin user_led set 1
-test hardware pin modem0_reset pulse
+test hardware pin SYS_STAT_GREEN set 1
+test hardware pin MODEM0_UNCOND_RESET pulse
 
 # RTC backup mode (repair only; normally set at manufacturing)
 test hardware show rtc

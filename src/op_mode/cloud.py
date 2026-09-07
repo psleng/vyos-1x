@@ -15,6 +15,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import json
+import os
 import sys
 import warnings
 
@@ -30,6 +31,7 @@ default_https_port = 443
 cloud_status_path = '/perlecloud/status'
 
 config_file = r'/etc/igos-cloud-proxy/igos-cloud-proxy.conf'
+persistent_config_file = r'/config/igos-cloud-proxy/igos-cloud-proxy.conf'
 service_name = 'igos-cloud-proxy'
 
 
@@ -50,6 +52,16 @@ def set_registration(code: str, raw: bool):
             json.dump(data_json, cloud_config, indent=4)
             cloud_config.write('\n')
             cloud_config.truncate()
+
+        persistent_dir = os.path.dirname(persistent_config_file)
+        if persistent_dir:
+            os.makedirs(persistent_dir, exist_ok=True)
+
+        persistent_data = {'tmpDeviceRegistrationPIN': code}
+        with open(persistent_config_file, 'w') as persistent_cloud_config:
+            json.dump(persistent_data, persistent_cloud_config, indent=4)
+            persistent_cloud_config.write('\n')
+        os.chmod(persistent_config_file, 0o600)
     except OSError as error:
         raise vyos.opmode.UnconfiguredSubsystem(
             'Could not read cloud configuration'
