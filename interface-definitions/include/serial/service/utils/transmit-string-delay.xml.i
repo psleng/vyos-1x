@@ -1,13 +1,12 @@
-<!-- include start from serial/service/nine-bits.xml.i -->
-<node name="nine-bits">
+<!-- include start from serial/service/utils/transmit-string-delay.xml.i -->
+<node name="transmit-string">
   <properties>
-    <help>Nine bits service settings</help>
+    <help>Transmit string settings</help>
   </properties>
   <children>
-    #include <include/serial/service/utils/remote.xml.i>
-    <leafNode name="delay">
+    <leafNode name="delay-after-transmit">
       <properties>
-        <help>The delay between writing first byte and rest of message to the serial port</help>
+        <help>Delay after transmitting string</help>
         <valueHelp>
           <format>u32:0-65535</format>
           <description>Specifies the delay in milliseconds</description>
@@ -16,7 +15,7 @@
           <validator name="numeric" argument="--range 0-65535"/>
         </constraint>
       </properties>
-      <defaultValue>0</defaultValue>
+      <defaultValue>10</defaultValue>
     </leafNode>
   </children>
 </node>

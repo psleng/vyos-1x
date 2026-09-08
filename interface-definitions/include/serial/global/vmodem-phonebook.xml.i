@@ -1,36 +1,35 @@
-<!-- include start from serial/service/utils/host-list.xml.i -->
-<node name="multihost-list">
+<!-- include start from serial/global/vmodem-phonebook.xml.i -->
+<node name="virtual-modem">
   <properties>
-    <help>Connect to all configured hosts</help>
+    <help>Virtual modem phone number to host mapping</help>
   </properties>
   <children>
-    <tagNode name="host">
+    <tagNode name="directory-entry">
       <properties>
-        <help>Trueport server-initiated host config</help>
+        <help>Phonebook directory entry</help>
         <valueHelp>
-          <!-- table main with prio 32766 -->
-          <format>u32:1-50</format>
-          <description>Host ID (1-50)</description>
+          <format>u32:1-8</format>
+          <description>Entry ID (1-8)</description>
         </valueHelp>
         <constraint>
-          <validator name="numeric" argument="--range 1-50"/>
+          <validator name="numeric" argument="--range 1-8"/>
         </constraint>
       </properties>
       <children>
-        <leafNode name="name">
+        <leafNode name="address">
           <properties>
-            <help>Multihost host name</help>
+            <help>Mapped host address</help>
             <valueHelp>
               <format>ipv4</format>
-              <description>IP address of current host</description>
+              <description>IPv4 address</description>
             </valueHelp>
             <valueHelp>
               <format>ipv6</format>
-              <description>IPv6 address of current host</description>
+              <description>IPv6 address</description>
             </valueHelp>
             <valueHelp>
               <format>hostname</format>
-              <description>Fully qualified host name of current host</description>
+              <description>Fully qualified host name</description>
             </valueHelp>
             <constraint>
               <validator name="ip-address"/>
@@ -40,7 +39,7 @@
         </leafNode>
         <leafNode name="port">
           <properties>
-            <help>Multihost host tcp port</help>
+            <help>Mapped TCP port</help>
             <valueHelp>
               <format>u32:1-65535</format>
               <description>Port number</description>
@@ -48,6 +47,15 @@
             <constraint>
               <validator name="numeric" argument="--range 1-65535"/>
             </constraint>
+          </properties>
+        </leafNode>
+        <leafNode name="phone-number">
+          <properties>
+            <help>Phone number</help>
+            <constraint>
+              <regex>.{0,31}</regex>
+            </constraint>
+            <constraintErrorMessage>Phone number too long (limit 31 characters)</constraintErrorMessage>
           </properties>
         </leafNode>
       </children>

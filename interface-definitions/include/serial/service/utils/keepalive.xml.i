@@ -1,7 +1,7 @@
 <!-- include start from serial/service/utils/keepalive.xml.i -->
-<leafNode name="keepalive">
+<leafNode name="send-tcp-keepalive">
   <properties>
-    <help>Enable Keepalive</help>
+    <help>Enable sending TCP Keepalive</help>
     <valueless/>
   </properties>
 </leafNode>
