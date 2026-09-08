@@ -99,6 +99,19 @@
                   <command>${vyos_op_scripts_dir}/image_manager.py --action set</command>
                 </standalone>
               </tagNode>
+              <tagNode name="factory-default">
+                <properties>
+                  <help>Copy an installed image over the factory-default (recovery) image</help>
+                  <completionHelp>
+                    <script>${vyos_op_scripts_dir}/image_manager.py --action list</script>
+                  </completionHelp>
+                </properties>
+                <command>${vyos_op_scripts_dir}/image_manager.py --action set_factory --image-name "${5}"</command>
+                <standalone>
+                  <help>Copy an installed image over the factory-default (recovery) image</help>
+                  <command>${vyos_op_scripts_dir}/image_manager.py --action set_factory</command>
+                </standalone>
+              </tagNode>
             </children>
           </node>
         </children>

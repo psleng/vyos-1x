@@ -52,6 +52,19 @@ def sigterm_handler(signo, frame):
     sig = signal.Signals(signo)
     syslog.syslog(syslog.LOG_INFO, f'Received signal {sig.name} - shutting down...')
 
+
+def _stop_dhcp_services(ifname: str) -> None:
+    systemd_v4_service = f'dhclient@{ifname}.service'
+    systemd_v6_service = f'dhcp6c@{ifname}.service'
+
+    if is_systemd_service_active(systemd_v4_service):
+        syslog.syslog(syslog.LOG_DEBUG, f'Stopping {systemd_v4_service}...')
+        stop_systemd_unit(systemd_v4_service, raise_on_failure=False)
+
+    if is_systemd_service_active(systemd_v6_service):
+        syslog.syslog(syslog.LOG_DEBUG, f'Stopping {systemd_v6_service}...')
+        stop_systemd_unit(systemd_v6_service, raise_on_failure=False)
+
 def _handle_dhcp_events(operstate: Optional[str], ifname: str) -> None:
     systemdV4_service = f'dhclient@{ifname}.service'
     systemdV6_service = f'dhcp6c@{ifname}.service'
@@ -62,12 +75,7 @@ def _handle_dhcp_events(operstate: Optional[str], ifname: str) -> None:
 
     if operstate == 'DOWN':
         # Interface moved state to down
-        if is_systemd_service_active(systemdV4_service):
-            syslog.syslog(syslog.LOG_DEBUG, f'Stopping {systemdV4_service}...')
-            stop_systemd_unit(systemdV4_service, raise_on_failure=False)
-        if is_systemd_service_active(systemdV6_service):
-            syslog.syslog(syslog.LOG_DEBUG, f'Stopping {systemdV6_service}...')
-            stop_systemd_unit(systemdV6_service, raise_on_failure=False)
+        _stop_dhcp_services(ifname)
 
     elif operstate == 'UP':
         v6_restart = False
@@ -168,7 +176,22 @@ def main():
 
                     # Deletion of a network link which has been previously added to the kernel
                     case 'RTM_DELLINK':
-                        pass
+                        attrs = dict(message.get('attrs', []))
+                        ifname = attrs.get('IFLA_IFNAME', None)
+                        mac = attrs.get('IFLA_ADDRESS', '<unknown>')
+                        syslog.syslog(syslog.LOG_DEBUG,
+                                      f'RTM_DELLINK -> {ifname}, mac={mac}')
+
+                        # Bail out early - no interface name in the message
+                        if not ifname:
+                            continue
+                        # Bail out early - not interested in interface type
+                        if not match_iface(ifname):
+                            continue
+
+                        # Ensure DHCP(v6) clients are stopped on interface deletion.
+                        # Some interface delete paths may not produce a prior DOWN event.
+                        _stop_dhcp_services(ifname)
                     case _:
                         pass
 

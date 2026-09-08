@@ -1,0 +1,178 @@
+<?xml version="1.0"?>
+<interfaceDefinition>
+
+  <node name="system">
+    <properties>
+      <help>System configuration</help>
+    </properties>
+
+    <children>
+
+      <node name="email"
+            owner="${vyos_conf_scripts_dir}/system_email.py">
+        <properties>
+          <help>System SMTP email client settings</help>
+          <priority>1000</priority>
+        </properties>
+
+        <children>
+
+          <leafNode name="active-profile">
+            <properties>
+              <help>Active global SMTP server profile</help>
+            </properties>
+          </leafNode>
+
+          <tagNode name="profile">
+            <properties>
+              <help>SMTP profile</help>
+            </properties>
+
+            <children>
+
+              <leafNode name="smtp-host">
+                <properties>
+                  <help>SMTP server address</help>
+                </properties>
+              </leafNode>
+
+              <leafNode name="port">
+                <properties>
+                  <help>SMTP port</help>
+                </properties>
+                <defaultValue>587</defaultValue>
+              </leafNode>
+
+              <leafNode name="authentication">
+                <properties>
+                  <help>Authentication method</help>
+                  <completionHelp>
+                    <list>password oauth2</list>
+                  </completionHelp>
+                </properties>
+                <defaultValue>password</defaultValue>
+              </leafNode>
+
+              <leafNode name="username">
+                <properties>
+                  <help>SMTP username or email address</help>
+                </properties>
+              </leafNode>
+
+              <leafNode name="password">
+                <properties>
+                  <help>SMTP password</help>
+                  <secret/>
+                </properties>
+              </leafNode>
+
+              <node name="oauth2">
+                <properties>
+                  <help>OAuth2 authentication settings</help>
+                </properties>
+
+                <children>
+
+                  <leafNode name="token-url">
+                    <properties>
+                      <help>OAuth2 token endpoint URL</help>
+                    </properties>
+                  </leafNode>
+
+                  <leafNode name="client-id">
+                    <properties>
+                      <help>OAuth2 client ID</help>
+                    </properties>
+                  </leafNode>
+
+                  <leafNode name="client-secret">
+                    <properties>
+                      <help>OAuth2 client secret</help>
+                      <secret/>
+                    </properties>
+                  </leafNode>
+
+                  <leafNode name="refresh-token">
+                    <properties>
+                      <help>OAuth2 refresh token</help>
+                      <secret/>
+                    </properties>
+                  </leafNode>
+
+                  <leafNode name="scope">
+                    <properties>
+                      <help>Optional OAuth2 scope</help>
+                    </properties>
+                  </leafNode>
+
+                </children>
+              </node>
+
+              <leafNode name="security">
+                <properties>
+                  <help>Security mode</help>
+                  <completionHelp>
+                    <list>none tls starttls</list>
+                  </completionHelp>
+                </properties>
+                <defaultValue>starttls</defaultValue>
+              </leafNode>
+
+              <leafNode name="no-validate-cert">
+                <properties>
+                  <help>Disable TLS certificate validation</help>
+                  <valueless/>
+                </properties>
+              </leafNode>
+
+              <leafNode name="ca-file">
+                <properties>
+                  <help>Custom CA file located in /etc/ssl/certs</help>
+                </properties>
+              </leafNode>
+
+              <leafNode name="from-email">
+                <properties>
+                  <help>Sender email address</help>
+                </properties>
+              </leafNode>
+
+            </children>
+          </tagNode>
+
+          <tagNode name="recipient">
+            <properties>
+              <help>Email recipients</help>
+            </properties>
+
+            <children>
+
+              <leafNode name="enable">
+                <properties>
+                  <help>Enable recipient</help>
+                  <valueless/>
+                </properties>
+              </leafNode>
+
+              <leafNode name="email">
+                <properties>
+                  <help>Email address</help>
+                </properties>
+              </leafNode>
+
+              <leafNode name="subject">
+                <properties>
+                  <help>Email subject</help>
+                </properties>
+              </leafNode>
+
+            </children>
+          </tagNode>
+
+        </children>
+      </node>
+
+    </children>
+  </node>
+
+</interfaceDefinition>

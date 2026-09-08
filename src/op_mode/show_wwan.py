@@ -39,15 +39,30 @@ def _get_client():
     return WWANClientSync()
 
 
-def _get_full_status(interface: str) -> dict:
-    """Fetch the full FSM status dict for an interface."""
+def _require_interface(interface: str) -> int:
+    """Validate a wwan interface for op-mode use and return its index.
+
+    Raises ``UnconfiguredSubsystem`` when the interface is absent from the
+    config, or when it is administratively disabled -- `disable` is a full
+    delete-style teardown, so there is no FSM / D-Bus object to query and a
+    raw "cannot reach WWAN service" error would be misleading.
+    """
     config = ConfigTreeQuery()
     if not config.exists(['interfaces', 'wwan', interface]):
         raise vyos.opmode.UnconfiguredSubsystem(
             f'Interface "{interface}" is not configured'
         )
+    if config.exists(['interfaces', 'wwan', interface, 'disable']):
+        raise vyos.opmode.UnconfiguredSubsystem(
+            f'Interface "{interface}" is administratively disabled '
+            f'(delete "interfaces wwan {interface} disable" to bring it up)'
+        )
+    return _get_interface_number(interface)
 
-    if_num = _get_interface_number(interface)
+
+def _get_full_status(interface: str) -> dict:
+    """Fetch the full FSM status dict for an interface."""
+    if_num = _require_interface(interface)
     try:
         client = _get_client()
         return client.get_status(if_num)
@@ -93,6 +108,7 @@ def _raw_status(status: dict) -> dict:
         'interface': status.get('interface_name', ''),
         'state': status.get('fsm_state', ''),
         'connection_mode': status.get('connection_mode', ''),
+        'airplane_mode': status.get('airplane_mode', False),
         'modem_state': status.get('modem_state', ''),
         'power_state': status.get('modem_power_state_name', ''),
         'access_technology': status.get('access_technology_name', ''),
@@ -240,6 +256,8 @@ def _format_status(status: dict, interface: str) -> str:
     lines.append(_section('Connection'))
     lines.append(_kv('State:', d['state']))
     lines.append(_kv('Connection mode:', d['connection_mode']))
+    if d['airplane_mode']:
+        lines.append(_kv('Airplane mode:', 'active (RF off)'))
     lines.append(_kv('Power state:', d['power_state']))
     lines.append(_kv('Access technology:', d['access_technology']))
     lines.append(_kv('Operator:', d['operator']))
@@ -579,13 +597,7 @@ def show_wait_failover(raw: bool,
     if poll_interval < 1:
         raise ValueError('Poll interval must be >= 1 second')
 
-    config = ConfigTreeQuery()
-    if not config.exists(['interfaces', 'wwan', interface]):
-        raise vyos.opmode.UnconfiguredSubsystem(
-            f'Interface "{interface}" is not configured'
-        )
-
-    if_num = _get_interface_number(interface)
+    if_num = _require_interface(interface)
     try:
         client = _get_client()
         alert = client.wait_for_failover_alert(
@@ -633,13 +645,7 @@ def show_monitor_alerts(raw: bool,
     if category and category not in ('connectivity', 'sim', 'usage'):
         raise ValueError('Category must be one of: connectivity, sim, usage')
 
-    config = ConfigTreeQuery()
-    if not config.exists(['interfaces', 'wwan', interface]):
-        raise vyos.opmode.UnconfiguredSubsystem(
-            f'Interface "{interface}" is not configured'
-        )
-
-    if_num = _get_interface_number(interface)
+    if_num = _require_interface(interface)
     try:
         client = _get_client()
         alerts = client.monitor_alerts(
@@ -679,6 +685,133 @@ def show_monitor_alerts(raw: bool,
         lines.append(_kv('Severity:', alert.get('severity', '')))
         lines.extend(_kv_wrapped('Message:', str(alert.get('message', ''))))
 
+    return '\n'.join(line for line in lines if line)
+
+
+def show_event_log(raw: bool,
+                   interface: str,
+                   limit: int = 100,
+                   severity: str = '',
+                   category: str = ''):
+    """Show recent WWAN alert/event history from AlertBus."""
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        raise ValueError('Limit must be an integer (1-500)')
+
+    if limit < 1 or limit > 500:
+        raise ValueError('Limit must be between 1 and 500')
+
+    severity = str(severity or '').strip().lower()
+    category = str(category or '').strip().lower()
+
+    if severity and severity not in ('info', 'warning', 'critical'):
+        raise ValueError('Severity must be one of: info, warning, critical')
+
+    if category and category not in ('connectivity', 'sim', 'usage'):
+        raise ValueError('Category must be one of: connectivity, sim, usage')
+
+    if_num = _require_interface(interface)
+    try:
+        client = _get_client()
+        alerts = client.get_recent_alerts(limit=limit, interface_number=if_num)
+    except Exception as e:
+        raise vyos.opmode.DataUnavailable(
+            f'Cannot read WWAN event log for {interface}: {e}'
+        )
+
+    if not isinstance(alerts, list):
+        alerts = []
+
+    if severity:
+        alerts = [a for a in alerts
+                  if isinstance(a, dict)
+                  and str(a.get('severity', '')).lower() == severity]
+    if category:
+        alerts = [a for a in alerts
+                  if isinstance(a, dict)
+                  and str(a.get('category', '')).lower() == category]
+
+    if raw:
+        return alerts
+
+    lines = [f'WWAN event log for {interface}: {len(alerts)} entr' +
+             ('y' if len(alerts) == 1 else 'ies')]
+    lines.append(_kv('Limit:', limit))
+    if severity:
+        lines.append(_kv('Severity filter:', severity))
+    if category:
+        lines.append(_kv('Category filter:', category))
+
+    if not alerts:
+        lines.append('  (no entries)')
+        return '\n'.join(lines)
+
+    for idx, alert in enumerate(alerts, start=1):
+        lines.append(_section(f'Entry {idx}'))
+        lines.append(_kv('Sequence:', alert.get('sequence', '')))
+        lines.append(_kv('Timestamp:', alert.get('timestamp', '')))
+        lines.append(_kv('Type:', alert.get('type', '')))
+        lines.append(_kv('Category:', alert.get('category', '')))
+        lines.append(_kv('Severity:', alert.get('severity', '')))
+        lines.extend(_kv_wrapped('Message:', str(alert.get('message', ''))))
+
+    return '\n'.join(line for line in lines if line)
+
+
+def clear_data_usage(raw: bool, interface: str, slot: int = None):
+    """Zero the data-usage counters for a specific SIM slot.
+
+    CLI: clear interfaces wwan <wwanN> data-usage slot <N>
+
+    If no slot is specified, the currently active SIM slot is used.
+    The previous counters are logged by the service before they are cleared.
+    """
+    if_num = _require_interface(interface)
+
+    if slot is None:
+        try:
+            client = _get_client()
+            status = client.get_status(if_num)
+            slot = int(status.get('active_sim_slot')
+                       or status.get('configured_sim_slot')
+                       or 1)
+        except Exception as e:
+            raise vyos.opmode.DataUnavailable(
+                f'Cannot determine active SIM slot for {interface}: {e}'
+            )
+    else:
+        try:
+            slot = int(slot)
+        except (TypeError, ValueError):
+            raise ValueError('SIM slot must be an integer')
+
+    try:
+        client = _get_client()
+        result = client.clear_data_usage(if_num, slot)
+    except Exception as e:
+        raise vyos.opmode.DataUnavailable(
+            f'Cannot clear data usage for {interface} slot {slot}: {e}'
+        )
+
+    if raw:
+        return result
+
+    def _mb(n):
+        try:
+            return f'{int(n) / (1024 * 1024):.1f} MB'
+        except (TypeError, ValueError):
+            return str(n)
+
+    prev_total = int(result.get('previous_total_bytes', 0) or 0)
+    prev_cumulative = int(result.get('previous_cumulative_bytes', 0) or 0)
+    prev_session = int(result.get('previous_session_bytes', 0) or 0)
+
+    lines = [f'Cleared data-usage counters for {interface} SIM slot {slot}.']
+    lines.append(_kv('Previous total:', f'{prev_total:,} bytes ({_mb(prev_total)})'))
+    lines.append(_kv('Previous cumulative:', f'{prev_cumulative:,} bytes'))
+    if result.get('was_active'):
+        lines.append(_kv('Previous session:', f'{prev_session:,} bytes'))
     return '\n'.join(line for line in lines if line)
 
 

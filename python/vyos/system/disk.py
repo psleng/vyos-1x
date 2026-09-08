@@ -171,12 +171,11 @@ def partition_mount(partition: str,
     """
     if fsype in ['squashfs', 'iso9660']:
         command: str = f'mount -o loop,ro -t {fsype} {partition} {path}'
-    if fsype == 'overlay' and overlay_params:
+    elif fsype == 'overlay' and overlay_params:
         command: str = f'mount -t overlay -o noatime,\
             upperdir={overlay_params["upperdir"]},\
             lowerdir={overlay_params["lowerdir"]},\
             workdir={overlay_params["workdir"]} overlay {path}'
-
     else:
         command = f'mount {partition} {path}'
 

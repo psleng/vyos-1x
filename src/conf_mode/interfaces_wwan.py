@@ -61,12 +61,36 @@ def _ensure_manager_running():
     therefore must tolerate the bus name not being on the bus yet --
     that retry is implemented in `_apply_via_dbus`.
 
-    Once running, the manager owns its own lifecycle and the graceful
-    teardown sequence on interface deletion -- we never stop it from
-    conf_mode.  On a reboot with no wwan configured, conf_mode simply
-    does not start the manager, so MM also stays down.
+    While at least one wwan interface is configured the manager owns its
+    own lifecycle.  When the LAST wwan interface is deleted, conf_mode
+    stops the manager (which in turn stops ModemManager) via
+    `_stop_manager_and_modemmanager()`; see apply().  On a reboot with no
+    wwan configured, conf_mode simply does not start the manager, so MM
+    also stays down.
     """
     call(f'systemctl start {manager_unit}')
+
+
+def _stop_manager_and_modemmanager():
+    """Stop the WWAN manager service and ModemManager.
+
+    Invoked when the last `interfaces wwan` node is deleted.  Stopping the
+    manager unit delivers SIGTERM, which runs the manager's graceful
+    shutdown -- disconnect any remaining bearers, deregister from the
+    network, tear down downstream LAN state -- and, because the manager is
+    the sole owner of ModemManager's lifecycle, stops ModemManager as its
+    final step.
+
+    Order matters: the manager MUST be stopped first.  Its crash monitor
+    polls ModemManager every ~10s and restarts it if it disappears, so
+    stopping ModemManager on its own would not stick.  ModemManager is then
+    stopped again explicitly as a backstop -- if the manager had already
+    crashed it never got the chance to stop MM, and MM left running keeps
+    the modem attached.  `systemctl stop` on an inactive unit is a harmless
+    no-op, so the redundant call is safe.
+    """
+    call(f'systemctl stop {manager_unit}')
+    call(f'systemctl stop {service_name}')
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -227,6 +251,27 @@ def get_config(config=None):
     # is_bond_member, is_mirror_intf, qos, etc.
     ifname, wwan = get_interface_dict(conf, base)
 
+    # Configd-compatible scripts must create their sole Config instance in
+    # get_config().  Capture whether a deleted interface was the final WWAN
+    # node while that proposed config tree is still available, then carry the
+    # result to apply() instead of opening a second configuration session.
+    wwan['_last_wwan'] = (
+        'deleted' in wwan and not conf.exists(base)
+    )
+
+    # `disable` is implemented as a delete-style teardown (see apply()).  Work
+    # out here — while the proposed config tree is live — whether disabling
+    # THIS interface leaves no enabled wwan interface remaining, so apply()
+    # can stop ModemManager exactly as deleting the last interface does.
+    _this_iface_disabled = conf.exists(base + [ifname, 'disable'])
+    _all_wwan = conf.list_nodes(base) if conf.exists(base) else []
+    _any_enabled_remaining = any(
+        not conf.exists(base + [n, 'disable']) for n in _all_wwan
+    )
+    wwan['_disable_last_active'] = (
+        _this_iface_disabled and not _any_enabled_remaining
+    )
+
     # ── Live-tree intent flags ───────────────────────────────────────
     # get_interface_dict() merges XML <defaultValue> tags into the parsed
     # dict regardless of whether the user actually configured the parent
@@ -284,6 +329,26 @@ def get_config(config=None):
         ),
     }
 
+    # Per-SIM data-limit live-tree presence flags.
+    #
+    # get_interface_dict() merges XML defaults, so absent per-SIM leaves can
+    # appear as if configured (e.g. size=0/action=none). That breaks intended
+    # global data-usage fallback semantics because those default-injected
+    # values would override globals. Capture explicit user-set presence from
+    # the live tree and use it in build_fsm_config() to decide overrides.
+    sim_dl_flags = {}
+    for slot_num in (1, 2):
+        slot = str(slot_num)
+        dl_path = iface_base + ['sim', 'slot', slot, 'data-limit']
+        sim_dl_flags[slot] = {
+            'node': conf.exists(dl_path),
+            'size': conf.exists(dl_path + ['size']),
+            'action': conf.exists(dl_path + ['action']),
+            'billing_date': conf.exists(dl_path + ['billing-date']),
+            'warning': conf.exists(dl_path + ['warning']),
+        }
+    wwan['_sim_data_limit_user_set'] = sim_dl_flags
+
     # ── Conflict guards (computed here while the Config object is live) ───
     # IP-passthrough: bind-interfaces dnsmasq cannot coexist with another
     # DHCP/RA service on, or bridge/bond enslavement of, the same LAN port.
@@ -330,10 +395,17 @@ def _build_ipv6_bridging(wwan):
     """Build the FSM ipv6_bridging sub-dict (carrier /64 to one LAN)."""
     brg = wwan.get('ipv6_bridging', {}) or {}
     brg_iface = brg.get('interface') if isinstance(brg, dict) else None
+    # RFC 4861 Router Advertisement timers (operator-tunable renumber speed).
+    ra = (brg.get('router_advert', {}) or {}) if isinstance(brg, dict) else {}
     return {
         'enabled': bool(brg_iface) and wwan['_user_set']['ipv6_bridging_interface'],
         'interface': brg_iface or '',
         'reconciliation_interval': _leaf_int(brg, 'reconciliation_interval', 10),
+        'translate_prefix': _leaf(brg, 'translate_prefix', '') or '',
+        'ra_min_interval': _leaf_int(ra, 'min_interval', 3),
+        'ra_max_interval': _leaf_int(ra, 'max_interval', 10),
+        'ra_preferred_lifetime': _leaf_int(ra, 'preferred_lifetime', 1800),
+        'ra_valid_lifetime': _leaf_int(ra, 'valid_lifetime', 3600),
     }
 
 
@@ -377,17 +449,30 @@ def _build_ip_passthrough(wwan):
     if not pt_iface:
         return {'enabled': False}
 
+    # RFC 4861 RA tuning sub-node (dnsmasq ra-param + SLAAC/DHCPv6 lifetime).
+    ra = (ipt.get('router_advert', {}) or {}) if isinstance(ipt, dict) else {}
+
     # Policy B: only emit a default mgmt address when the user has NOT
     # set 'interfaces ethernet <if> address ...' on the passthrough port.
     user_eth_addrs = ipt.get('_user_eth_addresses') or []
     user_owns_eth = bool(user_eth_addrs)
     mgmt_v4_cidr = (
-        '' if user_owns_eth
-        else _leaf(ipt, 'management_address', '192.168.200.1/24')
+        '' if user_owns_eth else (
+            _leaf(
+                ipt,
+                'passthrough_management_address',
+                _leaf(ipt, 'management_address', '192.168.200.1/24')
+            )
+        )
     )
     mgmt_v6_cidr = (
-        '' if user_owns_eth
-        else _leaf(ipt, 'management_address_ipv6', 'fd00:6c61:6e30::1/64')
+        '' if user_owns_eth else (
+            _leaf(
+                ipt,
+                'passthrough_management_address_ipv6',
+                _leaf(ipt, 'management_address_ipv6', 'fd00:6c61:6e30::1/64')
+            )
+        )
     )
 
     # Pre-resolve bare-IP forms (no /CIDR) for use as DHCPv4 option 3
@@ -434,6 +519,10 @@ def _build_ip_passthrough(wwan):
         # clients that ignore DHCP option 26 / RA MTU.  Disable only for
         # PMTUD debugging.
         'mss_clamp_enabled': not _leaf_exists(ipt, 'disable_mss_clamp'),
+        # Legacy DHCPv4 compatibility mode (OFF by default): advertise a
+        # same-subnet router/netmask and suppress classless static route
+        # option 121 for older clients that ignore RFC 3442.
+        'legacy_dhcpv4_compat': _leaf_exists(ipt, 'legacy_dhcpv4_compat'),
         # Optional user-supplied DNS override (multi-value). When set,
         # these resolvers are advertised to the downstream device in
         # place of carrier-supplied DNS.
@@ -442,6 +531,11 @@ def _build_ip_passthrough(wwan):
             if isinstance(ipt.get('dns_server'), list)
             else ([ipt.get('dns_server')] if ipt.get('dns_server') else [])
         ),
+        # RFC 4861 RA tuning (dnsmasq ra-param + SLAAC/DHCPv6 prefix lifetime).
+        # prefix_lifetime 0 = fall back to the DHCP lease-time (current behaviour).
+        'ra_interval': _leaf_int(ra, 'interval', 60),
+        'ra_router_lifetime': _leaf_int(ra, 'router_lifetime', 1800),
+        'ra_prefix_lifetime': _leaf_int(ra, 'prefix_lifetime', 0),
     }
 
 
@@ -451,6 +545,7 @@ def build_fsm_config(wwan):
     # ── SIM slots ────────────────────────────────────────────────────────
     sim_cfg = wwan.get('sim', {})
     slot_cfgs = sim_cfg.get('slot', {})
+    sim_dl_user_set = wwan.get('_sim_data_limit_user_set', {}) or {}
 
     # Global data-usage fallback values
     du = wwan.get('data_usage', {})
@@ -467,6 +562,7 @@ def build_fsm_config(wwan):
     for slot_num in (1, 2):
         s = slot_cfgs.get(str(slot_num), {})
         dl = s.get('data_limit', {})
+        dl_user = sim_dl_user_set.get(str(slot_num), {}) or {}
         sim_slots.append({
             'slot': slot_num,
             'enabled': not _leaf_exists(s, 'disable'),
@@ -489,14 +585,23 @@ def build_fsm_config(wwan):
             'enable_network_scan': _leaf_exists(s, 'enable_network_scan'),
             'mtu': _leaf_int(s, 'mtu', 0),
             # Per-SIM data limits, falling back to global
-            'data_limit_size': _leaf_int(dl, 'size', global_data_limit_size),
-            'data_limit_action': _leaf(dl, 'action', global_data_limit_action),
-            'data_limit_billing_date': _leaf_int(
-                dl, 'billing_date', global_data_limit_billing
+            # IMPORTANT: use live-tree presence flags so XML default-injected
+            # per-SIM values do not mask global data-usage settings.
+            'data_limit_size': (
+                _leaf_int(dl, 'size', global_data_limit_size)
+                if dl_user.get('size') else global_data_limit_size
+            ),
+            'data_limit_action': (
+                _leaf(dl, 'action', global_data_limit_action)
+                if dl_user.get('action') else global_data_limit_action
+            ),
+            'data_limit_billing_date': (
+                _leaf_int(dl, 'billing_date', global_data_limit_billing)
+                if dl_user.get('billing_date') else global_data_limit_billing
             ),
             'data_limit_warning': (
                 _csv_to_list(dl.get('warning', ''), int)
-                if dl.get('warning')
+                if dl_user.get('warning') and dl.get('warning')
                 else global_data_limit_warning
             ),
         })
@@ -566,7 +671,7 @@ def build_fsm_config(wwan):
     failed_retry = {
         'enabled': not _leaf_exists(fr, 'disable'),
         'intervals': _csv_to_list(
-            _leaf(fr, 'intervals', '600,1800,3600,7200'), int
+            _leaf(fr, 'intervals', '30,60,120,300,600,1800,3600'), int
         ),
         'max_interval': _leaf_int(fr, 'max_interval', 7200),
         'escalation_threshold': _leaf_int(fr, 'escalation_threshold', 3),
@@ -594,12 +699,17 @@ def build_fsm_config(wwan):
     # ── Assemble the complete config dict ────────────────────────────────
     config = {
         # Basic interface settings
-        'interface_disabled': _leaf_exists(wwan, 'disable'),
         'primary_sim_slot': _leaf_int(sim_cfg, 'primary_slot', 1),
         'connection_mode': _leaf(wwan, 'connection_mode', 'always-on'),
 
         # MTU
         'mtu': _leaf_int(wwan, 'mtu', 1420),
+
+        # Default route metric — metric for the carrier-assigned default
+        # route(s) the FSM installs on wwanN.  Default 220 keeps cellular
+        # below a wired primary (failover/static metric 1, DHCP 210), so the
+        # modem is a backup, not the preferred path.  0 = always-preferred.
+        'default_route_metric': _leaf_int(wwan, 'default_route_metric', 220),
 
         # Enhanced reconnection
         'enhanced_reconnection': enhanced_reconnection,
@@ -658,6 +768,10 @@ def build_fsm_config(wwan):
             wwan.get('network_scan', {}), 'timeout', 180
         ),
         'network_mode': _leaf(wwan, 'network_mode', 'auto'),
+
+        # Network time (NITZ) — opt-in: set the system clock from cellular
+        # network time at registration (guarded so it never overrides NTP).
+        'network_time_enabled': _leaf_exists(wwan, 'network_time'),
 
         # Monitoring intervals
         'normal_monitoring_interval': _leaf_int(
@@ -868,6 +982,67 @@ def verify(wwan):
             f"carrier prefix lands on the L3-owning interface."
         )
 
+    # translate-prefix is meaningless without a bridged LAN interface.
+    if (wwan.get('ipv6_bridging', {}) or {}).get('translate_prefix') \
+            and not user_set.get('ipv6_bridging_interface'):
+        raise ConfigError(
+            "ipv6-bridging translate-prefix requires 'ipv6-bridging interface "
+            "<lan>' to be set."
+        )
+
+    # ── ipv6-bridging RA timer sanity (RFC 4861 / radvd hard requirements) ──
+    # radvd refuses to start unless MinRtrAdvInterval <= 0.75 * MaxRtrAdvInterval
+    # and AdvPreferredLifetime <= AdvValidLifetime.  Catch it here with a clean
+    # message instead of a silent radvd start failure at runtime.
+    if user_set.get('ipv6_bridging_interface'):
+        ra = (wwan.get('ipv6_bridging', {}) or {}).get('router_advert', {}) or {}
+        ra_min = int(ra.get('min_interval', 3))
+        ra_max = int(ra.get('max_interval', 10))
+        if ra_min > 0.75 * ra_max:
+            raise ConfigError(
+                f"ipv6-bridging router-advert min-interval ({ra_min}s) must be "
+                f"<= 0.75 x max-interval ({int(0.75 * ra_max)}s for the configured "
+                f"max-interval of {ra_max}s) — RFC 4861 / radvd reject this combination."
+            )
+        ra_pref = int(ra.get('preferred_lifetime', 1800))
+        ra_valid = int(ra.get('valid_lifetime', 3600))
+        if ra_pref > ra_valid:
+            raise ConfigError(
+                f"ipv6-bridging router-advert preferred-lifetime ({ra_pref}s) must "
+                f"not exceed valid-lifetime ({ra_valid}s) — RFC 4861."
+            )
+
+        # NPTv6 translate-prefix must be a valid IPv6 /64 (cellular carriers
+        # assign a /64; the 1:1 prefix map only substitutes the /64 bits).
+        translate_prefix = (wwan.get('ipv6_bridging', {}) or {}).get('translate_prefix')
+        if translate_prefix:
+            try:
+                _net = ipaddress.IPv6Network(translate_prefix, strict=False)
+            except (ipaddress.AddressValueError,
+                    ipaddress.NetmaskValueError, ValueError):
+                raise ConfigError(
+                    f"ipv6-bridging translate-prefix '{translate_prefix}' is not a "
+                    f"valid IPv6 prefix."
+                )
+            if _net.prefixlen != 64:
+                raise ConfigError(
+                    f"ipv6-bridging translate-prefix must be a /64 (cellular carriers "
+                    f"assign a /64); got /{_net.prefixlen}."
+                )
+
+    # ── ip-passthrough RA timer sanity (dnsmasq ra-param) ──────────────
+    # A router-lifetime shorter than the RA interval leaves the downstream
+    # device without a default route between advertisements (RFC 4861).
+    if user_set.get('ip_passthrough_interface'):
+        pra = (wwan.get('ip_passthrough', {}) or {}).get('router_advert', {}) or {}
+        pra_int = int(pra.get('interval', 60))
+        pra_life = int(pra.get('router_lifetime', 1800))
+        if pra_life != 0 and pra_life < pra_int:
+            raise ConfigError(
+                f"ip-passthrough router-advert router-lifetime ({pra_life}s) must "
+                f"be 0 or >= interval ({pra_int}s) — a shorter lifetime leaves the "
+                f"downstream device without a default route between RAs (RFC 4861)."
+            )
 
     return None
 
@@ -891,45 +1066,74 @@ def apply(wwan):
     interface_number = int(match.group(1)) if match else 0
 
     if 'deleted' in wwan:
-        # Interface node is gone from the CLI tree — fully tear down on
-        # the FSM side: shut the state machine down, unexport the D-Bus
-        # object, and delete the persisted config cache so a later
-        # service restart will NOT replay a stale configuration.
+        # Interface node is gone from the CLI tree.  get_config() already
+        # checked the session/proposed tree using this script's sole Config
+        # instance, before any services were touched.
+        last_wwan = wwan.get('_last_wwan', False)
+
+        # Fully tear down THIS interface on the FSM side: shut the state
+        # machine down (drops the bearer, deregisters from the network,
+        # tears down downstream LAN state), unexport its D-Bus object, and
+        # delete the persisted config cache so a later service start will
+        # NOT replay a stale configuration.
         #
-        # NOTE: we intentionally do NOT stop the manager service or
-        # ModemManager here, even when this is the last wwan interface.
-        # The manager owns the graceful teardown sequence (drop bearer,
-        # release session, unmanage the modem) and stopping it mid-flight
-        # would skip that.  At next boot, with no wwan configured, the
-        # conf_mode replay simply will not start the manager -- so the
-        # "no config => no MM running" goal is met on reboot, while a
-        # live `delete` still gets a clean teardown.
         # Ensure the manager is available so RemoveInterface can succeed even
         # if this commit path is the first WWAN action after a service crash.
         _ensure_manager_running()
         removed = asyncio.run(_remove_via_dbus(interface_number))
         if not removed:
-            # Do not block commit, but ensure stale persisted state does not
-            # resurrect when the interface is recreated later.
+            # Manager unreachable (crashed / not yet up): the D-Bus
+            # RemoveInterface handler -- which is what purges this interface's
+            # persisted state (config cache AND data-usage counters) -- never
+            # ran.  Clean both up locally so a later recreate starts clean.
+            # When RemoveInterface DID run, the manager already removed these
+            # itself, so we skip the redundant local delete.
             _remove_local_wwan_cache(interface_number)
+            _remove_persisted_usage(interface_number)
 
         if interface_exists(ifname):
             w = WWANIf(ifname)
             w.remove()
+
+        # If that was the last wwan interface, bring cellular fully down:
+        # stop the WWAN manager service, which runs its own graceful
+        # teardown and then stops ModemManager.  This is what guarantees the
+        # network connection actually drops and no ModemManager is left
+        # running once the last interface is gone.
+        if last_wwan:
+            _stop_manager_and_modemmanager()
 
         return None
 
     if _leaf_exists(wwan, 'disable'):
-        # Admin-disable — keep the FSM/D-Bus object around but tell it to
-        # drop the bearer and suppress activity.  Persisted config is
-        # retained so re-enable picks up the previous configuration.
-        config = {'interface_disabled': True}
+        # Admin-disable is a FULL teardown, identical to `delete` except the
+        # config node stays in the CLI tree.  Rationale: once the modem is
+        # torn down we have no visibility into SIM/carrier changes, so
+        # replaying stale history (data-usage counters, last-connected APN)
+        # on re-enable could be wrong -- a clean slate is correct.
+        # RemoveInterface drops the bearer, deregisters, tears down the
+        # downstream LAN state, unexports the D-Bus object and PURGES the
+        # persisted config cache + data-usage counters.  Removing `disable`
+        # later recreates the interface from scratch via the normal apply
+        # path below.
+        disable_last_active = wwan.get('_disable_last_active', False)
         _ensure_manager_running()
-        asyncio.run(_apply_via_dbus(interface_number, config))
+        removed = asyncio.run(_remove_via_dbus(interface_number))
+        if not removed:
+            # Manager unreachable: purge persisted state locally so a later
+            # re-enable still starts clean (mirrors the delete fallback).
+            _remove_local_wwan_cache(interface_number)
+            _remove_persisted_usage(interface_number)
 
         if interface_exists(ifname):
             w = WWANIf(ifname)
             w.remove()
+
+        # If no enabled wwan interface remains, bring cellular fully down:
+        # stop the WWAN manager (which stops ModemManager) so nothing runs,
+        # exactly as deleting the last interface does.
+        if disable_last_active:
+            _stop_manager_and_modemmanager()
 
         return None
 
@@ -949,7 +1153,16 @@ def apply(wwan):
     # VRF, mirror/redirect, ip/ipv6 options, MTU, description, etc.
     if interface_exists(ifname):
         w = WWANIf(ifname)
-        w.update(wwan)
+        # Link bring-up is owned by the WWAN state machine when interface
+        # management + ensure-link-up-on-connect are active: it raises wwanN
+        # only AFTER ModemManager has set the qmi_wwan data-format (raw_ip),
+        # a change the kernel rejects while the netdev is running.  Defer the
+        # generic admin-UP so this commit does not race MM's raw_ip write on
+        # (re)connect ("qmi_wwan ... Cannot change a running device").  When
+        # the FSM will not raise the link, keep the historical bring-up here.
+        im = config['interface_management']
+        defer_admin_up = bool(im['enabled'] and im['ensure_link_up_on_connect'])
+        w.update(wwan, defer_admin_up=defer_admin_up)
 
     return None
 
@@ -958,9 +1171,11 @@ def _is_transient_dbus_error(exc):
     """True when a WWAN D-Bus error means the service has not yet claimed its
     bus name (started but still booting), as opposed to a real method error.
 
-    `systemctl start` returns while the manager is still acquiring
-    `com.igos.IgosModemManager`, so the first call after a fresh start can
-    race the name acquisition.  Callers retry these until their deadline.
+    Used only for method-level errors raised AFTER a successful connect (the
+    whole connect/introspect phase is handled structurally in
+    `_apply_via_dbus` by retrying every `WWANConnectionError`).  If the
+    manager drops off the bus mid-operation, the in-flight method call surfaces
+    one of these name-acquisition strings; retry those until the deadline.
     """
     msg = str(exc)
     return (
@@ -982,7 +1197,11 @@ async def _apply_via_dbus(interface_number, config, connect_timeout=20.0):
     "name was not provided by any .service files".
     """
     # Import here to avoid hard dependency at module level
-    from vyos.utils.wwan.wwan_client import WWANClient, WWANError
+    from vyos.utils.wwan.wwan_client import (
+        WWANClient,
+        WWANError,
+        WWANConnectionError,
+    )
 
     deadline = time.monotonic() + connect_timeout
     while True:
@@ -994,11 +1213,32 @@ async def _apply_via_dbus(interface_number, config, connect_timeout=20.0):
                     interface_number, config)
                 print(f'WWAN interface {interface_number}: {result}')
             return
+        except WWANConnectionError as exc:
+            # CONNECT / INTROSPECT phase failure.  `_ensure_manager_running()`
+            # only guarantees `systemctl start` has returned -- the manager may
+            # still be coming up, and EVERY way the connect can lose that race
+            # is transient and self-clears within a fraction of a second:
+            #   * the well-known name is not on the bus yet (ServiceUnknown /
+            #     name "was not provided by any .service files" / NameHasNoOwner);
+            #   * the name is claimed but the object path is not registered yet
+            #     (UnknownObject / "No such object");
+            #   * the object is introspectable but the Control interface is not
+            #     exported yet ("interface not found on this object" -- the
+            #     ~tens-of-ms race actually hit at boot);
+            #   * transport-level races while the bus connection settles.
+            # Retry the WHOLE connect until the deadline rather than trying to
+            # enumerate every possible dbus-next message.
+            if time.monotonic() < deadline:
+                await asyncio.sleep(0.5)
+                continue
+            raise ConfigError(
+                f'WWAN D-Bus configuration failed (service not ready): {exc}'
+            ) from exc
         except WWANError as exc:
-            # WWANError covers both "bus name not on the bus" and
-            # genuine method errors.  Treat name-not-found as transient
-            # only while we are still within the connect timeout; any
-            # other WWANError is a real configuration failure.
+            # A method-level error AFTER a successful connect (e.g.
+            # WWANConfigError = SetConfiguration rejected).  Only the known
+            # name-acquisition-race strings are transient; any other WWANError
+            # is a genuine configuration failure and must surface immediately.
             if _is_transient_dbus_error(exc) and time.monotonic() < deadline:
                 await asyncio.sleep(0.5)
                 continue
@@ -1067,6 +1307,33 @@ def _remove_local_wwan_cache(interface_number):
             pass
         except Exception as exc:
             print(f'Warning: failed to remove WWAN cache {path}: {exc}')
+
+
+def _remove_persisted_usage(interface_number):
+    """Fallback cleanup of persisted per-SIM data-usage counters.
+
+    The PRIMARY purge happens inside the manager's `remove_interface` (the
+    D-Bus RemoveInterface handler), right beside the config-cache removal, so
+    it is co-located with the FSM teardown.  This local delete is only used
+    when that D-Bus call could NOT be reached (manager crashed / not yet up),
+    mirroring how `_remove_local_wwan_cache` backstops the /run config cache.
+
+    Only ever runs on an explicit `delete interfaces wwan wwanN` (never on a
+    reboot/upgrade, which replay the config), so billing counters still
+    survive restarts while an operator-initiated removal starts clean.  The
+    file lives under /config (WWAN_PERSIST_DIR in
+    interfaces_wwan_state_machine.py).  Best-effort: a missing file is fine and
+    any error is a warning so it never blocks the commit.
+    """
+    base = f'/config/wwan/wwan{interface_number}_usage.json'
+    for path in (base, base + '.tmp'):
+        try:
+            os.unlink(path)
+            print(f'WWAN interface {interface_number}: cleared data-usage {path}')
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            print(f'Warning: failed to clear WWAN data-usage {path}: {exc}')
 
 
 # ---------------------------------------------------------------------------

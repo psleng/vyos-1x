@@ -39,6 +39,12 @@
             </properties>
             <command>cat /proc/meminfo</command>
           </node>
+          <node name="model">
+            <properties>
+              <help>Show system hardware model information</help>
+            </properties>
+            <command>${vyos_op_scripts_dir}/hardware_model.py show</command>
+          </node>
           <node name="pci">
             <properties>
               <help>Show system PCI bus details</help>
