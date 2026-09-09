@@ -221,7 +221,11 @@ data-ciphers {{ encryption.data_ciphers | openvpn_data_ciphers }}
 data-ciphers-fallback {{ encryption.data_ciphers_fallback | openvpn_data_ciphers_fallback }}
 {%     endif %}
 {% endif %}
+{% if tpm_required is vyos_defined %}
+providers default tpm2
+{% else %}
 providers default
+{% endif %}
 
 {% if hash is vyos_defined %}
 auth {{ hash }}

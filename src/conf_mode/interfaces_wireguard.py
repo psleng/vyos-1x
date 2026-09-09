@@ -15,7 +15,6 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import os
-import base64
 
 from glob import glob
 from sys import exit
@@ -104,19 +103,20 @@ def verify(wireguard):
         raise ConfigError('Wireguard private-key defined multiple times')
 
     elif 'private_key_tpm' in wireguard:
-        if tpm.tpm_exist():
-            save_file = wireguard['private_key_tpm']
-            pub = save_file + '.pub'
-            priv = save_file + '.priv'
-            # We will save all tpm sealed private keys in /config/auth/wireguard
-            save_dir = "/config/auth/wireguard/"
+        if tpm.tpm_enabled():
+            save_file = os.path.join('wireguard/', wireguard['private_key_tpm'])
+            # All TPM files will be in /config/auth; wireguard ones in subdir /wireguard/
+            save_dir = "/config/auth/"
 
-            if not os.path.exists(save_dir + pub) or not os.path.exists(save_dir + priv):
-                raise ConfigError('Wireguard private-key-tpm .pub/.priv files cannot be located')
+            if not os.path.exists(os.path.join(save_dir, save_file)):
+                raise ConfigError('Wireguard private-key-tpm file cannot be located')
 
-            reread_key = base64.b64encode(tpm.read_tpm_key_file(pub, priv)).decode("utf-8")
+            reread_key = tpm.read_tpm_key_file(save_file)
             wireguard['private_key'] = reread_key
             del wireguard['private_key_tpm']
+
+        else:
+            raise Exception("TPM is disabled, please run 'tpm enable'")
 
     if 'port' in wireguard and 'port_changed' in wireguard:
         listen_port = int(wireguard['port'])

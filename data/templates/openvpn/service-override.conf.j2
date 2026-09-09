@@ -18,4 +18,7 @@
 [Service]
 ExecStart=
 ExecStart=/usr/sbin/openvpn --daemon openvpn-%i --config %i.conf --status %i.status 30 --writepid %i.pid {{ options.value }}
-
+{% if tpm_required is vyos_defined %}
+SupplementaryGroups=tss
+DeviceAllow=/dev/tpmrm0 rw
+{% endif %}
