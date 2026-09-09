@@ -160,6 +160,14 @@ class PacketHandler:
         self.tasks.add(task)
 
     # async packet handler
+    def put_packet(self, packet):
+        try:
+            packet_queue.put_nowait(packet)
+        except asyncio.QueueFull:
+            logger.info("Packet queue full → dropping packets")
+            packet.drop()
+            pass
+
     async def handle_packet_async(self, packet):
 
         #if await modem_connected(self.modem_id):
@@ -171,12 +179,8 @@ class PacketHandler:
             return
         # enqueue the packet into an async queue (the async queue is not thread safe)
         try:
-            self.loop.call_soon_threadsafe(packet_queue.put_nowait, packet)
+            self.loop.call_soon_threadsafe(self.put_packet, packet)
             logger.info(f"Packet queued: {packet}")
-        except asyncio.QueueFull:
-            logger.info("Packet queue full → dropping packets")
-            packet.drop()
-            return
         except asyncio.CancelledError:
             packet.drop()
             raise
@@ -266,15 +270,16 @@ def start_nfqueue(nfqueue):
 async def main(interface='wwan0', connect_timeout=30, loop=None, client=None):
 
     queue_num = get_interface_queue_num(interface)
+    logger.info(f"Given timeout to wait for modem connect: {connect_timeout}")
+
+    logger.info(f"The nfqueue to listen to: {queue_num}")
     modem_index = get_all_wwan_options()
+    logger.info(f'{modem_index}')
     if modem_index.get(interface) != None:
         modem_index = modem_index.get(interface)
     else:
         return
 
-    logger.info(f"Given timeout to wait for modem connect: {connect_timeout}")
-
-    logger.info(f"The nfqueue to listen to: {queue_num}")
     #print(modem_index)
     if queue_num is None:
         return
@@ -309,12 +314,15 @@ async def main(interface='wwan0', connect_timeout=30, loop=None, client=None):
         #loop.run_forever()
     except asyncio.CancelledError:
         raise
+    except asyncio.queues.QueueFull:
+        pass
     finally:
         handler.shutdown = True
         loop.remove_reader(fd)
         worker_task.cancel()
         await handler.cleanup_tasks()
         nfqueue.unbind()
+        loop.close()
 
 
 if __name__ == "__main__":

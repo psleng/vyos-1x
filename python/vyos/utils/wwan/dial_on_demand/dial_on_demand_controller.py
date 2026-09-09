@@ -33,29 +33,37 @@ def cleanup(interface='wwan0'):
 
 async def run(interface='wwan0', timeout=30, connect_timeout=30):
     try:
+        logger.info("Starting idle wwan watcher program.")
         await idle_wwan_watcher.main(interface=interface, timeout=timeout)
+        logger.info("Finished idle wwan watcher program.")
+        logger.info("Starting installation of nft rules.")
         await nft_rules.generate_nft_rules(interface=interface)
+        logger.info("Finished installing nft rules.")
+        logger.info("Starting nfqueue monitor.")
         await wwan_nft_reconnect.main(interface=interface, connect_timeout=connect_timeout)
+        logger.info("Finished nfqueue monitor.")
     except asyncio.CancelledError:
         raise
     finally:
         logger.info("Finished service successfully!")
 
 
-async def main(interface='wwan0', timeout=30, connect_timeout=30):
+async def main(interface='wwan0', timeout=30, connect_timeout=30, loop=None):
     """"""
+    if loop is None:
+        loop = asyncio.get_event_loop()
     current_task = asyncio.create_task(run(interface=interface, timeout=timeout, connect_timeout=connect_timeout))
     def handle_sigterm():
         logger.info("Received signal termination. Stopping service...")
         current_task.cancel()
 
-    loop = asyncio.get_event_loop()
     loop.add_signal_handler(signal.SIGTERM, handle_sigterm)
 
     try:
         await current_task
 
     except asyncio.CancelledError:
+        logger.info("Received a termination signal.")
         pass
     finally:
         # should always cleanup
@@ -74,4 +82,8 @@ if __name__ == "__main__":
         raise ValueError("Too many arguments for this function")
     interface, timeout, connect_timeout = items
 
-    asyncio.run(main(interface=interface,timeout=timeout,connect_timeout=connect_timeout))
+    loop = asyncio.get_event_loop()
+    try:
+        loop.run_until_complete(main(interface=interface,timeout=timeout,connect_timeout=connect_timeout, loop=loop))
+    finally:
+        loop.close()

@@ -4,6 +4,9 @@ from vyos.config import Config
 from pathlib import Path
 import subprocess
 import asyncio
+import logging
+
+logger = logging.getLogger(__name__)
 
 def get_physical_interfaces():
     net_dir = Path("/sys/class/net")
@@ -46,6 +49,7 @@ async def async_run_nft_cmd(cmd=''):
 
 
 async def generate_nft_rules(interface='wwan0'):
+    logger.info("Start generating nft rules.")
     config = get_config()
     matching = {}
     interface_test = {}
@@ -83,6 +87,7 @@ async def generate_nft_rules(interface='wwan0'):
             '''
         try:
             await async_run_nft_cmd(basic_nft_commands + commands)
+            logger.info("Generated nft rules...installing now")
         except asyncio.CancelledError:
             raise
 
