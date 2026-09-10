@@ -25,9 +25,10 @@ vyos-build and organised by processor family::
 
 ``model.conf`` is a superset manifest.  Its keys::
 
-    match     comma-separated list of EXACT ``<prod_id>-<model>`` ids this
-              definition serves (matched verbatim; a profile may cover many
-              order SKUs, e.g. IOLAN-2A00, IOLAN-2A01).           REQUIRED
+    match     the SINGLE EXACT ``<prod_id>-<model>`` id this definition serves
+              (matched verbatim). One id per model.conf -- NOT a list; a board
+              revision that shares a dtb is its own model dir, and runtime
+              revision differences are handled by the kernel.      REQUIRED
     platform  processor family (am64x, j7200, ...).               REQUIRED
     dtb       device-tree blob this model boots (declared here so the whole
               model is defined in one place; the kernel builds it and U-Boot
@@ -46,7 +47,7 @@ Identity (``prod_id``, ``model``, and optional ``platform``) is resolved from
 ``/proc/cmdline`` first, then a ``product.env`` fallback \u2014 the same cascade the
 init script already uses \u2014 so config selection and pin-map selection can never
 disagree.  A model is selected when the running unit's ``<prod_id>-<model>`` id
-appears verbatim in a definition's ``match`` list.  When nothing matches, a
+appears verbatim as a definition's ``match`` id.  When nothing matches, a
 platform-appropriate ``fallback = true`` definition may be used for config
 resolution; failing that, ``None`` is returned so every caller safely keeps
 its generic default.
@@ -182,7 +183,16 @@ class ModelDef:
 
     def match_ids(self) -> List[str]:
         raw = self.conf.get("match", "")
-        return [x.strip() for x in raw.split(",") if x.strip()]
+        ids = [x.strip() for x in raw.split(",") if x.strip()]
+        if len(ids) > 1:
+            raise ValueError(
+                f"model definition {self.path!r} declares {len(ids)} 'match' "
+                f"ids ({', '.join(ids)}); exactly one id is allowed per "
+                "model.conf. A board revision that shares a dtb is its own "
+                "model dir; runtime revision differences are handled by the "
+                "kernel, not by extra match ids."
+            )
+        return ids
 
     @property
     def is_fallback(self) -> bool:
