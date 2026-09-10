@@ -144,47 +144,6 @@
         </node>
       </children>
     </node>
-    <node name="slave">
-      <properties>
-        <help>Modbus slave service settings</help>
-      </properties>
-      <children>
-        <tagNode name="remap-uid">
-          <properties>
-            <help>Source master UID or UID range to remap from</help>
-            <valueHelp>
-              <format>start-end</format>
-              <description>UID range (e.g. 2-5) to match</description>
-            </valueHelp>
-            <valueHelp>
-              <format>&lt;1-247&gt;</format>
-              <description>UID number, from 1 to 247</description>
-            </valueHelp>
-            <constraint>
-              <validator name="modbus-uid-range"/>
-            </constraint>
-          </properties>
-          <children>
-            <leafNode name="to">
-              <properties>
-                <help>Destination slave UID or UID range to remap to</help>
-                <valueHelp>
-                  <format>start-end</format>
-                  <description>UID range (e.g. 2-5) to match</description>
-                </valueHelp>
-                <valueHelp>
-                  <format>&lt;1-247&gt;</format>
-                  <description>UID number, from 1 to 247</description>
-                </valueHelp>
-                <constraint>
-                  <validator name="modbus-uid-range"/>
-                </constraint>
-              </properties>
-            </leafNode>
-          </children>
-        </tagNode>
-      </children>
-    </node>
   </children>
 </node>
 <!-- include end -->
