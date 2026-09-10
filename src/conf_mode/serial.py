@@ -623,22 +623,34 @@ def verify(config):
             raise ConfigError(f'cannot modify config on active serial session: {conf_session_device}')
 
     # global tls template
-    if run_serial_validation and 'global_parameters' in config and 'tls' in config['global_parameters']:
-        if 'template' not in config['global_parameters']['tls']:
-            raise ConfigError('global-parameters tls: template required')
-        for template_name, template_conf in config['global_parameters']['tls']['template'].items():
-            if template_conf.get('role') == 'server' and tpm_enabled():
-                if 'certificate' not in template_conf:
-                    # TPM disabled case can use snakeoil cert
-                    raise ConfigError(f'tls template "{template_name}": certificate required for TPM server')
-                cert_name = template_conf['certificate']
-                if not validate_certificate_against_tpm_priv_key(get_path_str('certificate', 'pem', cert_name), get_path_str('certificate', 'key', cert_name)):
-                    raise ConfigError(f'tls template "{template_name}": certificate does not match TPM key')
+    if run_serial_validation and 'global_parameters' in config:
+        if 'tls' in config['global_parameters']:
+            if 'template' not in config['global_parameters']['tls']:
+                raise ConfigError('global-parameters tls: template required')
+            for template_name, template_conf in config['global_parameters']['tls']['template'].items():
+                if template_conf.get('role') == 'server' and tpm_enabled():
+                    if 'certificate' not in template_conf:
+                        # TPM disabled case can use snakeoil cert
+                        raise ConfigError(f'tls template "{template_name}": certificate required for TPM server')
+                    cert_name = template_conf['certificate']
+                    if not validate_certificate_against_tpm_priv_key(get_path_str('certificate', 'pem', cert_name), get_path_str('certificate', 'key', cert_name)):
+                        raise ConfigError(f'tls template "{template_name}": certificate does not match TPM key')
 
-            min_key = int(template_conf.get('min_key_size', 40))
-            max_key = int(template_conf.get('max_key_size', 256))
-            if max_key < min_key:
-                raise ConfigError(f'tls template "{template_name}": max-key-size cannot be less than min-key-size')
+                min_key = int(template_conf.get('min_key_size', 40))
+                max_key = int(template_conf.get('max_key_size', 256))
+                if max_key < min_key:
+                    raise ConfigError(f'tls template "{template_name}": max-key-size cannot be less than min-key-size')
+
+        modbus_gateway_tls = dict_search('global_parameters.modbus_gateway.tls', config) or {}
+        if modbus_gateway_tls:
+            if 'template' not in modbus_gateway_tls:
+                raise ConfigError('global-parameters modbus-gateway tls: template required')
+            template_name = modbus_gateway_tls['template']
+            available_templates = dict_search('global_parameters.tls.template', config) or {}
+            if template_name not in available_templates:
+                raise ConfigError(
+                    f'global-parameters modbus-gateway tls: template "{template_name}" does not exist'
+                )
 
     # global vmodem phone list
     vmodem_entries = dict_search('global_parameters.vmodem.directory_entry', config) if run_serial_validation else None
@@ -694,6 +706,85 @@ def verify(config):
                 verify_mutual_exclusion(svc_conf, ['master', 'slave'],
                                         f'{context} {svc_name}',
                                         conflict_msg=f'{context} {svc_name}: only one of master or slave allowed')
+
+                if 'slave' in svc_conf:
+                    slave_cfg = svc_conf['slave']
+                    if isinstance(slave_cfg, dict) and 'remap_uid_list' in slave_cfg:
+                        remap_entries = slave_cfg['remap_uid_list']
+                        if isinstance(remap_entries, dict) and 'entry' in remap_entries:
+                            def parse_uid_value(value):
+                                if not isinstance(value, str):
+                                    return None
+                                value = value.strip()
+                                if not value:
+                                    return None
+                                if '-' in value:
+                                    try:
+                                        start, end = value.split('-', 1)
+                                        start_num = int(start)
+                                        end_num = int(end)
+                                    except ValueError:
+                                        return None
+                                    if start_num > end_num:
+                                        return None
+                                    return ('range', start_num, end_num)
+                                if value.isdigit():
+                                    return ('single', int(value), int(value))
+                                return None
+
+                            def uid_range_to_text(start, end):
+                                return str(start) if start == end else f'{start}-{end}'
+
+                            entry_ranges = []
+                            for entry_id, entry in remap_entries['entry'].items():
+                                if not isinstance(entry, dict):
+                                    raise ConfigError(f'{context} {svc_name} slave remap-uid-list entry {entry_id}: invalid entry')
+
+                                if 'from' not in entry or 'to' not in entry:
+                                    raise ConfigError(
+                                        f'{context} {svc_name} slave remap-uid-list entry {entry_id}: from and to are required'
+                                    )
+
+                                from_value = parse_uid_value(entry['from'])
+                                to_value = parse_uid_value(entry['to'])
+                                if from_value is None or to_value is None:
+                                    raise ConfigError(
+                                        f'{context} {svc_name} slave remap-uid-list entry {entry_id}: from and to must be valid UID or UID range'
+                                    )
+
+                                if from_value[0] != to_value[0]:
+                                    raise ConfigError(
+                                        f'{context} {svc_name} slave remap-uid-list entry {entry_id}: '
+                                        f'from and to must match type (single or range); got {entry["from"]} and {entry["to"]}'
+                                    )
+
+                                from_start, from_end = from_value[1], from_value[2]
+                                to_start, to_end = to_value[1], to_value[2]
+                                if from_value[0] != 'single':
+                                    from_size = from_end - from_start + 1
+                                    to_size = to_end - to_start + 1
+                                    if from_size != to_size:
+                                        raise ConfigError(
+                                            f'{context} {svc_name} slave remap-uid-list entry {entry_id}: '
+                                            f'from range {entry["from"]} must match to range size; got {entry["to"]}'
+                                        )
+
+                                entry_ranges.append({
+                                    'entry_id': entry_id,
+                                    'from': (from_start, from_end),
+                                    'to': (to_start, to_end),
+                                })
+
+                            for field_name in ('from', 'to'):
+                                ranges = [(entry['entry_id'], entry[field_name]) for entry in entry_ranges]
+                                for i, (entry_a_id, (start_a, end_a)) in enumerate(ranges):
+                                    for entry_b_id, (start_b, end_b) in ranges[i + 1:]:
+                                        if max(start_a, start_b) <= min(end_a, end_b):
+                                            raise ConfigError(
+                                                f'{context} {svc_name} slave remap-uid-list entry {entry_a_id}: '
+                                                f'{field_name} range {uid_range_to_text(start_a, end_a)} overlaps with '
+                                                f'entry {entry_b_id} {field_name} range {uid_range_to_text(start_b, end_b)}'
+                                            )
 
             def require_addr_port(cfg, sub_context):
                 if 'address' not in cfg or 'port' not in cfg:
@@ -797,8 +888,10 @@ def verify(config):
                     if mode in dial_conf and 'phone_number' not in dial_conf[mode]:
                         raise ConfigError(f'{context} {svc_name} modem dial {mode}: phone-number required')
 
-            # UDP rule validation - at least one rule required, and direction required per rule
+            # UDP validation - port is required, and at least one rule is required with valid direction
             if service == 'udp':
+                if 'port' not in svc_conf:
+                    raise ConfigError(f'{context} {svc_name}: port required')
                 if 'rule' not in svc_conf:
                     raise ConfigError(f'{context} {svc_name}: at least one rule must be configured')
                 if 'rule' in svc_conf:
@@ -1030,10 +1123,6 @@ def generate(config):
                 is_server = 'server' in svc_conf
                 is_client = 'client' in svc_conf
 
-                # # Save server listen port if configured
-                # if is_server and 'port' in svc_conf.get('server', {}):
-                #     port_config['listen_port'] = svc_conf['server']['port']
-
                 # login
                 if service == 'login':
                     port_config['service'] = 'login'
@@ -1177,31 +1266,46 @@ def generate(config):
                                     mapping_conf['entry'][key]['uid_end'] = uid_end
                                     del mapping_conf['entry'][key]['uid']
                     else:
-                        # Default to slave
                         port_config['service'] = 'modbus-slave'
                         slave_conf = svc_conf.pop('slave')
                         for key, value in slave_conf.items():
-                            if key == 'remap_uid':
+                            if key in ('remap_uid', 'remap_uid_list'):
                                 remap_conf = value or {}
+                                if isinstance(remap_conf, dict) and 'entry' in remap_conf:
+                                    remap_conf = remap_conf['entry']
+
                                 remapped_entries = {}
                                 for idx, (source_key, entry_val) in enumerate(remap_conf.items()):
                                     entry = dict(entry_val) if isinstance(entry_val, dict) else {}
-                                    entry['from'] = str(source_key)
-                                    if 'to' in entry and isinstance(entry['to'], str):
-                                        remapped_entries[str(idx)] = {
-                                            'from': entry['from'],
-                                            'to': entry['to'],
-                                        }
-                                        continue
-                                    if isinstance(entry_val, dict) and 'to' in entry_val and isinstance(entry_val.get('to'), str):
-                                        entry['to'] = entry_val['to']
-                                    elif 'uid' in entry:
-                                        entry['to'] = entry['uid']
+
+                                    source_value = str(entry.get('from', source_key))
+                                    target_value = entry.get('to')
+                                    if target_value is None and 'uid' in entry:
+                                        target_value = entry['uid']
                                         del entry['uid']
-                                    remapped_entries[str(idx)] = {
-                                        'from': entry['from'],
-                                        'to': entry['to'],
-                                    }
+
+                                    if not isinstance(target_value, str):
+                                        continue
+
+                                    mapped_entry = {}
+                                    if '-' in source_value:
+                                        from_start, from_end = source_value.split('-', 1)
+                                        mapped_entry['from_start'] = int(from_start)
+                                        mapped_entry['from_end'] = int(from_end)
+                                        mapped_entry['type'] = 'range'
+                                    else:
+                                        mapped_entry['from'] = source_value
+                                        mapped_entry['type'] = 'single'
+
+                                    if '-' in target_value:
+                                        to_start, to_end = target_value.split('-', 1)
+                                        mapped_entry['to_start'] = int(to_start)
+                                        mapped_entry['to_end'] = int(to_end)
+                                    else:
+                                        mapped_entry['to'] = target_value
+
+                                    remapped_entries[str(idx)] = mapped_entry
+
                                 port_config['remap_uid'] = remapped_entries
                             else:
                                 port_config[key] = value
@@ -1239,7 +1343,7 @@ def generate(config):
                             if '/' in prefix:
                                 if_config['ipv6']['v6_local_prefix'], if_config['ipv6']['prefix_length'] = prefix.split('/')
                                 del if_config['ipv6']['global_parameters_network_prefix']
-                        # Flatten authentication.protocol using the explicitly selected branch only.
+                        # Flatten authentication.protocol using the explicitly selected branch only
                         if 'authentication' in if_config and 'protocol' in if_config['authentication']:
                             auth_proto = if_config['authentication']['protocol']
                             if selected_protocols:
