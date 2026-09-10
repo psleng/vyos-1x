@@ -19,18 +19,15 @@
 import json
 from html import escape
 from enum import Enum
-from enum import StrEnum
-from typing import Any, Callable, List, Type
+from typing import List
 from typing import Union
 from typing import Dict
-from typing import Self
-from typing import Tuple
 from typing import Optional
+from typing import Self
 
 from pydantic import BaseModel
 from pydantic import StrictStr
 from pydantic import StrictInt
-from pydantic import AnyHttpUrl
 from pydantic import field_validator
 from pydantic import model_validator
 from fastapi.responses import HTMLResponse
@@ -90,6 +87,7 @@ class ConfigureModel(ApiModel, BaseConfigureModel):
 
 class ConfirmModel(ApiModel):
     op: StrictStr
+
 
 class ConfigureListModel(ApiModel):
     commands: List[BaseConfigureModel]
@@ -155,7 +153,7 @@ class ConfigFileModel(ApiModel):
                 'key': 'id_key',
                 'op': 'save | load | merge | confirm',
                 'file': 'filename',
-                'string': 'config_string'
+                'string': 'config_string',
             }
         }
 
@@ -240,6 +238,7 @@ class GenerateModel(ApiModel):
 
 class ShowModel(ApiModel):
     op: StrictStr
+    format: Optional[StrictStr] = None
     path: List[StrictStr]
 
     class Config:
@@ -321,48 +320,6 @@ class TracerouteModel(ApiModel):
             }
         }
 
-# ==== Auth Services ====
-class AuthService(StrEnum):
-    SAML = "SAML"
-
-
-# ==== Auth Service Data Model ====
-class SAMLType(str, Enum):
-    AUTH = "AUTH"
-    CHECK_AUTH = "CHECK_AUTH"
-    INFO = "INFO"
-class SAMLAuthRequestData(BaseModel):
-    type: SAMLType
-    RelayState: Optional[AnyHttpUrl] = None
-    session: Optional[StrictStr] = None
-
-    @model_validator(mode="after")
-    def check_required_fields(self):
-        if self.type == SAMLType.CHECK_AUTH and not self.session:
-            raise ValueError("Field 'session' is required when type is CHECK_AUTH")
-        if self.type == SAMLType.AUTH and not self.RelayState:
-            raise ValueError("Field 'RelayState' is required when type is AUTH")
-        return self
-
-
-auth_handler: Dict[
-    AuthService,
-    Tuple[
-        Callable[[BaseModel], Any],
-        Type[BaseModel]
-    ]
-] = {}
-
-def register_auth(service: AuthService, model: Type[BaseModel]):
-    def decorator(func: Callable[[BaseModel], Any]) -> Callable[[BaseModel], Any]:
-        auth_handler[service] = (func, model)
-        return func
-    return decorator
-
-class AuthRequestModel(ApiModel):
-    op: AuthService
-    data: dict
-
 
 class InfoQueryParams(BaseModel):
     model_config = {"extra": "forbid"}
@@ -389,3 +346,46 @@ responses = {
     422: {'model': Error, 'description': 'Validation Error'},
     500: {'model': Error},
 }
+
+
+class AuthModel(ApiModel):
+    op: StrictStr
+    service: StrictStr
+    hostname: Optional[StrictStr] = None
+    relay_state: Optional[StrictStr] = None
+    session: Optional[StrictStr] = None
+    secret: Optional[StrictStr] = None
+    sid: Optional[StrictStr] = None
+    sids: Optional[List[StrictStr]] = None
+
+    @model_validator(mode='after')
+    def check_required_fields(self) -> Self:
+        if self.service not in ('saml', 'cloud'):
+            raise ValueError(f"Unsupported auth service '{self.service}'")
+        if self.service == 'saml' and self.op == 'login' and not self.hostname:
+            raise ValueError("Field 'hostname' is required when op is 'login'")
+        if self.service == 'saml' and self.op == 'validate':
+            if not self.session:
+                raise ValueError("Field 'session' is required when op is 'validate'")
+            if not self.secret:
+                raise ValueError("Field 'secret' is required when op is 'validate'")
+        if self.service == 'cloud' and self.op == 'validate' and not self.sid:
+            raise ValueError("Field 'sid' is required when op is 'validate'")
+        if self.service == 'cloud' and self.op == 'validate_batch' and not self.sids:
+            raise ValueError("Field 'sids' is required when op is 'validate_batch'")
+        return self
+
+    class Config:
+        json_schema_extra = {
+            'example': {
+                'key': 'id_key',
+                'service': 'saml | cloud',
+                'op': 'login | validate | validate_batch | jwks',
+                'hostname': 'device hostname or IP',
+                'relay_state': 'https://redirect-after-auth',
+                'session': 'session token',
+                'secret': 'session secret',
+                'sid': 'PerleCLOUD proxy session ID',
+                'sids': ['PerleCLOUD proxy session IDs'],
+            }
+        }

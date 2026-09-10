@@ -130,9 +130,15 @@ def print_file_data(path: str) -> None:
     file_type = get_file_type(path)
     # Human-readable files are streamed line-by-line.
     if 'text' in file_type:
-        with open(path, 'r') as f:
-            for line in f:
-                print(line, end='')
+        try:
+            with open(path, 'r') as f:
+                for line in f:
+                    print(line, end='')
+        except UnicodeDecodeError:
+            print_error('Text decoding failed, retrying with replacement characters.')
+            with open(path, 'r', errors='replace') as f:
+                for line in f:
+                    print(line, end='')
     # All other binaries get hexdumped.
     else:
         print(cmd(['hexdump', '-C', path]))
@@ -183,7 +189,16 @@ def show_locally(path: str) -> None:
     # The stream to the temporary file could break for any reason.
     # It's much less fragile than if we streamed directly to the process stdin.
     # But anything could still happen and we don't want to scare the user.
-    except (BrokenPipeError, EOFError, KeyboardInterrupt, OSError):
+    except (BrokenPipeError, EOFError):
+        print_error('Display pipeline was interrupted while showing file output.')
+        fix_terminal()
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print_error('Display interrupted by user.')
+        fix_terminal()
+        sys.exit(1)
+    except OSError as e:
+        print_error(f'Failed to display {path}: {e}')
         fix_terminal()
         sys.exit(1)
     finally:
@@ -192,9 +207,14 @@ def show_locally(path: str) -> None:
 def show(type: str, path: str) -> None:
     if type == 'remote':
         temp = tempfile.NamedTemporaryFile(delete=False)
-        download(temp.name, path)
-        show_locally(temp.name)
-        os.remove(temp.name)
+        try:
+            download(temp.name, path)
+            show_locally(temp.name)
+        except Exception as e:
+            print_error(f'Failed to retrieve remote file {path}: {e}')
+            sys.exit(1)
+        finally:
+            os.remove(temp.name)
     elif type == 'image':
         show_locally(parse_image_path(path))
     elif type == 'local':

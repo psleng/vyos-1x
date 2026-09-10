@@ -13,11 +13,14 @@
 
 # configsession -- the write API for the VyOS running config
 
+import ast
+from functools import lru_cache
 import os
 import re
+import shlex
+import subprocess
 import sys
 import weakref
-import subprocess
 from tempfile import NamedTemporaryFile
 from typing import TypeAlias
 from typing import Union
@@ -94,6 +97,7 @@ TRACEROUTE = [
     '--json',
     '--host',
 ]
+SHOW_SCRIPT = ["/usr/bin/vyos-op-run", "--dry-run", "show"]
 
 # Default "commit via" string
 APP = 'vyos-http-api'
@@ -245,7 +249,7 @@ class ConfigSession(object):
             stderr=subprocess.STDOUT,
             env=self.__session_env,
         )
-        (stdout_data, stderr_data) = p.communicate()
+        stdout_data, stderr_data = p.communicate()
         output = stdout_data.decode()
         result = p.wait()
         if result != 0:
@@ -427,7 +431,50 @@ class ConfigSession(object):
         out = self.__run_command(GENERATE + path)
         return out
 
-    def show(self, path):
+    @staticmethod
+    @lru_cache(maxsize=256, typed=True)
+    def _show_supports_raw(op_mode_script_path: str, function_name: str) -> bool:
+        if not os.path.isfile(op_mode_script_path):
+            return False
+
+        with open(op_mode_script_path, encoding='utf-8') as script_file:
+            module = ast.parse(script_file.read(), filename=op_mode_script_path)
+
+        function = next(
+            (
+                node
+                for node in module.body
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == function_name
+            ),
+            None,
+        )
+        if function is None:
+            return False
+
+        parameters = (
+            function.args.posonlyargs + function.args.args + function.args.kwonlyargs
+        )
+        if 'raw' not in (parameter.arg for parameter in parameters):
+            return False
+        return True
+
+    def show(self, path, json: bool = False):
+        if json:
+            op_mode_script_command = shlex.split(
+                self.__run_command(SHOW_SCRIPT + path).strip()
+            )
+            if len(op_mode_script_command) < 2 or not self._show_supports_raw(
+                op_mode_script_command[0], op_mode_script_command[1]
+            ):
+                raise ConfigSessionError(
+                    f"[show {' '.join(path)}] does not support JSON format output"
+                )
+
+            op_mode_script_command.append("--raw")
+            out = self.__run_command(op_mode_script_command)
+            return out
+
         out = self.__run_command(SHOW + path)
         return out
 

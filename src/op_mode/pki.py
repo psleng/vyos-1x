@@ -14,6 +14,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import base64
 import ipaddress
 import os
 import re
@@ -26,6 +27,7 @@ from cryptography.x509.oid import ExtendedKeyUsageOID
 
 import vyos.opmode
 
+from vyos import tpm
 from vyos.base import Warning
 from vyos.config import Config
 from vyos.config import config_dict_mangle_acme
@@ -318,7 +320,7 @@ def install_openvpn_key(name, key_data, key_version='1'):
     install_into_config(conf, config_paths)
 
 
-def install_wireguard_key(interface, private_key, public_key):
+def install_wireguard_key(interface, private_key, public_key, tpm_enabled=None):
     # Show conf commands for installing wireguard key pairs
     from vyos.ifconfig import Section
 
@@ -327,9 +329,17 @@ def install_wireguard_key(interface, private_key, public_key):
         exit(1)
 
     # Check if we are running in a config session - if yes, we can directly write to the CLI
-    install_into_config(
-        conf, [f"interfaces wireguard {interface} private-key '{private_key}'"]
-    )
+    if tpm_enabled:
+        private_key_path = "/config/auth/wireguard/"
+        install_into_config(
+            conf, [f"interfaces wireguard {interface} private-key-tpm '{private_key}'"]
+        )
+        print(f"Sealed private-key .pub file created: '{private_key_path}{private_key}.pub'")
+        print(f"Sealed private-key .priv file created: '{private_key_path}{private_key}.priv'")
+    else:
+        install_into_config(
+            conf, [f"interfaces wireguard {interface} private-key '{private_key}'"]
+        )
 
     print(f"Corresponding public-key to use on peer system is: '{public_key}'")
 
@@ -893,12 +903,22 @@ def generate_openvpn_key(name, install=False, file=False):
         write_file(f'{name}.key', result)
 
 
-def generate_wireguard_key(interface=None, install=False):
+def generate_wireguard_key(interface=None, install=False, tpm_file=None):
     private_key = cmd('wg genkey')
     public_key = cmd('wg pubkey', input=private_key)
 
+    # If tpm file is specified, seal the key using tpm_file as base name for public and private objects
+    # Generated tpm_file.pub and tpm_file.priv files are required to unseal / decode private key
+    if tpm_file:
+        if not tpm.tpm_exist():
+            print('Error: tpm does not exist!  Cannot use tpm commands!')
+            return
+        else:
+            tpm.write_tpm_key_file(base64.b64decode(private_key), tpm_file)
+            private_key = tpm_file
+
     if interface and install:
-        install_wireguard_key(interface, private_key, public_key)
+        install_wireguard_key(interface, private_key, public_key, tpm_file)
     else:
         print(f'Private key: {private_key}')
         print(f'Public key: {public_key}', end='\n\n')
@@ -1158,6 +1178,7 @@ def generate_pki(
     self_sign: typing.Optional[bool],
     key: typing.Optional[bool],
     psk: typing.Optional[bool],
+    tpm_file: typing.Optional[str],
     interface: typing.Optional[str],
     peer: typing.Optional[str],
 ):
@@ -1196,7 +1217,7 @@ def generate_pki(
             os.environ['vyos_libexec_dir'] = '/usr/libexec/vyos'
 
             if key:
-                generate_wireguard_key(interface, install=install)
+                generate_wireguard_key(interface, install=install, tpm_file=tpm_file)
             if psk:
                 generate_wireguard_psk(interface, peer=peer, install=install)
     except KeyboardInterrupt:

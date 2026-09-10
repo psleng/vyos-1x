@@ -67,7 +67,8 @@
         "sstp": ["vpn_sstp"],
         "sstpc": ["interfaces_sstpc"],
         "stunnel": ["service_stunnel"],
-        "device": ["serial"]
+        "device": ["serial"],
+        "login": ["system_login"]
     },
     "vpn_ipsec": {
         "nhrp": ["protocols_nhrp"]

@@ -10,13 +10,18 @@ from shutil import copy, copytree, rmtree
 from vyos.system import grub
 from vyos.system import image
 from vyos.template import render
+from vyos.flavor import get_image_dm_verity
 
 
 # -------------------------------
 # Constants
 # -------------------------------
 DEFAULT_BOOT_VARS: dict[str, str] = {
-    'timeout': '0',
+    # TEMP (dm-verity bring-up): show the GRUB menu for 10s so an older image can
+    # be selected if a verity image fails to boot. Restore to '0' (and drop
+    # timeout_style) to hide/suppress the menu again after testing.
+    'timeout': '10',
+    'timeout_style': 'menu',
     'console_type': 'tty',
     'console_num': '0',
     'console_speed': '115200',
@@ -86,6 +91,26 @@ def copy_image(version: str, dest: str):
     copy(f'{LIVE}/filesystem.squashfs',
          f'{BOOT}/{version}/{version}.squashfs')
 
+    # dm-verity: the root hash is baked ONLY into the live medium's initrd
+    # (28-igos-dm-verity.binary), not the squashfs-internal /boot copied above.
+    # Re-source the version initrd from /live so the fail-closed verity-open
+    # hook finds its params. No-op for non-verity images (identical initrd).
+    baked_initrd = f'{LIVE}/initrd.img'
+    if get_image_dm_verity() and Path(baked_initrd).exists():
+        log('dm-verity: installing baked initrd for version image')
+        copy(baked_initrd, f'{BOOT}/{version}/initrd.img')
+
+        # secure-boot: carry the detached signatures for kernel + initrd when
+        # the image was signed by 29-igos-sign-boot.binary. Best-effort --
+        # unsigned verity builds simply have no .sig files to copy.
+        for _sig_src, _sig_dst in (
+            (f'{LIVE}/initrd.img.sig', f'{BOOT}/{version}/initrd.img.sig'),
+            (f'{LIVE}/vmlinuz.sig', f'{BOOT}/{version}/vmlinuz.sig'),
+        ):
+            if Path(_sig_src).exists():
+                log(f'secure-boot: installing signature {Path(_sig_dst).name}')
+                copy(_sig_src, _sig_dst)
+
 
 def setup_default_firmware():
     default_name = "default-firmware"
@@ -105,6 +130,22 @@ def setup_default_firmware():
 
     copy(f'{LIVE}/filesystem.squashfs',
          f'{BOOT}/{default_name}/{default_name}.squashfs')
+
+    # dm-verity: baked initrd for the factory default-firmware entry too.
+    baked_initrd = f'{LIVE}/initrd.img'
+    if get_image_dm_verity() and Path(baked_initrd).exists():
+        log('dm-verity: installing baked initrd for default-firmware')
+        copy(baked_initrd, f'{BOOT}/{default_name}/initrd.img')
+
+        # secure-boot: carry detached signatures for the default-firmware
+        # kernel + initrd too (best-effort; unsigned builds have no .sig).
+        for _sig_src, _sig_dst in (
+            (f'{LIVE}/initrd.img.sig', f'{BOOT}/{default_name}/initrd.img.sig'),
+            (f'{LIVE}/vmlinuz.sig', f'{BOOT}/{default_name}/vmlinuz.sig'),
+        ):
+            if Path(_sig_src).exists():
+                log(f'secure-boot: installing signature {Path(_sig_dst).name}')
+                copy(_sig_src, _sig_dst)
 
     return default_name
 
@@ -130,11 +171,11 @@ def main():
     # persistence config
     Path(f'{TARGET_P2}/persistence.conf').write_text('/ union\n')
 
-    # copy DTBs
-    log("Copying DTB files")
-    copytree(f"{SRC_DTB}/ti",
-             f"{DST_DTB}/ti",
-             dirs_exist_ok=True)
+    # copy DTBs (whole tree; any vendor subdir: ti/, perle/, ...). Guarded so a
+    # build without a /boot/dtb (e.g. a non-arm image) is a no-op, not a crash.
+    if Path(SRC_DTB).exists():
+        log("Copying DTB files")
+        copytree(SRC_DTB, DST_DTB, dirs_exist_ok=True)
 
     # copy main image
     copy_image(version, BOOT)
@@ -167,4 +208,3 @@ def main():
 # -------------------------------
 if __name__ == "__main__":
     main()
-

@@ -24,6 +24,7 @@ from uuid import NAMESPACE_URL
 from uuid import UUID
 
 from vyos.flavor import get_image_serial_console
+from vyos.flavor import get_image_dm_verity
 from vyos.system import disk
 from vyos.template import render
 from vyos.utils.process import cmd
@@ -53,6 +54,7 @@ TMPL_GRUB_COMMON: str = 'grub/grub_common.j2'
 # default boot options
 # PERLE - initramfs will run ip-config and dropbear unless we disable early ip and networking in the kernel
 BOOT_OPTS_STEM: str = 'boot=live rootdelay=5 ip=none nonetworking noautologin net.ifnames=0 biosdevname=0 vyos-union=/boot/'
+PLATFORM = platform.machine()
 
 # prepare regexes
 REGEX_GRUB_VARS: str = r'^set (?P<variable_name>\w+)=[\'"]?(?P<variable_value>.*)(?<![\'"])[\'"]?$'
@@ -111,7 +113,8 @@ def gen_version_uuid(version_name: str) -> str:
 def version_add(version_name: str,
                 root_dir: str = '',
                 boot_opts: str = '',
-                boot_opts_config = None) -> None:
+                boot_opts_config = None,
+                dm_verity = None) -> None:
     """Add a new VyOS version to GRUB loader configuration
 
     Args:
@@ -120,9 +123,15 @@ def version_add(version_name: str,
         Defaults to empty.
         boot_opts (str): an optional boot options for Linux kernel.
         Defaults to empty.
+        dm_verity (bool): whether this image seals its root squashfs with
+        dm-verity. Defaults to None, meaning read it from the image flavor.
     """
     if not root_dir:
         root_dir = disk.find_persistence()
+    # dm-verity images boot the root squashfs via /dev/mapper/verity-root
+    # (see grub_vyos_version.j2); default to the flavor baked into the image.
+    if dm_verity is None:
+        dm_verity = get_image_dm_verity()
     version_config: str = f'{root_dir}/{GRUB_DIR_VYOS_VERS}/{version_name}.cfg'
     render(
         version_config, TMPL_VYOS_VERSION, {
@@ -130,7 +139,8 @@ def version_add(version_name: str,
             'version_uuid': gen_version_uuid(version_name),
             'boot_opts_default': BOOT_OPTS_STEM + version_name,
             'boot_opts': boot_opts,
-            'boot_opts_config': boot_opts_config
+            'boot_opts_config': boot_opts_config,
+            'dm_verity': dm_verity
         })
 
 
@@ -380,6 +390,7 @@ def set_current_default(version_name: str, root_dir: str = '') -> None:
     vars_file = f'{root_dir}/{CFG_VYOS_VARS}'
     vars_current = vars_read(vars_file)
     vars_current['current'] = gen_version_uuid(version_name)
+    vars_current['default'] = gen_version_uuid(version_name)
     vars_write(vars_file, vars_current)
 
 def set_factory_default(version_name: str, root_dir: str = '') -> None:
@@ -407,10 +418,11 @@ def common_write(root_dir: str = '', grub_common: dict[str, str] = {}) -> None:
         root_dir (str, optional): an optional path to the root directory.
         Defaults to empty.
     """
-    if not root_dir:
-        root_dir = disk.find_persistence()
-    common_config = f'{root_dir}/{CFG_VYOS_COMMON}'
-    render(common_config, TMPL_GRUB_COMMON, grub_common)
+    if PLATFORM == "x86_64":
+        if not root_dir:
+            root_dir = disk.find_persistence()
+        common_config = f'{root_dir}/{CFG_VYOS_COMMON}'
+        render(common_config, TMPL_GRUB_COMMON, grub_common)
 
 
 def create_structure(root_dir: str = '') -> None:

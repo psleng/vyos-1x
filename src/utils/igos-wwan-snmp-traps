@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-or-later
 #
-# igos-wwan-snmp-traps — AlertBus → SNMPv2c trap emitter daemon.
+# igos-wwan-snmp-traps — AlertBus → SNMP trap emitter daemon.
 #
 # Subscribes to the VyOS WWAN enhanced subsystem AlertBus over D-Bus and
 # emits an snmptrap(1) for each WWAN_* alert.  Run under systemd via
 # /etc/systemd/system/igos-wwan-snmp-traps.service.  Configuration is
 # passed in via environment (see EnvironmentFile=/etc/default/igos-wwan-snmp-traps):
 #
-#     IGOS_SNMPTRAP_DEST       (required, e.g. udp:10.0.0.5:162)
-#     IGOS_SNMPTRAP_COMMUNITY  (default: public)
-#     IGOS_SNMPTRAP_BIN        (default: /usr/bin/snmptrap)
+#     IGOS_SNMPTRAP_TARGETS_FILE  JSON file of snmptrap(1) targets (v2c + v3),
+#                                 written by service_snmp.py from the SNMP
+#                                 trap-target config.  Preferred.
+#     IGOS_SNMPTRAP_BIN           (default: /usr/bin/snmptrap)
+#     IGOS_SNMPTRAP_DEST          legacy single v2c destination, used only when
+#                                 no targets file is present (e.g. udp:10.0.0.5:162)
+#     IGOS_SNMPTRAP_COMMUNITY     legacy v2c community (default: public)
 #
 # All real logic lives in vyos.utils.wwan.snmp_traps.
 
