@@ -1,0 +1,12 @@
+# WWAN SMS command service configuration
+#
+# v1 supports only:
+#   REBOOT
+#
+# Security: always set a strict sender allowlist.
+
+IGOS_SMS_COMMAND_INTERFACES=wwan0
+IGOS_SMS_COMMAND_ALLOWED_SENDERS=
+IGOS_SMS_COMMAND_POLL_INTERVAL=5
+IGOS_SMS_COMMAND_RESPONSE_ENABLED=true
+IGOS_SMS_COMMAND_LOG_LEVEL=INFO

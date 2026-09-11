@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interfaceDefinition>
+  <node name="service">
+    <children>
+      <node name="interface">
+        <properties>
+          <help>Interface-scoped services</help>
+          <priority>901</priority>
+        </properties>
+        <children>
+          <tagNode name="wwan">
+            <properties>
+              <help>WWAN interface name (for example wwan0)</help>
+              <completionHelp>
+                <list>wwan0</list>
+              </completionHelp>
+              <valueHelp>
+                <format>wwanN</format>
+                <description>WWAN interface name</description>
+              </valueHelp>
+              <constraint>
+                <regex>wwan[0-9]+</regex>
+              </constraint>
+              <constraintErrorMessage>WWAN interface must match wwanN (for example wwan0)</constraintErrorMessage>
+            </properties>
+            <children>
+              <node name="sms-command" owner="${vyos_conf_scripts_dir}/service_sms-command.py">
+                <properties>
+                  <help>SMS command processing for this WWAN interface</help>
+                  <priority>901</priority>
+                </properties>
+                <children>
+                  <leafNode name="authorized-number">
+                    <properties>
+                      <help>Authorized source phone number</help>
+                      <completionHelp>
+                        <list>+15551234567</list>
+                      </completionHelp>
+                      <valueHelp>
+                        <format>+15551234567</format>
+                        <description>Allowed source phone number in E.164 format</description>
+                      </valueHelp>
+                      <constraint>
+                        <regex>\+?[0-9]{6,20}</regex>
+                      </constraint>
+                      <constraintErrorMessage>Allowed number must be a phone number (6-20 digits, optional leading +)</constraintErrorMessage>
+                      <multi/>
+                    </properties>
+                  </leafNode>
+                </children>
+              </node>
+            </children>
+          </tagNode>
+        </children>
+      </node>
+    </children>
+  </node>
+</interfaceDefinition>
