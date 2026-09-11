@@ -56,6 +56,7 @@ from vyos.defaults import directories
 from vyos.defaults import activation_hint
 from vyos.flavor import get_image_serial_console
 from vyos.flavor import get_image_dm_verity
+from vyos.flavor import get_image_secure_grub
 from vyos.remote import download
 from vyos.system import disk
 from vyos.system import grub
@@ -974,6 +975,24 @@ def validate_compatibility(iso_path: str, force: bool = False) -> None:
         cleanup()
         exit(MSG_INFO_INSTALL_EXIT)
 
+
+def install_secure_grub_core(efi_mount: str) -> None:
+    """secure_grub: replace the ESP core grub-install just wrote with the
+    signature-ENFORCING monolithic core carried in the running image (built by
+    25-igos-grub-core.chroot). No-op on non-secure images; mirrors prod_image.py.
+    """
+    if not get_image_secure_grub():
+        return
+    core_src = Path('/usr/lib/grub/arm64-efi/monolithic/grubaa64.efi')
+    core_dst = Path(f'{efi_mount}/EFI/VyOS/grubaa64.efi')
+    if not core_src.is_file():
+        exit(f'secure_grub image is missing the enforcing GRUB core at {core_src} '
+             '-- refusing to install a non-enforcing bootloader')
+    print('Installing enforcing GRUB core to ESP EFI/VyOS/grubaa64.efi')
+    core_dst.parent.mkdir(parents=True, exist_ok=True)
+    copy(core_src, core_dst)
+
+
 def install_image() -> None:
     """Install an image to a disk
     """
@@ -1220,11 +1239,13 @@ def install_image() -> None:
                 disk.partition_mount(disk_target.partition['efi'], f'{DIR_DST_ROOT}/boot/efi')
                 grub.install(disk_target.name, f'{DIR_DST_ROOT}/boot/',
                              f'{DIR_DST_ROOT}/boot/efi')
+                install_secure_grub_core(f'{DIR_DST_ROOT}/boot/efi')
                 disk.partition_umount(disk_target.partition['efi'])
         else:
             print('Installing GRUB to the drive')
             grub.install(install_target.name, f'{DIR_DST_ROOT}/boot/',
                          f'{DIR_DST_ROOT}/boot/efi')
+            install_secure_grub_core(f'{DIR_DST_ROOT}/boot/efi')
 
         # sort inodes (to make GRUB read config files in alphabetical order)
         grub.sort_inodes(f'{DIR_DST_ROOT}/{grub.GRUB_DIR_VYOS}')

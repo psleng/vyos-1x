@@ -5,12 +5,12 @@
 import os
 import argparse
 from pathlib import Path
-from shutil import copy, copytree, rmtree
+from shutil import copy, copytree, move, rmtree
 
 from vyos.system import grub
 from vyos.system import image
 from vyos.template import render
-from vyos.flavor import get_image_dm_verity
+from vyos.flavor import get_image_secure_grub
 
 
 # -------------------------------
@@ -35,7 +35,6 @@ ISO = "/mnt/iso"
 SRC_DTB = f"{ISO}/boot/dtb"
 LIVE = f"{ISO}/live"
 BOOT = f"{TARGET_P2}/boot"
-DST_DTB = f"{TARGET_P2}/boot/dtb"
 
 
 # -------------------------------
@@ -79,37 +78,23 @@ def copy_image(version: str, dest: str):
 
     log(f"Copying image for version: {version}")
 
-    copytree(f"{ROOTFS}boot/",
+    # Everything the per-version boot needs is already staged (and pruned) on the
+    # ISO by vyos-build -- kernel + baked initrd (+ their detached .sig) in /live,
+    # and the flat per-model DTBs in /boot/dtb. Pull straight from the ISO, no
+    # pruning; this mirrors `add system image <iso>` exactly.
+    copytree(f"{LIVE}/",
              f"{BOOT}/{version}/",
              dirs_exist_ok=True,
              symlinks=True)
-
-    # prune unwanted dirs
-    safe_rmtree(Path(f'{BOOT}/{version}/dtb'))
-    safe_rmtree(Path(f'{BOOT}/{version}/grub'))
-
-    copy(f'{LIVE}/filesystem.squashfs',
+    move(f'{BOOT}/{version}/filesystem.squashfs',
          f'{BOOT}/{version}/{version}.squashfs')
 
-    # dm-verity: the root hash is baked ONLY into the live medium's initrd
-    # (28-igos-dm-verity.binary), not the squashfs-internal /boot copied above.
-    # Re-source the version initrd from /live so the fail-closed verity-open
-    # hook finds its params. No-op for non-verity images (identical initrd).
-    baked_initrd = f'{LIVE}/initrd.img'
-    if get_image_dm_verity() and Path(baked_initrd).exists():
-        log('dm-verity: installing baked initrd for version image')
-        copy(baked_initrd, f'{BOOT}/{version}/initrd.img')
-
-        # secure-boot: carry the detached signatures for kernel + initrd when
-        # the image was signed by 29-igos-sign-boot.binary. Best-effort --
-        # unsigned verity builds simply have no .sig files to copy.
-        for _sig_src, _sig_dst in (
-            (f'{LIVE}/initrd.img.sig', f'{BOOT}/{version}/initrd.img.sig'),
-            (f'{LIVE}/vmlinuz.sig', f'{BOOT}/{version}/vmlinuz.sig'),
-        ):
-            if Path(_sig_src).exists():
-                log(f'secure-boot: installing signature {Path(_sig_dst).name}')
-                copy(_sig_src, _sig_dst)
+    if Path(SRC_DTB).exists():
+        log("Copying per-image DTB files")
+        copytree(SRC_DTB,
+                 f'{BOOT}/{version}/dtb',
+                 dirs_exist_ok=True,
+                 symlinks=True)
 
 
 def setup_default_firmware():
@@ -120,32 +105,21 @@ def setup_default_firmware():
 
     log("Creating default firmware image")
 
-    copytree(f"{ROOTFS}boot/",
+    # Same as copy_image: pull the factory default-firmware straight from the
+    # ISO /live (+ /boot/dtb), already pruned by vyos-build.
+    copytree(f"{LIVE}/",
              f"{BOOT}/{default_name}/",
              dirs_exist_ok=True,
              symlinks=True)
-
-    safe_rmtree(Path(f'{BOOT}/{default_name}/dtb'))
-    safe_rmtree(Path(f'{BOOT}/{default_name}/grub'))
-
-    copy(f'{LIVE}/filesystem.squashfs',
+    move(f'{BOOT}/{default_name}/filesystem.squashfs',
          f'{BOOT}/{default_name}/{default_name}.squashfs')
 
-    # dm-verity: baked initrd for the factory default-firmware entry too.
-    baked_initrd = f'{LIVE}/initrd.img'
-    if get_image_dm_verity() and Path(baked_initrd).exists():
-        log('dm-verity: installing baked initrd for default-firmware')
-        copy(baked_initrd, f'{BOOT}/{default_name}/initrd.img')
-
-        # secure-boot: carry detached signatures for the default-firmware
-        # kernel + initrd too (best-effort; unsigned builds have no .sig).
-        for _sig_src, _sig_dst in (
-            (f'{LIVE}/initrd.img.sig', f'{BOOT}/{default_name}/initrd.img.sig'),
-            (f'{LIVE}/vmlinuz.sig', f'{BOOT}/{default_name}/vmlinuz.sig'),
-        ):
-            if Path(_sig_src).exists():
-                log(f'secure-boot: installing signature {Path(_sig_dst).name}')
-                copy(_sig_src, _sig_dst)
+    if Path(SRC_DTB).exists():
+        log("Copying per-image DTB files for default-firmware")
+        copytree(SRC_DTB,
+                 f'{BOOT}/{default_name}/dtb',
+                 dirs_exist_ok=True,
+                 symlinks=True)
 
     return default_name
 
@@ -171,13 +145,8 @@ def main():
     # persistence config
     Path(f'{TARGET_P2}/persistence.conf').write_text('/ union\n')
 
-    # copy DTBs (whole tree; any vendor subdir: ti/, perle/, ...). Guarded so a
-    # build without a /boot/dtb (e.g. a non-arm image) is a no-op, not a crash.
-    if Path(SRC_DTB).exists():
-        log("Copying DTB files")
-        copytree(SRC_DTB, DST_DTB, dirs_exist_ok=True)
-
-    # copy main image
+    # copy main image (per-image DTBs are pulled from the ISO inside copy_image /
+    # setup_default_firmware; no global /boot/dtb any more).
     copy_image(version, BOOT)
 
     # GRUB setup
@@ -195,6 +164,23 @@ def main():
     # install GRUB
     log("Installing GRUB to disk")
     grub.install(grub_target, f'{BOOT}/', f'{BOOT}/efi')
+
+    # secure_grub: grub-install just wrote the STOCK, non-enforcing core to the
+    # ESP. Replace it with the signature-ENFORCING monolithic core carried in the
+    # image (built by 25-igos-grub-core.chroot). Nothing is built here -- the
+    # signed core rides in the squashfs; we only copy it into place (the same file
+    # `update firmware --component grub` installs on a running unit).
+    if get_image_secure_grub():
+        core_src = Path(f'{ROOTFS}usr/lib/grub/arm64-efi/monolithic/grubaa64.efi')
+        core_dst = Path(f'{BOOT}/efi/EFI/VyOS/grubaa64.efi')
+        if not core_src.is_file():
+            raise RuntimeError(
+                'secure_grub image is missing the enforcing GRUB core at '
+                f'{core_src} (25-igos-grub-core.chroot did not run) -- refusing '
+                'to ship a non-enforcing bootloader')
+        log('secure_grub: installing enforcing GRUB core to ESP EFI/VyOS/grubaa64.efi')
+        core_dst.parent.mkdir(parents=True, exist_ok=True)
+        copy(core_src, core_dst)
 
     # sort inodes
     grub.sort_inodes(f'{TARGET_P2}/{grub.GRUB_DIR_VYOS}')

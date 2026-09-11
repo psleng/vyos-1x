@@ -86,6 +86,11 @@ def install(drive_path: str, boot_dir: str, efi_dir: str, id: str = 'VyOS', chro
             --boot-directory={boot_dir}  {drive_path} --force'
         )
 
+    # NOTE: the signature-ENFORCING grub core is NOT built here. On secure_grub
+    # images the enforcing monolithic core is produced at image-build time
+    # (25-igos-grub-core.chroot) and carried in the squashfs; prod_image.py and
+    # `update firmware --component grub` copy it onto the ESP. So grub-install
+    # only lays the grub.cfg structure + a placeholder core (replaced afterward).
     cmd(
         f'{chroot_cmd} grub-install --no-floppy --recheck --target={efi_installation_arch}-efi \
             --force-extra-removable --boot-directory={boot_dir} \
@@ -108,6 +113,21 @@ def gen_version_uuid(version_name: str) -> str:
     ver_uuid: UUID = uuid5(NAMESPACE_URL, version_name)
     ver_id: str = f'uuid5-{ver_uuid}'
     return ver_id
+
+
+def _image_has_dtb():
+    """True when this image ships per-model dtbs GRUB must load.
+
+    Read from the staged model tree (/usr/share/igos/models -- present in the
+    chroot at manufacture and on a running unit). dtbs are stored FLAT under
+    /boot/dtb, so GRUB loads /boot/<ver>/dtb/${prod_id}-${model}.dtb (no vendor
+    subdir); images with no model dtbs (VMs, x86) emit no devicetree line.
+    """
+    try:
+        from vyos.system import model
+        return any(m.dtb_alias for m in model.iter_models())
+    except Exception:
+        return False
 
 
 def version_add(version_name: str,
@@ -140,7 +160,8 @@ def version_add(version_name: str,
             'boot_opts_default': BOOT_OPTS_STEM + version_name,
             'boot_opts': boot_opts,
             'boot_opts_config': boot_opts_config,
-            'dm_verity': dm_verity
+            'dm_verity': dm_verity,
+            'has_dtb': _image_has_dtb()
         })
 
 

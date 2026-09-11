@@ -181,6 +181,11 @@ class ModelDef:
         """Declared device-tree blob name (informational at runtime)."""
         return self.conf.get("dtb", "")
 
+    @property
+    def dtb_alias(self) -> str:
+        """Clean bootloader-facing dtb name GRUB/U-Boot load by, '' if none."""
+        return self.conf.get("dtb_alias", "")
+
     def match_ids(self) -> List[str]:
         raw = self.conf.get("match", "")
         ids = [x.strip() for x in raw.split(",") if x.strip()]

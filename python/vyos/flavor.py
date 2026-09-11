@@ -80,3 +80,17 @@ def get_image_dm_verity(fname=flavor_file):
         (also False for images/flavors that predate the flag).
     """
     return bool(get_flavor_data(fname=fname).get('dm_verity', False))
+
+
+def get_image_secure_grub(fname=flavor_file):
+    """
+    Get whether the image flavor installs the signature-enforcing grub core.
+
+    Args:
+        file (str): path to the flavor file
+
+    Returns:
+        bool: True if the image was built with secure_grub = true, else False
+        (also False for images/flavors that predate the flag).
+    """
+    return bool(get_flavor_data(fname=fname).get('secure_grub', False))
