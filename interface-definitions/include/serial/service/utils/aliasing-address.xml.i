@@ -1,5 +1,5 @@
 <!-- include start from serial/service/utils/aliasing-address.xml.i -->
-<leafNode name="inet">
+<leafNode name="address">
   <properties>
     <help>Alias IP Address</help>
     <valueHelp>
