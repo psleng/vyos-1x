@@ -977,9 +977,11 @@ def validate_compatibility(iso_path: str, force: bool = False) -> None:
 
 
 def install_secure_grub_core(efi_mount: str) -> None:
-    """secure_grub: replace the ESP core grub-install just wrote with the
-    signature-ENFORCING monolithic core carried in the running image (built by
-    25-igos-grub-core.chroot). No-op on non-secure images; mirrors prod_image.py.
+    """secure_grub: CONSUME the prebuilt enforcing monolithic core carried in the
+    running image (built by 25-igos-grub-core.chroot) -- copy it onto the ESP.
+    The caller SKIPS grub-install for secure images (a monolithic core needs no
+    on-disk module tree; /boot/grub config is generated separately). No-op on
+    non-secure images; mirrors prod_image.py.
     """
     if not get_image_secure_grub():
         return
@@ -1237,14 +1239,18 @@ def install_image() -> None:
             l = install_target.disks
             for disk_target in l:
                 disk.partition_mount(disk_target.partition['efi'], f'{DIR_DST_ROOT}/boot/efi')
-                grub.install(disk_target.name, f'{DIR_DST_ROOT}/boot/',
-                             f'{DIR_DST_ROOT}/boot/efi')
+                # secure builds consume the prebuilt core (below) -- skip grub-install
+                if not get_image_secure_grub():
+                    grub.install(disk_target.name, f'{DIR_DST_ROOT}/boot/',
+                                 f'{DIR_DST_ROOT}/boot/efi')
                 install_secure_grub_core(f'{DIR_DST_ROOT}/boot/efi')
                 disk.partition_umount(disk_target.partition['efi'])
         else:
             print('Installing GRUB to the drive')
-            grub.install(install_target.name, f'{DIR_DST_ROOT}/boot/',
-                         f'{DIR_DST_ROOT}/boot/efi')
+            # secure builds consume the prebuilt core (below) -- skip grub-install
+            if not get_image_secure_grub():
+                grub.install(install_target.name, f'{DIR_DST_ROOT}/boot/',
+                             f'{DIR_DST_ROOT}/boot/efi')
             install_secure_grub_core(f'{DIR_DST_ROOT}/boot/efi')
 
         # sort inodes (to make GRUB read config files in alphabetical order)
