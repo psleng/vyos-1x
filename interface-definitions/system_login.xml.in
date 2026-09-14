@@ -576,49 +576,57 @@
                      <properties>
                        <help>Minimum password length</help>
                        <valueHelp>
-                        <format>u32</format>
+                        <format>u32:9-20</format>
                         <description>Minimum number of characters</description>
                        </valueHelp>
                        <constraint>
-                         <validator name="numeric"/>
+                         <validator name="numeric" argument="--range 9-20"/>
                        </constraint>
+                       <constraintErrorMessage>Password length must be between 9 and 20</constraintErrorMessage>
                      </properties>
+                     <defaultValue>9</defaultValue>
                    </leafNode>
                    <leafNode name="min-digits">
                      <properties>
                        <help>Minimum number of digits in the password</help>
                        <valueHelp>
-                        <format>u32</format>
+                        <format>u32:1-8</format>
                         <description>Minimum number of digits</description>
                        </valueHelp>
                        <constraint>
-                         <validator name="numeric"/>
+                         <validator name="numeric" argument="--range 1-8"/>
                        </constraint>
+                       <constraintErrorMessage>Minimum digit count must be between 1 and 8</constraintErrorMessage>
                      </properties>
+                     <defaultValue>1</defaultValue>
                    </leafNode>
                    <leafNode name="min-uppercase">
                      <properties>
                        <help>Minimum number of uppercase letters in the password</help>
                        <valueHelp>
-                        <format>u32</format>
+                        <format>u32:1-8</format>
                         <description>Minimum number of uppercase letters</description>
                        </valueHelp>
                        <constraint>
-                         <validator name="numeric"/>
+                         <validator name="numeric" argument="--range 1-8"/>
                        </constraint>
+                       <constraintErrorMessage>Minimum uppercase count must be between 1 and 8</constraintErrorMessage>
                      </properties>
+                     <defaultValue>1</defaultValue>
                    </leafNode>
                    <leafNode name="min-special">
                      <properties>
                        <help>Minimum number of special characters in the password</help>
                        <valueHelp>
-                        <format>u32</format>
+                        <format>u32:1-8</format>
                         <description>Minimum number of special characters</description>
                        </valueHelp>
                        <constraint>
-                         <validator name="numeric"/>
+                         <validator name="numeric" argument="--range 1-8"/>
                        </constraint>
+                       <constraintErrorMessage>Minimum special-character count must be between 1 and 8</constraintErrorMessage>
                      </properties>
+                     <defaultValue>1</defaultValue>
                    </leafNode>
                  </children>
                </node>
