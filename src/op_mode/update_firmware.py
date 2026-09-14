@@ -23,6 +23,8 @@ from time import monotonic
 
 from vyos.utils.io import ask_yes_no
 from vyos.utils.process import rc_cmd
+from vyos.flavor import get_image_secure_grub
+from vyos.system import grub
 
 DEFAULT_IMAGE = '/usr/lib/u-boot/platform/u-boot-raw-boot.img'
 DEFAULT_DEVICE = '/dev/mmcblk0'
@@ -48,6 +50,8 @@ def parse_arguments() -> Namespace:
                         help='EFI mount point to use for GRUB update')
     parser.add_argument('--efi-device', default=None,
                         help='EFI partition block device (for example /dev/mmcblk0p2)')
+    parser.add_argument('--boot-dir', default='/boot',
+                        help='Boot directory for non-secure GRUB install')
     parser.add_argument('--yes', action='store_true',
                         help='Do not prompt before writing')
     return parser.parse_args()
@@ -329,6 +333,35 @@ def update_grub(grub_source: Path, target_relpath: str, mount_point: Path,
     print('GRUB EFI update completed successfully.')
 
 
+def install_grub(device: str | None, boot_dir: str, mount_point: Path,
+                 efi_device: str | None, force: bool = False) -> None:
+    """Non-secure GRUB (re)install via grub-install.
+
+    Handles both iGOS (aarch64, EFI-only) and generic VM images (x86_64,
+    hybrid BIOS+EFI): grub.install() selects the right target(s) for the arch,
+    and the ESP is mounted here and handed to it as the EFI directory.
+    """
+    drive = device or detect_target_device()
+    validate_block_device(Path(drive))
+
+    print(f'Target drive   : {drive}')
+    print(f'Boot directory : {boot_dir}')
+
+    with ensure_efi_mounted(mount_point, efi_device) as mounted_source:
+        print(f'EFI partition  : {mounted_source} (mounted at {mount_point})')
+
+        if not force:
+            if not ask_yes_no('Proceed with GRUB install?', default=False):
+                print('GRUB install cancelled.')
+                return
+
+        print('Installing GRUB. Do not power off the system ...')
+        grub.install(drive, boot_dir, str(mount_point))
+        sync()
+
+    print('GRUB install completed successfully.')
+
+
 def update_firmware(image_path: Path, device_path: Path, force: bool = False) -> None:
     image_size = image_path.stat().st_size
 
@@ -372,10 +405,21 @@ if __name__ == '__main__':
             device_path = resolve_uboot_boot_partition(device_path)
             validate_inputs(image_path, device_path)
             update_firmware(image_path, device_path, args.yes)
-        else:
+        elif get_image_secure_grub():
+            # secure_grub image: drop the prebuilt enforcing monolithic core
+            # onto the ESP; grub-install is intentionally not used.
             update_grub(
                 grub_source=Path(args.grub_source),
                 target_relpath=args.grub_target_relpath,
+                mount_point=Path(args.efi_mount_point),
+                efi_device=args.efi_device,
+                force=args.yes,
+            )
+        else:
+            # non-secure image (iGOS non-secure or generic VM): real grub-install.
+            install_grub(
+                device=args.device,
+                boot_dir=args.boot_dir,
                 mount_point=Path(args.efi_mount_point),
                 efi_device=args.efi_device,
                 force=args.yes,

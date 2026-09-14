@@ -36,7 +36,6 @@ from os import sync
 
 # PSL - access to additional routines
 from shutil import move
-from platform import machine
 # PSL - access to additional routines
 
 from json import loads
@@ -1236,8 +1235,8 @@ def install_image() -> None:
         # install GRUB
         if is_raid_install(install_target):
             print('Installing GRUB to the drives')
-            l = install_target.disks
-            for disk_target in l:
+            disks = install_target.disks
+            for disk_target in disks:
                 disk.partition_mount(disk_target.partition['efi'], f'{DIR_DST_ROOT}/boot/efi')
                 # secure builds consume the prebuilt core (below) -- skip grub-install
                 if not get_image_secure_grub():
@@ -1529,13 +1528,12 @@ def add_image(image_path: str, vrf: str = None, username: str = '',
         move(f'{root_dir}/boot/{image_name}/filesystem.squashfs',
              f'{root_dir}/boot/{image_name}/{image_name}.squashfs')
 
-        # PSL - for arm64 - copy the whole DTB tree (any vendor subdir: ti/, perle/, ...) to firmware directory
-        if machine() == 'aarch64':
-            if Path(f"{DIR_ISO_MOUNT}/boot/dtb").exists():
-                print('Copying DTB files')
-                # copytree(f"{DIR_ISO_MOUNT}/boot/dtb", f"{root_dir}/boot/dtb", dirs_exist_ok=True)
-                copytree(f"{DIR_ISO_MOUNT}/boot/dtb", f"{root_dir}/boot/{image_name}/dtb",
-                         dirs_exist_ok=True, symlinks=True)
+        # Copy the image's DTBs when present -- no arch guard so 32-bit ARM (armhf)
+        # works too; a natural no-op on x86, which ships no /boot/dtb.
+        if Path(f"{DIR_ISO_MOUNT}/boot/dtb").exists():
+            print('Copying DTB files')
+            copytree(f"{DIR_ISO_MOUNT}/boot/dtb", f"{root_dir}/boot/{image_name}/dtb",
+                     dirs_exist_ok=True, symlinks=True)
 
         # unmount an ISO and cleanup
         cleanup([str(iso_path)])
