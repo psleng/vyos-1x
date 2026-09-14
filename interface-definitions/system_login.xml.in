@@ -562,6 +562,68 @@
               #include <include/interface/vrf.xml.i>
             </children>
           </node>
+          <node name="enhanced-policy">
+             <properties>
+               <help>Enhanced password policy</help>
+             </properties>
+             <children>
+               <node name="password">
+                 <properties>
+                   <help>Password policy requirements</help>
+                 </properties>
+                 <children>
+                   <leafNode name="min-len">
+                     <properties>
+                       <help>Minimum password length</help>
+                       <valueHelp>
+                        <format>u32</format>
+                        <description>Minimum number of characters</description>
+                       </valueHelp>
+                       <constraint>
+                         <validator name="numeric"/>
+                       </constraint>
+                     </properties>
+                   </leafNode>
+                   <leafNode name="min-digits">
+                     <properties>
+                       <help>Minimum number of digits in the password</help>
+                       <valueHelp>
+                        <format>u32</format>
+                        <description>Minimum number of digits</description>
+                       </valueHelp>
+                       <constraint>
+                         <validator name="numeric"/>
+                       </constraint>
+                     </properties>
+                   </leafNode>
+                   <leafNode name="min-uppercase">
+                     <properties>
+                       <help>Minimum number of uppercase letters in the password</help>
+                       <valueHelp>
+                        <format>u32</format>
+                        <description>Minimum number of uppercase letters</description>
+                       </valueHelp>
+                       <constraint>
+                         <validator name="numeric"/>
+                       </constraint>
+                     </properties>
+                   </leafNode>
+                   <leafNode name="min-special">
+                     <properties>
+                       <help>Minimum number of special characters in the password</help>
+                       <valueHelp>
+                        <format>u32</format>
+                        <description>Minimum number of special characters</description>
+                       </valueHelp>
+                       <constraint>
+                         <validator name="numeric"/>
+                       </constraint>
+                     </properties>
+                   </leafNode>
+                 </children>
+               </node>
+             </children>
+           </node>
           <leafNode name="max-login-session">
             <properties>
               <help>Maximum number of all login sessions</help>
