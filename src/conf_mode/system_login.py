@@ -92,6 +92,44 @@ SSH_DSA_DEPRECATION_WARNING: str = (
 )
 
 
+def password_policy_check(
+    password: str,
+    minlen: int = 9,
+    ucredit: int = -1,
+    dcredit: int = -1,
+    ocredit: int = -1,
+) -> str | None:
+
+    uppercase_count = sum(1 for character in password if character.isupper())
+    digit_count = sum(1 for character in password if character.isdigit())
+    other_count = sum(1 for character in password if not character.isalnum())
+
+    if ucredit < 0 and uppercase_count < abs(ucredit):
+        return f'Password must contain at least {abs(ucredit)} uppercase letter(s).'
+
+    if dcredit < 0 and digit_count < abs(dcredit):
+        return f'Password must contain at least {abs(dcredit)} digit(s).'
+
+    if ocredit < 0 and other_count < abs(ocredit):
+        return f'Password must contain at least {abs(ocredit)} special character(s).'
+
+    credited_length = len(password)
+    if ucredit > 0:
+        credited_length += min(uppercase_count, ucredit)
+    if dcredit > 0:
+        credited_length += min(digit_count, dcredit)
+    if ocredit > 0:
+        credited_length += min(other_count, ocredit)
+
+    if credited_length < minlen:
+        return (
+            f'Password length score is {credited_length}; '
+            f'it must be at least {minlen}.'
+        )
+
+    return None
+
+
 def get_shadow_password(username):
     with open('/etc/shadow') as f:
         for user in f.readlines():
@@ -151,6 +189,9 @@ def get_config(config=None):
     # same for RADIUS
     if login.from_defaults(['radius']):
         del login['radius']
+    # enhanced policy
+    if login.from_defaults(['enhanced_policy']):
+        del login['enhanced_policy']
 
     # create a list of all users, cli and users
     all_users = list(set(local_users + cli_users))
@@ -193,6 +234,10 @@ def expand_with_origin(lst):
 
 
 def verify(login):
+    enhanced_password_policy = dict_search(
+        'enhanced_policy.password', login
+    )
+
     if 'rm_users' in login:
         # This check is required as the script is also executed from vyos-router
         # init script and there is no SUDO_USER environment variable available
@@ -312,7 +357,7 @@ def verify(login):
             plaintext_password = dict_search(
                 'authentication.plaintext_password', user_config
             )
-            if plaintext_password == DEFAULT_PASSWORD:
+            if plaintext_password == DEFAULT_PASSWORD and not enhanced_password_policy:
                 Warning(
                     f'Default password used for user "{user}" - consider changing it'
                 )
@@ -321,9 +366,22 @@ def verify(login):
             # A user password should be sufficiently complex
             failed_check_status = [EPasswdStrength.WEAK, EPasswdStrength.ERROR]
             if plaintext_password and len(plaintext_password) > 0:
+                if enhanced_password_policy:
+                    policy_error = password_policy_check(
+                        plaintext_password,
+                        minlen=int(enhanced_password_policy.get('min_len', 9)),
+                        dcredit=-int(enhanced_password_policy.get('min_digits', 1)),
+                        ucredit=-int(enhanced_password_policy.get('min_uppercase', 1)),
+                        ocredit=-int(enhanced_password_policy.get('min_special', 1)),
+                    )
+                    if policy_error:
+                        raise ConfigError(f'User "{user}" - {policy_error}')
+
                 result = evaluate_strength(plaintext_password)
                 if result['strength'] in failed_check_status:
                     tmp = result['error']
+                    if enhanced_password_policy:
+                        raise ConfigError(f'User "{user}" - {tmp}')
                     Warning(f'User "{user}" - {tmp}')
 
             for pubkey, pubkey_options in dict_search(
