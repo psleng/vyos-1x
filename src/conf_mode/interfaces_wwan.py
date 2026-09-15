@@ -772,6 +772,10 @@ def build_fsm_config(wwan):
         # Network time (NITZ) — opt-in: set the system clock from cellular
         # network time at registration (guarded so it never overrides NTP).
         'network_time_enabled': _leaf_exists(wwan, 'network_time'),
+        # Re-sync cadence for drift correction (NAS signaling, no data traffic).
+        'network_time_update_interval': _leaf_int(
+            wwan.get('network_time', {}) or {}, 'update_interval', 3600
+        ),
 
         # Monitoring intervals
         'normal_monitoring_interval': _leaf_int(
