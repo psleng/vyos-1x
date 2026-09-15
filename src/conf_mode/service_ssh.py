@@ -23,6 +23,8 @@ from syslog import LOG_INFO
 
 from vyos.base import DeprecationWarning
 from vyos.config import Config
+from vyos.configdep import set_dependents
+from vyos.configdep import call_dependents
 from vyos.configdict import is_node_changed
 from vyos.configverify import verify_vrf
 from vyos.configverify import verify_pki_openssh_key
@@ -83,6 +85,9 @@ def get_config(config=None):
     # We have gathered the dict representation of the CLI, but there are default
     # options which we need to update into the dictionary retrieved.
     ssh = conf.merge_defaults(ssh, recursive=True)
+
+    # Set dependency to restart serial ports running ssh server when ssh config changes
+    set_dependents('serial', conf)
 
     # Ignore default XML values if config doesn't exists
     # Delete key from dict
@@ -235,6 +240,9 @@ def apply(ssh):
 
     for vrf in ssh['vrf']:
         call(f'systemctl {systemd_action} ssh@{vrf}.service')
+
+    # Call dependents (e.g., serial ports running ssh server)
+    call_dependents()
     return None
 
 

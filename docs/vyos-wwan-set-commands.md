@@ -28,20 +28,30 @@ dhcp6c.  VyOS infrastructure features (`description`,
 interfaces
   └── wwan <wwanN>
         ├── description <text>                            # max 255 characters
-        ├── disable                                       # valueless — admin shutdown
-        ├── mtu <576-1500>                                # fallback MTU if carrier does not provide one (default: 1420); also ceiling
+        ├── disable                                       # valueless — full teardown (delete-style, purges history); interface recreated when removed
+        ├── mtu <68-1500>                                # fallback MTU if carrier does not provide one (default: 1420); also ceiling
         ├── vrf <name>                                    # VRF instance name
         ├── connection-mode <always-on|connect-on-demand|dial-on-demand>
         ├── network-mode <auto|lte|5g|5g-only|3g|2g>      # modem-level RAT selection
         ├── network-time                                  # valueless — set system clock from NITZ at registration
+        ├── default-route-metric <0-255>                  # metric for the FSM-installed carrier default route(s) (default: 220; keeps cellular below a wired primary — failover/static=1, DHCP=210)
         │
-        ├── ip                                            # IPv4 routing parameters (kernel-level)
+        ├── ip                                            # IPv4 routing parameters (standard VyOS interface options; ARP/broadcast knobs are inert on a point-to-point cellular bearer)
         │     ├── adjust-mss <bytes|clamp-mss-to-pmtu>
+        │     ├── arp-cache-timeout <1-86400>             # ARP cache entry timeout, s (default: 30)
+        │     ├── disable-arp-filter                      # valueless
         │     ├── disable-forwarding                      # valueless
+        │     ├── enable-arp-accept                       # valueless
+        │     ├── enable-arp-announce                     # valueless
+        │     ├── enable-arp-ignore                       # valueless
+        │     ├── enable-directed-broadcast               # valueless
+        │     ├── enable-proxy-arp                        # valueless
+        │     ├── proxy-arp-pvlan                         # valueless
         │     └── source-validation <strict|loose|disable>
         │
-        ├── ipv6                                          # IPv6 routing parameters (kernel-level)
+        ├── ipv6                                          # IPv6 routing parameters (reduced set; FSM owns RA/SLAAC/DAD + link-local on wwanN)
         │     ├── adjust-mss <bytes|clamp-mss-to-pmtu>
+        │     ├── base-reachable-time <1-86400>           # NDP base reachable time, s (default: 30)
         │     ├── disable-forwarding                      # valueless
         │     ├── source-validation <strict|loose|disable>
         │     └── management-address                      # FSM-stamped <prefix>::host-id/128 on wwanN (opt-in; auto-permits TCP 443 + ICMPv6 + ESTABLISHED)
@@ -52,8 +62,14 @@ interfaces
         │           └── permit-source <ipv6-prefix> (multi)  # ACL: restrict all permits (including auto-443) to this source prefix
         │
         ├── ipv6-bridging                                # carrier /64 → single downstream LAN (NOT DHCPv6 PD)
-        │     ├── interface <name>                        # downstream LAN interface that gets the carrier prefix
-        │     └── reconciliation-interval <5-300>          # safety-net timer (default: 10 s)
+        │     ├── interface <name>                        # downstream LAN interface that gets the prefix
+        │     ├── reconciliation-interval <5-300>          # safety-net timer (default: 10 s)
+        │     ├── translate-prefix <ipv6-/64>             # NPTv6 (RFC 6296): map a stable internal /64 ↔ carrier /64 (LAN never renumbers)
+        │     └── router-advert                            # RFC 4861 RA timers for the bridged LAN (renumber speed)
+        │           ├── min-interval <3-1350>             # MinRtrAdvInterval    (default: 3 s)
+        │           ├── max-interval <4-1800>             # MaxRtrAdvInterval    (default: 10 s)
+        │           ├── preferred-lifetime <0-2592000>    # AdvPreferredLifetime (default: 1800 s)
+        │           └── valid-lifetime <1-2592000>        # AdvValidLifetime     (default: 3600 s)
         │
         ├── dhcpv6-options                                # standard VyOS DHCPv6 client (handled by dhcp6c)
         │     ├── duid <hex-string>                       # client DUID override
@@ -73,10 +89,15 @@ interfaces
         │     ├── interface <name>                        # designated LAN port (required)
         │     ├── mac <xx:xx:xx:xx:xx:xx>                 # optional — pin to a specific downstream MAC (default: first-MAC-wins)
         │     ├── lease-time <30-600>                     # DHCP lease seconds (default: 60)
-        │     ├── management-address <ipv4/prefix>        # FSM-provisioned mgmt v4 (default: 192.168.200.1/24; Policy B: skipped if 'interfaces ethernet <if> address' is set)
-        │     ├── management-address-ipv6 <ipv6/prefix>   # FSM-provisioned mgmt v6 (default: fd00:6c61:6e30::1/64; same Policy B)
+        │     ├── passthrough-management-address <ipv4/prefix>        # FSM-provisioned mgmt v4 (default: 192.168.200.1/24; Policy B: skipped if 'interfaces ethernet <if> address' is set)
+        │     ├── passthrough-management-address-ipv6 <ipv6/prefix>   # FSM-provisioned mgmt v6 (default: fd00:6c61:6e30::1/64; same Policy B)
         │     ├── dns-server <ipv4|ipv6> (multi)          # override DNS advertised to downstream (precedence: user > carrier > 8.8.8.8/1.1.1.1)
-        │     └── disable-mss-clamp                       # valueless — turn off TCP MSS clamp-to-PMTU on WWAN egress (on by default)
+        │     ├── disable-mss-clamp                       # valueless — turn off TCP MSS clamp-to-PMTU on WWAN egress (on by default)
+      │     ├── legacy-dhcpv4-compat                    # valueless — legacy mode: same-subnet v4 router/netmask, disable DHCP option 121
+        │     └── router-advert                           # RA tuning for the downstream device (dnsmasq)
+        │           ├── interval <4-1800>                 # unsolicited RA cadence, s (default: 60)
+        │           ├── router-lifetime <0-9000>          # default-router lifetime, s (default: 1800; 0 = not a default router)
+        │           └── prefix-lifetime <0-2592000>       # SLAAC/DHCPv6 address lifetime, s (default: lease-time)
         │
         ├── mirror                                        # packet mirroring
         │     ├── ingress <interface>
@@ -168,11 +189,11 @@ interfaces
         ├── hardware-reset
         │     ├── disable                                 #   valueless — turn off hardware reset (on by default)
         │     ├── max-attempts <count>                    #   default: 3
-        │     └── cooldown <seconds>                      #   default: 300
+        │     └── cooldown <seconds>                      #   default: 300  (range 180-3600)
         │
         ├── failed-retry
         │     ├── disable                                 #   valueless — turn off periodic retry from FAILED state (on by default)
-        │     ├── intervals <sec,sec,...>                  #   default: 600,1800,3600,7200  (10, 30, 60, 120 min)
+        │     ├── intervals <sec,sec,...>                  #   default: 30,60,120,300,600,1800,3600  (30s..60m)
         │     ├── max-interval <seconds>                  #   default: 7200  (cap once list exhausted, 2 hr)
         │     └── escalation-threshold <count>             #   default: 3  (disable/enable cycle after N failures; 0 = never)
         │
@@ -248,10 +269,13 @@ automatically using a 4-priority APN discovery chain:
 | **Mirror** | not set | No ingress/egress mirroring |
 | **IPv4 options** | VyOS defaults | Forwarding enabled, source-validation disabled |
 | **IPv6 options** | VyOS defaults | Forwarding enabled, source-validation disabled |
-| **IPv6 bridging** | not configured | No prefix is bridged; configure `ipv6-bridging interface <lan>` to copy the carrier /64 onto a downstream LAN interface (NOT DHCPv6 PD). |
+| **IPv6 bridging** | not configured | No prefix is bridged; configure `ipv6-bridging interface <lan>` to copy the carrier /64 onto a downstream LAN interface (NOT DHCPv6 PD).  Add `translate-prefix <ipv6-/64>` to switch to NPTv6 (RFC 6296) mode — see below. |
 | **IPv6 management-address** | not configured (opt-in) | FSM leaves `wwanN` address-only.  When the user creates `ipv6 management-address`, the FSM stamps `<carrier-prefix>::1/128` and installs an `ip6tables` chain permitting ICMPv6, ESTABLISHED/RELATED, and TCP 443 (VyOS HTTPS UI); everything else is dropped.  Use `disable-default-https` to suppress the 443 auto-permit, `permit-tcp` / `permit-udp` to open additional ports, and `permit-source` to gate all permits to a specific source prefix. |
 | **DHCPv6 PD** | not configured | Standard VyOS `dhcpv6-options pd …` is available; dhcp6c runs only when configured.  **Mutually exclusive** with `ip-passthrough`, `ipv6-bridging` and `ipv6 management-address` — all four consume the carrier-assigned IPv6 prefix, so `verify()` permits only one. |
 | **Bridging reconciliation** | `10 s` | Safety-net timer re-checks the downstream LAN interface; netlink watch provides instant detection |
+| **Bridging RA timers** | min `3 s`, max `10 s`, preferred-lifetime `1800 s`, valid-lifetime `3600 s` | RFC 4861 Router Advertisement timers for the FSM-owned radvd on the bridged LAN.  Short defaults so SLAAC clients renumber quickly on a (rare) carrier prefix change.  Tunable via `ipv6-bridging router-advert …`; `verify()` enforces `min ≤ 0.75 × max` and `preferred ≤ valid`. |
+| **NPTv6 translate-prefix** | not configured (verbatim bridging) | When `ipv6-bridging translate-prefix <internal-/64>` is set, the LAN is given the *stable internal* /64 instead of the carrier /64, and an nft NPTv6 (RFC 6296-style) rule 1:1-maps internal ↔ carrier at the wwan edge.  On a carrier prefix change only the translation's external prefix moves — the LAN never renumbers.  Must be a `/64`.  **Datapath requires hardware validation.** |
+| **Passthrough RA timers** | interval `60 s`, router-lifetime `1800 s`, prefix-lifetime = `lease-time` | dnsmasq Router Advertisement tuning for the downstream device (only when `ip-passthrough` is active).  Tunable via `ip-passthrough router-advert …`; `verify()` requires `router-lifetime` to be `0` or ≥ `interval`. |
 | **Active SIM slot** | `1` | Slot 1 is used |
 | **APN** | per-SIM only, `(empty)` — triggers auto-discovery | Priority chain: 1) per-SIM configured APN, 1.5) in-memory last-connected APN, 3) Android APN DB (enabled by default), 4) automatic (let the network assign) |
 | **Authentication** | per-SIM only, default `none` | No PPP auth; auth-type/username/password configured per SIM slot |
@@ -282,7 +306,7 @@ automatically using a 4-priority APN discovery chain:
 | **Data limits (global fallback)** | size `0`, action `none`, billing-date `1`, warning `(empty)` | Applies when per-SIM values are not set |
 | **Data usage monitoring** | interval `30 s` | Counters tracked per billing cycle |
 | **Hardware reset** | `enabled`, max `3` attempts, cooldown `300 s` | Modem power-cycles after repeated unrecoverable failures; use `disable` to turn off |
-| **Failed-state retry** | `enabled`, intervals `600,1800,3600,7200`, cap `7200 s`, escalation threshold `3` | Periodically reattempts connection from FAILED state (data-plan top-up, carrier provisioning, transient errors); carrier-friendly backoff (~10 attempts/hour worst case) avoids triggering Verizon/AT&T throttling; after 3 consecutive failures, escalates to modem disable/enable cycle to clear stale EPS context |
+| **Failed-state retry** | `enabled`, intervals `30,60,120,300,600,1800,3600`, cap `7200 s`, escalation threshold `3` | Periodically reattempts connection from FAILED state; fast early retries (30s, 1, 2, 5 min) recover quickly from transient signal/antenna loss, while the carrier-friendly tail (10, 30, 60 min, cap 2 hr) avoids triggering Verizon/AT&T throttling on persistent failures; after 3 consecutive failures, escalates to modem disable/enable cycle to clear stale EPS context |
 | **Band selection** | `all` | All modem-supported radio technologies enabled |
 | **Network scan timeout** | `180 s` | Max wait for network scan completion (scans can take 2+ min) |
 | **Connection timeout** | `120 s` | Max wait for MM `Simple.Connect()` to succeed |
@@ -365,6 +389,14 @@ set interfaces wwan wwan0 mtu 1420
 ### IPv4 Options
 
 > **If unconfigured:** VyOS kernel defaults — forwarding enabled, source-validation disabled.
+>
+> `ip` inherits the **full standard VyOS interface option set**.  Beyond the
+> three shown below, the ARP / broadcast knobs `arp-cache-timeout`,
+> `disable-arp-filter`, `enable-arp-accept`, `enable-arp-announce`,
+> `enable-arp-ignore`, `enable-proxy-arp`, `proxy-arp-pvlan` and
+> `enable-directed-broadcast` are all accepted but are **inert on a
+> point-to-point L3 PDN bearer** — there is no ARP on the cellular link — so
+> leave them unset.
 
 ```
 set interfaces wwan wwan0 ip adjust-mss '1380'
@@ -375,9 +407,24 @@ set interfaces wwan wwan0 ip source-validation 'strict'
 ### IPv6 Options
 
 > **If unconfigured:** VyOS kernel defaults — forwarding enabled, source-validation disabled.
-> DAD and `address no-default-link-local` are omitted — DAD is meaningless on
-> a /128 point-to-point carrier link, and suppressing the fe80:: link-local
-> would break IPv6 NDP routing on wwan.
+>
+> `ipv6` exposes a deliberately **reduced** subset of the standard VyOS
+> interface options — only the knobs actually honoured on a cellular bearer:
+> `adjust-mss`, `disable-forwarding`, `source-validation`,
+> `base-reachable-time`, plus the FSM-specific `management-address` subtree
+> (documented below).
+>
+> The following standard options are **intentionally not exposed** on `wwanN`,
+> because the modem terminates 3GPP SLAAC internally and the WWAN FSM is the
+> sole owner of the interface's RA/SLAAC/DAD sysctls and link-local
+> (`_harden_wwan_ipv6_sysctls`):
+>
+> - the host-SLAAC address modes `address autoconf` / `eui64` /
+>   `interface-identifier` — host SLAAC can never complete on the bearer;
+> - the DAD knobs `accept-dad` / `dup-addr-detect-transmits` — the FSM
+>   overrides these on every commit, so they would do nothing;
+> - `address no-default-link-local` — the FSM manages the `wwanN` link-local;
+>   removing it would break IPv6 NDP.
 
 ```
 set interfaces wwan wwan0 ipv6 adjust-mss '1380'
@@ -588,6 +635,27 @@ set interfaces wwan wwan0 ipv6 management-address host-id '::cafe'
 > If the interface is destroyed (`RTM_DELLINK`) it is moved back to the
 > pending set and re-applied when it reappears.  Bearer disconnect removes
 > the bridged prefix; bearer reconnect re-applies it.
+>
+> **Tuning renumber speed (RFC 4861 Router Advertisements):**  The
+> FSM-owned radvd (mechanism #4 above) sends its RAs on a cadence and
+> advertises prefix lifetimes that are, by default, deliberately short so
+> downstream SLAAC clients pick up a changed carrier prefix quickly.  All
+> four values are operator-tunable under `ipv6-bridging router-advert`
+> (leaving the node unset reproduces the previously hard-coded behaviour,
+> so it changes nothing):
+>
+> | Command | radvd / RFC 4861 field | Default | Effect |
+> |---|---|---|---|
+> | `min-interval <3-1350>` | `MinRtrAdvInterval` | `3 s` | Lower bound between unsolicited RAs |
+> | `max-interval <4-1800>` | `MaxRtrAdvInterval` | `10 s` | Upper bound between unsolicited RAs — **lower = clients hear a new prefix sooner** |
+> | `preferred-lifetime <0-2592000>` | `AdvPreferredLifetime` | `1800 s` | How long the advertised address stays *preferred*; shorter = the old prefix is deprecated faster |
+> | `valid-lifetime <1-2592000>` | `AdvValidLifetime` | `3600 s` | How long the advertised address stays *valid* |
+>
+> `verify()` rejects a configuration where `min-interval > 0.75 ×
+> max-interval` or `preferred-lifetime > valid-lifetime` (both are RFC 4861
+> / radvd hard requirements) with a clear error instead of a silent radvd
+> start failure.  `AdvDefaultLifetime` (the router lifetime) is derived
+> automatically from `max-interval` and never needs tuning.
 
 ```
 # Bridge the carrier-supplied /64 to eth0
@@ -595,6 +663,13 @@ set interfaces wwan wwan0 ipv6-bridging interface 'eth0'
 
 # Reconciliation interval — safety-net for late-appearing interfaces (default 10 s)
 set interfaces wwan wwan0 ipv6-bridging reconciliation-interval 10
+
+# RFC 4861 Router Advertisement timers on the bridged LAN — all optional.
+# The values below ARE the defaults; omit any line to keep its default.
+set interfaces wwan wwan0 ipv6-bridging router-advert min-interval 3
+set interfaces wwan wwan0 ipv6-bridging router-advert max-interval 10
+set interfaces wwan wwan0 ipv6-bridging router-advert preferred-lifetime 1800
+set interfaces wwan wwan0 ipv6-bridging router-advert valid-lifetime 3600
 ```
 
 > **Tip — stable carrier-independent IPv6 management address:**  Unlike
@@ -615,6 +690,56 @@ set interfaces wwan wwan0 ipv6-bridging reconciliation-interval 10
 >
 > SLAAC clients prefer the global carrier address for off-link traffic
 > and use the ULA for on-LAN management — no extra configuration needed.
+
+> **NPTv6 prefix translation (RFC 6296) — a carrier-independent prefix
+> for the *whole* LAN:**  The ULA tip above gives the router a stable
+> management address, but downstream hosts still SLAAC off the carrier
+> /64 and therefore renumber whenever the carrier rotates the prefix.  If
+> you instead want the entire LAN to keep a fixed, operator-chosen prefix
+> across carrier renumbering, set `translate-prefix` to a stable internal
+> /64:
+>
+> ```
+> set interfaces wwan wwan0 ipv6-bridging interface 'eth0'
+> set interfaces wwan wwan0 ipv6-bridging translate-prefix 'fd00:6c61:6e30::/64'
+> ```
+>
+> In this mode `ipv6-bridging` behaves as follows:
+>
+> 1. The LAN (`eth0`) is given `fd00:6c61:6e30::1/64` and the FSM-owned
+>    radvd advertises **the internal prefix**, so SLAAC hosts form stable
+>    `fd00:6c61:6e30::/64` addresses that never change.
+> 2. A dedicated nftables table `ip6 wwanN_nptv6` installs a stateless
+>    1:1 prefix map — the same `snat`/`dnat prefix to` construct VyOS
+>    `nat66` uses — rewriting the internal /64 ↔ the current carrier /64
+>    at the `wwanN` edge:
+>
+>    ```
+>    oifname wwanN ip6 saddr fd00:6c61:6e30::/64 snat prefix to <carrier>/64
+>    iifname wwanN ip6 daddr <carrier>/64        dnat prefix to fd00:6c61:6e30::/64
+>    ```
+>
+> 3. On a carrier prefix change **only the external prefix of that rule
+>    is refreshed** — the LAN address and RAs are untouched, so downstream
+>    hosts never renumber (verbatim-copy mode would instead deprecate the
+>    old prefix and SLAAC the new one).
+> 4. LAN hosts are mirrored on the wwan side with proxy-NDP for their
+>    *translated* address (`<carrier>::<host-IID>`), just as verbatim
+>    bridging proxies the host's own address.
+>
+> **Mutually exclusive** with `ip-passthrough`, DHCPv6-PD and `ipv6
+> management-address` (same rule as plain `ipv6-bridging` — all consume
+> the carrier prefix).  Use a ULA range (`fd00::/8`, RFC 4193) for the
+> internal prefix so it never collides with real global space.
+>
+> > ⚠️ **Datapath not yet hardware-validated.**  The NPTv6 forwarding
+> > path — the nft prefix translation, proxy-NDP for translated
+> > addresses, and the carrier's routed-vs-on-link /64 behaviour — cannot
+> > be exercised without live cellular hardware; treat this mode as
+> > needing a board bring-up test before production use.  In particular
+> > the proxy-NDP mirror assumes nftables `prefix to` keeps the host IID
+> > verbatim (stateful prefix NAT), not RFC 6296 checksum-neutral IID
+> > adjustment.
 
 ### DHCPv6 (standard VyOS — real PD via dhcp6c)
 
@@ -658,7 +783,11 @@ set interfaces wwan wwan0 dhcpv6-options pd 0 interface eth0 sla-id '0'
 >    change propagates within one renewal window.  The carrier-supplied
 >    DNS servers from the bearer's `Ip4Config` are advertised via DHCP
 >    option 6 (with `8.8.8.8/1.1.1.1` as a last-resort fallback if the
->    bearer didn't provide any).
+>    bearer didn't provide any).  **Default mode** advertises `/32` plus
+>    DHCP option 121 (RFC 3442 classless route) with the management address
+>    as gateway.  **Legacy mode** (`legacy-dhcpv4-compat`) instead advertises
+>    a same-subnet router + subnet mask and suppresses option 121 for older
+>    clients that do not implement RFC 3442.
 > 3. **DHCPv6 IA_NA + IA_PD + RA (M=1, O=1)** offers the carrier IPv6 to
 >    the same client.  RA advertises the FSM as the default gateway with
 >    DNS via option 23, again sourced from the bearer's `Ip6Config`.
@@ -718,6 +847,36 @@ set interfaces wwan wwan0 dhcpv6-options pd 0 interface eth0 sla-id '0'
 >    entirely — no auto-mgmt address is added.  Silent → FSM provides
 >    defaults.  This avoids fighting VyOS's own ethernet config.
 >
+> **Router Advertisement tuning (optional):**  The RA cadence and the
+> advertised address lifetimes are tunable under `ip-passthrough
+> router-advert`.  Because the RA/DHCP server here is `dnsmasq` (not
+> `radvd`), the knobs map onto what dnsmasq actually exposes:
+>
+> | Command | dnsmasq field | Default | Effect |
+> |---|---|---|---|
+> | `interval <4-1800>` | `ra-param` RA interval | `60 s` | How often unsolicited RAs are sent |
+> | `router-lifetime <0-9000>` | `ra-param` router lifetime | `1800 s` | Default-router validity; `0` = advertise as non-default-router |
+> | `prefix-lifetime <0-2592000>` | SLAAC/DHCPv6 lease | `lease-time` | Downstream address preferred/valid lifetime |
+>
+> Defaults reproduce the previously hard-coded `ra-param=…,60,1800`, so
+> leaving the node unset changes nothing; `prefix-lifetime` falls back to
+> `lease-time` when unset.  `verify()` rejects a `router-lifetime` shorter
+> than `interval` (unless `0`) — that would leave the downstream device
+> without a default route between advertisements (RFC 4861).  Note that fast
+> IPv6 renumbering does **not** depend on these: on a carrier IPv6 change the
+> FSM already fires a burst of deprecation RAs (`preferred=0 valid=0`) for
+> the old prefix, so the downstream drops it immediately instead of waiting
+> for a lifetime to expire.
+>
+> **Safety net (late LAN port / dead dnsmasq):**  `dnsmasq --bind-interfaces`
+> cannot start on a not-yet-present netdev, and unlike `ipv6-bridging` there
+> is no netlink watch here.  A per-instance reconcile task therefore
+> re-checks every 15 s: while passthrough is active and holds a carrier IP,
+> if the designated interface now exists but `dnsmasq` is not running, it
+> replays the last apply — recovering both a downstream port that appears
+> after the bearer connected and a `dnsmasq` that died.  The replay is
+> idempotent and serialized against normal applies, so it never double-runs.
+>
 > **Carrier IP changes (the hard part):**  When the carrier reassigns an
 > address (renew, handover, reconnect), stale connections must die
 > immediately or the downstream device will black-hole until its lease
@@ -750,6 +909,9 @@ set interfaces wwan wwan0 dhcpv6-options pd 0 interface eth0 sla-id '0'
 >    may be active.
 >  - The interface should be wired (not Wi-Fi) — DHCPFORCERENEW behaviour
 >    on wireless drivers is unreliable.
+>  - Legacy downstream products that ignore DHCP option 121 can use
+>    `ip-passthrough legacy-dhcpv4-compat`; keep it disabled for newer
+>    equipment so the default modern behavior is preserved.
 >  - **`connection-mode dial-on-demand` is rejected at commit time** when
 >    passthrough is configured.  Passthrough leases the carrier IP straight
 >    through to a downstream device and assumes an always-up bearer;
@@ -777,8 +939,8 @@ set interfaces wwan wwan0 ip-passthrough lease-time '60'
 # Optional: override the auto-provisioned management addresses
 #   (only takes effect if 'interfaces ethernet <if> address' is unset —
 #    Policy B: explicit user config always wins)
-set interfaces wwan wwan0 ip-passthrough management-address '192.168.200.1/24'
-set interfaces wwan wwan0 ip-passthrough management-address-ipv6 'fd00:6c61:6e30::1/64'
+set interfaces wwan wwan0 ip-passthrough passthrough-management-address '192.168.200.1/24'
+set interfaces wwan wwan0 ip-passthrough passthrough-management-address-ipv6 'fd00:6c61:6e30::1/64'
 
 # Optional: override DNS advertised to the downstream device (multi-value).
 #   Precedence: user override > carrier-supplied DNS > 8.8.8.8/1.1.1.1 fallback.
@@ -800,6 +962,18 @@ set interfaces wwan wwan0 ip-passthrough dns-server '2606:4700:4700::1111'
 #   uses --clamp-mss-to-pmtu so it auto-tracks the bearer MTU dynamically.
 #   Only disable for PMTUD black-hole debugging.
 # set interfaces wwan wwan0 ip-passthrough disable-mss-clamp
+
+# Optional: legacy DHCPv4 compatibility mode for older downstream clients.
+#   Enabled: same-subnet IPv4 gateway/netmask, suppress DHCP option 121.
+#   Disabled (default): modern /32 + option 121 mode.
+# set interfaces wwan wwan0 ip-passthrough legacy-dhcpv4-compat
+
+# Optional: tune the downstream Router Advertisements (dnsmasq).
+#   Defaults shown; omit any line to keep its default. router-lifetime must
+#   be 0 or >= interval; prefix-lifetime defaults to the lease-time when unset.
+set interfaces wwan wwan0 ip-passthrough router-advert interval 60
+set interfaces wwan wwan0 ip-passthrough router-advert router-lifetime 1800
+set interfaces wwan wwan0 ip-passthrough router-advert prefix-lifetime 60
 ```
 
 ### Packet Mirroring
@@ -1133,14 +1307,14 @@ set interfaces wwan wwan0 hardware-reset cooldown 300
 ```
 # Failed-state retry is enabled by default — to disable:
 # set interfaces wwan wwan0 failed-retry disable
-set interfaces wwan wwan0 failed-retry intervals '600,1800,3600,7200'
+set interfaces wwan wwan0 failed-retry intervals '30,60,120,300,600,1800,3600'
 set interfaces wwan wwan0 failed-retry max-interval 7200
 set interfaces wwan wwan0 failed-retry escalation-threshold 3
 ```
 
 ### Carrier / Network Scan
 
-> **If unconfigured:** Network-mode auto (all technologies), network scanning disabled, scan timeout 60 s.
+> **If unconfigured:** Network-mode auto (all technologies), network scanning disabled, scan timeout 180 s.
 >
 > **Network-mode vs Per-SIM bands:**
 > The `network-mode` setting (see Basic Commands above) controls which radio
@@ -1209,7 +1383,7 @@ set interfaces wwan wwan0 failed-retry escalation-threshold 3
 > - If both a friendly name **and** `network-scan enable` are set, a single scan serves both purposes.
 
 ```
-set interfaces wwan wwan0 network-scan timeout 60
+set interfaces wwan wwan0 network-scan timeout 180
 ```
 
 #### Band Name Reference
@@ -1432,12 +1606,12 @@ set interfaces wwan wwan0 logging sink 'both'
 | `hardware-reset max-attempts` | `max_hardware_resets` | `3` |
 | `hardware-reset cooldown` | `hardware_reset_cooldown` | `300` |
 | `failed-retry disable` | `failed_retry_enabled` | `true` |
-| `failed-retry intervals` | `failed_retry_intervals` | `600,1800,3600,7200` |
+| `failed-retry intervals` | `failed_retry_intervals` | `30,60,120,300,600,1800,3600` |
 | `failed-retry max-interval` | `failed_retry_max_interval` | `7200` |
 | `failed-retry escalation-threshold` | `failed_retry_escalation_threshold` | `3` |
 | `network-mode` | `network_mode` | `auto` |
 | `mtu` | `mtu` | `1420` |
-| `network-scan timeout` | `network_scan_timeout` | `60` |
+| `network-scan timeout` | `network_scan_timeout` | `180` |
 | `timeouts connection` | `connection_timeout` | `120` |
 | `timeouts registration` | `registration_timeout` | `180` |
 | `timeouts normal-monitoring-interval` | `normal_monitoring_interval` | `30` |

@@ -15,6 +15,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import asyncio
+import faulthandler
 import os
 import signal
 import subprocess
@@ -27,6 +28,7 @@ from dbus_next.message import Message  # pylint: disable=import-error
 from vyos.utils.wwan import interfaces_wwan_diag as wwan_diag
 from vyos.utils.wwan.interfaces_wwan_util import (
     hardware_reset_all_modems,
+    is_managed_mm_downtime,
     system_is_stopping,
 )
 from vyos.utils.wwan.wwan_logging import setup_logging
@@ -34,6 +36,16 @@ from vyos.utils.wwan.wwan_logging import setup_logging
 
 # Set up logging — use root logger for manager so all module logs are captured
 logger = setup_logging("", "wwan-manager")
+
+# Arm a native-crash handler.  The manager makes native calls (dbus_next and,
+# via asyncio.to_thread, the board GPIO/SIM/LED hardware API); a fault in any of
+# those kills the process with an opaque "status=11/SEGV" and NO traceback
+# (exactly what was seen once, ~2s into connected-state monitor startup).
+# faulthandler dumps the Python stack of ALL threads to stderr — captured by
+# journald — the instant a SIGSEGV/SIGABRT/SIGBUS/SIGFPE/SIGILL fires, so the
+# next occurrence is diagnosable.  It only installs signal handlers: no runtime
+# cost and no behavioural change otherwise.
+faulthandler.enable()
 
 class ModemManagerMonitor:
     def __init__(self, service_manager):
@@ -81,10 +93,20 @@ class ModemManagerMonitor:
                 )
 
                 if result.returncode != 0 or result.stdout.strip() != "active":
-                    logger.error("ModemManager has crashed or stopped "
-                                "(systemd reports inactive)")
-                    self._mm_dbus_miss_count = 0  # crash path owns recovery
-                    await self.handle_modemmanager_crash()
+                    if is_managed_mm_downtime():
+                        # A quiesced modem reset is deliberately holding MM
+                        # down through the modem's unprobed settle window --
+                        # stand down, do NOT "recover" it.
+                        logger.info(
+                            "ModemManager is intentionally stopped for a "
+                            "managed modem reset -- standing down (not "
+                            "restarting it)")
+                        self._mm_dbus_miss_count = 0
+                    else:
+                        logger.error("ModemManager has crashed or stopped "
+                                    "(systemd reports inactive)")
+                        self._mm_dbus_miss_count = 0  # crash path owns recovery
+                        await self.handle_modemmanager_crash()
                 elif await self._probe_mm_dbus_responsive():
                     # Process up AND answering D-Bus -- genuinely healthy.
                     if self._mm_dbus_miss_count:

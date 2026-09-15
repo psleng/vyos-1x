@@ -45,6 +45,25 @@
                   </node>
                 </children>
               </node>
+              <node name="airplane-mode">
+                <properties>
+                  <help>Radio airplane mode — RF off (non-persistent; cleared on reboot)</help>
+                </properties>
+                <children>
+                  <node name="enable">
+                    <properties>
+                      <help>Disconnect and power the modem RF off</help>
+                    </properties>
+                    <command>${vyos_op_scripts_dir}/wwan_airplane.py enable --interface="$3"</command>
+                  </node>
+                  <node name="disable">
+                    <properties>
+                      <help>Power the modem RF back on and reconnect</help>
+                    </properties>
+                    <command>${vyos_op_scripts_dir}/wwan_airplane.py disable --interface="$3"</command>
+                  </node>
+                </children>
+              </node>
             </children>
           </virtualTagNode>
         </children>

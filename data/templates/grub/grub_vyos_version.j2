@@ -12,7 +12,11 @@
 menuentry "{{ version_name }}" --id {{ version_uuid }} {
     probe -u (hd0,gpt3) --set=disk_uuid
     set boot_opts="{{ boot_opts_rendered }}"
+{% if dm_verity is vyos_defined and dm_verity %}
+    set boot_opts="${boot_opts} plainroot root=/dev/mapper/verity-root prod_id=${prod_id} model=${model}"
+{% else %}
     set boot_opts="${boot_opts} root=UUID=${disk_uuid} prod_id=${prod_id} model=${model}"
+{% endif %}
     if [ "${console_type}" == "ttyS" -o "${console_type}" == "ttyAMA" ]; then
         set console_opts="console=${console_type}${console_num},${console_speed}"
     else

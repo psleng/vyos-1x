@@ -24,7 +24,7 @@
                     <script>cd /sys/class/net; ls -d wwan*</script>
                   </completionHelp>
                 </properties>
-                <command>${vyos_op_scripts_dir}/interfaces.py show --intf-name="$4" --intf-type=wirelessmodem</command>
+                <command>${vyos_op_scripts_dir}/interfaces.py show --intf-name="$4" --intf-type=wwan</command>
                 <children>
                   <leafNode name="detail">
                     <properties>
@@ -59,6 +59,30 @@
                   <node name="wait-failover-alert">
                     <properties>
                       <help>Wait for next WWAN failover alert</help>
+                    </properties>
+                    <command>${vyos_op_scripts_dir}/show_wwan.py show_wait_failover --interface="$4"</command>
+                    <children>
+                      <node name="timeout">
+                        <properties>
+                          <help>Set wait timeout in seconds</help>
+                        </properties>
+                        <children>
+                          <tagNode name="seconds">
+                            <properties>
+                              <help>Timeout in seconds (1-600)</help>
+                              <constraint>
+                                <validator name="numeric" argument="--range 1-600"/>
+                              </constraint>
+                            </properties>
+                            <command>${vyos_op_scripts_dir}/show_wwan.py show_wait_failover --interface="$4" --timeout="$7"</command>
+                          </tagNode>
+                        </children>
+                      </node>
+                    </children>
+                  </node>
+                  <node name="wait-failer-alert">
+                    <properties>
+                      <help>Compatibility alias: wait for next WWAN failover alert</help>
                     </properties>
                     <command>${vyos_op_scripts_dir}/show_wwan.py show_wait_failover --interface="$4"</command>
                     <children>
@@ -142,6 +166,68 @@
                       </node>
                     </children>
                   </node>
+                  <node name="event-log">
+                    <properties>
+                      <help>Show WWAN alert/event log</help>
+                    </properties>
+                    <command>${vyos_op_scripts_dir}/show_wwan.py show_event_log --interface="$4"</command>
+                    <children>
+                      <node name="limit">
+                        <properties>
+                          <help>Maximum number of recent events</help>
+                        </properties>
+                        <children>
+                          <tagNode name="count">
+                            <properties>
+                              <help>Event count (1-500)</help>
+                              <constraint>
+                                <validator name="numeric" argument="--range 1-500"/>
+                              </constraint>
+                            </properties>
+                            <command>${vyos_op_scripts_dir}/show_wwan.py show_event_log --interface="$4" --limit="$7"</command>
+                          </tagNode>
+                        </children>
+                      </node>
+                      <node name="severity">
+                        <properties>
+                          <help>Filter by event severity</help>
+                        </properties>
+                        <children>
+                          <leafNode name="info">
+                            <properties><help>Informational events</help></properties>
+                            <command>${vyos_op_scripts_dir}/show_wwan.py show_event_log --interface="$4" --severity="info"</command>
+                          </leafNode>
+                          <leafNode name="warning">
+                            <properties><help>Warning events</help></properties>
+                            <command>${vyos_op_scripts_dir}/show_wwan.py show_event_log --interface="$4" --severity="warning"</command>
+                          </leafNode>
+                          <leafNode name="critical">
+                            <properties><help>Critical events</help></properties>
+                            <command>${vyos_op_scripts_dir}/show_wwan.py show_event_log --interface="$4" --severity="critical"</command>
+                          </leafNode>
+                        </children>
+                      </node>
+                      <node name="category">
+                        <properties>
+                          <help>Filter by event category</help>
+                        </properties>
+                        <children>
+                          <leafNode name="connectivity">
+                            <properties><help>Connectivity events</help></properties>
+                            <command>${vyos_op_scripts_dir}/show_wwan.py show_event_log --interface="$4" --category="connectivity"</command>
+                          </leafNode>
+                          <leafNode name="sim">
+                            <properties><help>SIM events</help></properties>
+                            <command>${vyos_op_scripts_dir}/show_wwan.py show_event_log --interface="$4" --category="sim"</command>
+                          </leafNode>
+                          <leafNode name="usage">
+                            <properties><help>Usage events</help></properties>
+                            <command>${vyos_op_scripts_dir}/show_wwan.py show_event_log --interface="$4" --category="usage"</command>
+                          </leafNode>
+                        </children>
+                      </node>
+                    </children>
+                  </node>
                   <node name="sms">
                     <properties>
                       <help>Show SMS messages</help>
@@ -175,7 +261,6 @@
                       </virtualTagNode>
                     </children>
                   </node>
-                  #include <include/show-interface-type-event-log.xml.i>
                 </children>
               </virtualTagNode>
             </children>

@@ -7,7 +7,7 @@ IGOS-WWAN-MIB DEFINITIONS ::= BEGIN
 --
 -- Models a multi-slot, dual-SIM cellular modem with failover/failback,
 -- per-SIM data limits, signal quality, registration state, bearer state,
--- IPv6 prefix delegation status, and IP-passthrough status.
+-- and IPv6 prefix delegation status.
 --
 -- Field names and semantics deliberately track CISCO-WAN-3G-MIB and
 -- CISCO-WAN-CELL-EXT-MIB so that existing NMS templates (LibreNMS,
@@ -48,8 +48,7 @@ IGOS-WWAN-MIB DEFINITIONS ::= BEGIN
             "MIB for the VyOS enhanced WWAN/cellular interface
              management subsystem.  Covers multi-slot SIM
              management, failover/failback, signal quality,
-             registration, bearer, data usage, IPv6 PD and
-             IP-passthrough."
+             registration, bearer, data usage, and IPv6 PD."
         REVISION     "202606300000Z"
         DESCRIPTION
             "Add igosWwanRadioRscp (UMTS/HSPA received signal code
@@ -75,7 +74,8 @@ IGOS-WWAN-MIB DEFINITIONS ::= BEGIN
     -- counters live in igosWwanSimTable (columns 21-26), so no separate
     -- data-usage subtree is needed.
     igosWwanPd             OBJECT IDENTIFIER ::= { igosWwanObjects 7 }
-    igosWwanPassthrough    OBJECT IDENTIFIER ::= { igosWwanObjects 8 }
+    -- { igosWwanObjects 8 } (igosWwanPassthrough) removed — IP-passthrough
+    -- is not exposed via SNMP.
 
     -- ----------------------------------------------------------------
     -- Textual conventions
@@ -361,20 +361,14 @@ IGOS-WWAN-MIB DEFINITIONS ::= BEGIN
         igosWwanSimIsActive             TruthValue,
         igosWwanSimIccid                DisplayString,
         igosWwanSimImsi                 DisplayString,
-        igosWwanSimMsisdn               DisplayString,
         igosWwanSimOperatorCode         DisplayString,   -- PLMN MCCMNC
         igosWwanSimOperatorName         DisplayString,
         igosWwanSimRoaming              TruthValue,
         igosWwanSimRoamingAllowed       TruthValue,
         igosWwanSimApn                  DisplayString,
-        igosWwanSimApnSource            INTEGER,
         igosWwanSimAuthType             INTEGER,
         igosWwanSimPdpType              INTEGER,
         igosWwanSimRegState             IgosWwanRegState,
-        igosWwanSimConnectAttempts      Counter64,
-        igosWwanSimConnectFailures      Counter64,
-        igosWwanSimLastConnectTime      DateAndTime,
-        igosWwanSimLastDisconnectTime   DateAndTime,
         igosWwanSimLastDisconnectCause  DisplayString,
         igosWwanSimDataLimitBytes       Counter64,       -- 0 = unlimited
         igosWwanSimDataLimitAction      IgosWwanDataLimitAction,
@@ -420,12 +414,8 @@ IGOS-WWAN-MIB DEFINITIONS ::= BEGIN
         DESCRIPTION  "IMSI of the SIM."
         ::= { igosWwanSimEntry 5 }
 
-    igosWwanSimMsisdn OBJECT-TYPE
-        SYNTAX       DisplayString (SIZE (0..32))
-        MAX-ACCESS   read-only
-        STATUS       current
-        DESCRIPTION  "MSISDN if known to the modem."
-        ::= { igosWwanSimEntry 6 }
+    -- { igosWwanSimEntry 6 } (igosWwanSimMsisdn) removed — per-slot MSISDN not
+    -- tracked; column number retained as a gap (MIB unpublished).
 
     igosWwanSimOperatorCode OBJECT-TYPE
         SYNTAX       DisplayString (SIZE (0..8))
@@ -462,18 +452,8 @@ IGOS-WWAN-MIB DEFINITIONS ::= BEGIN
         DESCRIPTION  "APN currently in use for this slot."
         ::= { igosWwanSimEntry 11 }
 
-    igosWwanSimApnSource OBJECT-TYPE
-        SYNTAX       INTEGER {
-                         configured(1),
-                         lastConnected(2),
-                         androidDb(3),
-                         networkAssigned(4),
-                         unknown(5)
-                     }
-        MAX-ACCESS   read-only
-        STATUS       current
-        DESCRIPTION  "How the active APN was selected."
-        ::= { igosWwanSimEntry 12 }
+    -- { igosWwanSimEntry 12 } (igosWwanSimApnSource) removed — APN source not
+    -- tracked; column number retained as a gap.
 
     igosWwanSimAuthType OBJECT-TYPE
         SYNTAX       INTEGER { none(1), pap(2), chap(3), both(4) }
@@ -496,33 +476,10 @@ IGOS-WWAN-MIB DEFINITIONS ::= BEGIN
         DESCRIPTION  "3GPP registration state for this slot."
         ::= { igosWwanSimEntry 15 }
 
-    igosWwanSimConnectAttempts OBJECT-TYPE
-        SYNTAX       Counter64
-        MAX-ACCESS   read-only
-        STATUS       current
-        DESCRIPTION  "Cumulative connect attempts on this slot."
-        ::= { igosWwanSimEntry 16 }
-
-    igosWwanSimConnectFailures OBJECT-TYPE
-        SYNTAX       Counter64
-        MAX-ACCESS   read-only
-        STATUS       current
-        DESCRIPTION  "Cumulative connect failures on this slot."
-        ::= { igosWwanSimEntry 17 }
-
-    igosWwanSimLastConnectTime OBJECT-TYPE
-        SYNTAX       DateAndTime
-        MAX-ACCESS   read-only
-        STATUS       current
-        DESCRIPTION  "Last successful connect on this slot."
-        ::= { igosWwanSimEntry 18 }
-
-    igosWwanSimLastDisconnectTime OBJECT-TYPE
-        SYNTAX       DateAndTime
-        MAX-ACCESS   read-only
-        STATUS       current
-        DESCRIPTION  "Last bearer disconnect on this slot."
-        ::= { igosWwanSimEntry 19 }
+    -- { igosWwanSimEntry 16..19 } (igosWwanSimConnectAttempts,
+    -- igosWwanSimConnectFailures, igosWwanSimLastConnectTime,
+    -- igosWwanSimLastDisconnectTime) removed — per-slot connect
+    -- counters/timestamps not tracked; column numbers retained as gaps.
 
     igosWwanSimLastDisconnectCause OBJECT-TYPE
         SYNTAX       DisplayString (SIZE (0..128))
@@ -884,59 +841,8 @@ IGOS-WWAN-MIB DEFINITIONS ::= BEGIN
         ::= { igosWwanPdEntry 9 }
 
     -- ================================================================
-    -- 8. IP-Passthrough status
+    -- 8. IP-Passthrough status — removed (feature not exposed via SNMP)
     -- ================================================================
-    igosWwanPassthroughTable OBJECT-TYPE
-        SYNTAX       SEQUENCE OF IgosWwanPassthroughEntry
-        MAX-ACCESS   not-accessible
-        STATUS       current
-        DESCRIPTION  "IP-passthrough status per interface."
-        ::= { igosWwanPassthrough 1 }
-
-    igosWwanPassthroughEntry OBJECT-TYPE
-        SYNTAX       IgosWwanPassthroughEntry
-        MAX-ACCESS   not-accessible
-        STATUS       current
-        DESCRIPTION  ""
-        INDEX        { ifIndex }
-        ::= { igosWwanPassthroughTable 1 }
-
-    IgosWwanPassthroughEntry ::= SEQUENCE {
-        igosWwanPtEnabled               TruthValue,
-        igosWwanPtLanIfName             DisplayString,
-        igosWwanPtClientMac             MacAddress,
-        igosWwanPtClientIpv4            InetAddress,
-        igosWwanPtClientIpv6            InetAddress,
-        igosWwanPtLeaseSeconds          Integer32,
-        igosWwanPtLastIpChangeTime      DateAndTime,
-        igosWwanPtForcerenewSupported   TruthValue
-    }
-
-    igosWwanPtEnabled OBJECT-TYPE SYNTAX TruthValue
-        MAX-ACCESS read-only STATUS current
-        DESCRIPTION "" ::= { igosWwanPassthroughEntry 1 }
-    igosWwanPtLanIfName OBJECT-TYPE SYNTAX DisplayString (SIZE (0..32))
-        MAX-ACCESS read-only STATUS current
-        DESCRIPTION "" ::= { igosWwanPassthroughEntry 2 }
-    igosWwanPtClientMac OBJECT-TYPE SYNTAX MacAddress
-        MAX-ACCESS read-only STATUS current
-        DESCRIPTION "" ::= { igosWwanPassthroughEntry 3 }
-    igosWwanPtClientIpv4 OBJECT-TYPE SYNTAX InetAddress
-        MAX-ACCESS read-only STATUS current
-        DESCRIPTION "" ::= { igosWwanPassthroughEntry 4 }
-    igosWwanPtClientIpv6 OBJECT-TYPE SYNTAX InetAddress
-        MAX-ACCESS read-only STATUS current
-        DESCRIPTION "" ::= { igosWwanPassthroughEntry 5 }
-    igosWwanPtLeaseSeconds OBJECT-TYPE SYNTAX Integer32 UNITS "seconds"
-        MAX-ACCESS read-only STATUS current
-        DESCRIPTION "" ::= { igosWwanPassthroughEntry 6 }
-    igosWwanPtLastIpChangeTime OBJECT-TYPE SYNTAX DateAndTime
-        MAX-ACCESS read-only STATUS current
-        DESCRIPTION "" ::= { igosWwanPassthroughEntry 7 }
-    igosWwanPtForcerenewSupported OBJECT-TYPE SYNTAX TruthValue
-        MAX-ACCESS read-only STATUS current
-        DESCRIPTION "TRUE if dhcp_release2 is available for FORCERENEW."
-        ::= { igosWwanPassthroughEntry 8 }
 
     -- ================================================================
     -- Notifications
@@ -1059,12 +965,10 @@ IGOS-WWAN-MIB DEFINITIONS ::= BEGIN
     igosWwanSimGroup OBJECT-GROUP
         OBJECTS {
             igosWwanSimState, igosWwanSimIsActive, igosWwanSimIccid,
-            igosWwanSimImsi, igosWwanSimMsisdn, igosWwanSimOperatorCode,
+            igosWwanSimImsi, igosWwanSimOperatorCode,
             igosWwanSimOperatorName, igosWwanSimRoaming,
-            igosWwanSimRoamingAllowed, igosWwanSimApn, igosWwanSimApnSource,
+            igosWwanSimRoamingAllowed, igosWwanSimApn,
             igosWwanSimAuthType, igosWwanSimPdpType, igosWwanSimRegState,
-            igosWwanSimConnectAttempts, igosWwanSimConnectFailures,
-            igosWwanSimLastConnectTime, igosWwanSimLastDisconnectTime,
             igosWwanSimLastDisconnectCause, igosWwanSimDataLimitBytes,
             igosWwanSimDataLimitAction, igosWwanSimDataUsedCycleBytes,
             igosWwanSimDataUsedTotalBytes, igosWwanSimBillingDate,
@@ -1119,16 +1023,6 @@ IGOS-WWAN-MIB DEFINITIONS ::= BEGIN
         STATUS current DESCRIPTION "IPv6 PD state."
         ::= { igosWwanGroups 6 }
 
-    igosWwanPassthroughGroup OBJECT-GROUP
-        OBJECTS {
-            igosWwanPtEnabled, igosWwanPtLanIfName, igosWwanPtClientMac,
-            igosWwanPtClientIpv4, igosWwanPtClientIpv6,
-            igosWwanPtLeaseSeconds, igosWwanPtLastIpChangeTime,
-            igosWwanPtForcerenewSupported
-        }
-        STATUS current DESCRIPTION "IP-passthrough state."
-        ::= { igosWwanGroups 7 }
-
     igosWwanNotifGroup NOTIFICATION-GROUP
         NOTIFICATIONS {
             igosWwanFsmStateChange, igosWwanFailoverEvent,
@@ -1154,8 +1048,6 @@ IGOS-WWAN-MIB DEFINITIONS ::= BEGIN
             }
             GROUP igosWwanPdGroup
                 DESCRIPTION "Required if IPv6 PD is supported."
-            GROUP igosWwanPassthroughGroup
-                DESCRIPTION "Required if IP-passthrough is supported."
         ::= { igosWwanCompliances 1 }
 
 END

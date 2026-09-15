@@ -60,9 +60,6 @@ def send_command_to_iolan(action, name):
     finally:
         sock.close()
 
-def print_global_change_warning():
-    Warning('Global configuration changes have been made. To activate the new settings, run the "restart serial ..." command to restart the serial port!')
-
 def find_enabled_consoles():
     consoles_file = Path('/proc/consoles')
     consoles = []

@@ -1,7 +1,7 @@
 <!-- include start from serial/service/utils/multisession.xml.i -->
-<leafNode name="multisession-limit">
+<leafNode name="multi-session-limit">
   <properties>
-    <help>Multisession limit [ssh and telnet only]</help>
+    <help>Multi-session limit</help>
     <valueHelp>
       <format>u32:0-16</format>
       <description>Integer</description>

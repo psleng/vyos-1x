@@ -316,7 +316,7 @@ def _sync_wwan_snmp_trap_env(snmp):
         return
 
     # Targets file carries v3 credentials → write 0600 and keep it on tmpfs.
-    payload = json.dumps({'targets': [{'argv': argv} for argv in targets]})
+    payload = json.dumps({'targets': targets})
     _write_private(WWAN_TRAP_TARGETS_FILE, payload)
 
     # Env file: the unit's ConditionPathExists trigger + pointers for the
@@ -331,7 +331,7 @@ def _sync_wwan_snmp_trap_env(snmp):
 
 
 def _wwan_trap_argv_targets(snmp):
-    """Build a list of snmptrap(1) argv prefixes from the SNMP config.
+    """Build a list of snmptrap(1) target descriptors from the SNMP config.
 
     Each prefix ends with the ``proto:host:port`` destination; the WWAN trap
     emitter appends the uptime, notification OID and varbinds.  v1/v2c targets
@@ -349,7 +349,7 @@ def _wwan_trap_argv_targets(snmp):
         community = cfg.get('community', 'public')
         port = cfg.get('port', '162')
         dest = f'{proto}:{_bracketize(addr)}:{port}'
-        targets.append(['-v', '2c', '-c', community, dest])
+        targets.append({'argv': ['-v', '2c', '-c', community, dest], 'conf': ''})
 
     # ── SNMPv3 trap-targets ─────────────────────────────────────────────
     v3 = snmp.get('v3') or {}
@@ -360,6 +360,7 @@ def _wwan_trap_argv_targets(snmp):
         proto = f'{base}6' if _is_ipv6(addr) else base
         port = cfg.get('port', '162')
         argv = ['-v', '3']
+        conf_lines = []
         if cfg.get('type') == 'inform':
             argv += ['-Ci']
         if engineid:
@@ -371,14 +372,15 @@ def _wwan_trap_argv_targets(snmp):
         if auth.get('plaintext_password') or auth.get('encrypted_password'):
             argv += ['-a', (auth.get('type') or 'md5').upper()]
             if auth.get('plaintext_password'):
-                argv += ['-A', auth['plaintext_password']]
+                # Keep the passphrase off argv — emit it as a config directive.
+                conf_lines.append(f"defAuthPassphrase {auth['plaintext_password']}")
             else:
                 argv += ['-3m', auth['encrypted_password']]
             privacy = cfg.get('privacy') or {}
             if privacy.get('plaintext_password') or privacy.get('encrypted_password'):
                 argv += ['-x', (privacy.get('type') or 'des').upper()]
                 if privacy.get('plaintext_password'):
-                    argv += ['-X', privacy['plaintext_password']]
+                    conf_lines.append(f"defPrivPassphrase {privacy['plaintext_password']}")
                 else:
                     argv += ['-3M', privacy['encrypted_password']]
                 argv += ['-l', 'authPriv']
@@ -387,7 +389,8 @@ def _wwan_trap_argv_targets(snmp):
         else:
             argv += ['-l', 'noAuthNoPriv']
         argv += [f'{proto}:{_bracketize(addr)}:{port}']
-        targets.append(argv)
+        conf = ('\n'.join(conf_lines) + '\n') if conf_lines else ''
+        targets.append({'argv': argv, 'conf': conf})
 
     return targets
 

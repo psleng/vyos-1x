@@ -26,6 +26,7 @@ from shutil import rmtree
 from shutil import copytree
 from shutil import disk_usage
 from glob import glob
+from tempfile import TemporaryDirectory
 from sys import exit
 from os import environ
 from os import readlink
@@ -35,6 +36,7 @@ from os import sync
 
 # PSL - access to additional routines
 from shutil import move
+from platform import machine
 # PSL - access to additional routines
 
 from json import loads
@@ -53,6 +55,7 @@ from vyos.defaults import base_dir
 from vyos.defaults import directories
 from vyos.defaults import activation_hint
 from vyos.flavor import get_image_serial_console
+from vyos.flavor import get_image_dm_verity
 from vyos.remote import download
 from vyos.system import disk
 from vyos.system import grub
@@ -147,6 +150,7 @@ CONST_RESERVED_SPACE: int = (2 + 1 + 256) * 1024**2
 
 # define directories and paths
 DIR_CONFIG: str = directories['config']
+DIR_TPM_REEFS: str = '/var/lib/tee'
 DIR_DATA: str = directories['data']
 DIR_INSTALLATION: str = '/mnt/installation'
 DIR_ROOTFS_SRC: str = f'{DIR_INSTALLATION}/root_src'
@@ -155,6 +159,13 @@ DIR_ISO_MOUNT: str = f'{DIR_INSTALLATION}/iso_src'
 DIR_DST_ROOT: str = f'{DIR_INSTALLATION}/disk_dst'
 DIR_KERNEL_SRC: str = '/boot'
 FILE_ROOTFS_SRC: str = '/usr/lib/live/mount/medium/live/filesystem.squashfs'
+# dm-verity: sibling of FILE_ROOTFS_SRC on the live medium; carries the root
+# hash baked by 28-igos-dm-verity.binary (the squashfs-internal initrd does not).
+FILE_INITRD_SRC: str = '/usr/lib/live/mount/medium/live/initrd.img'
+# secure-boot: detached signature of the kernel on the live medium (sibling of
+# the baked initrd), written by 29-igos-sign-boot.binary. Present only on signed
+# builds; the initrd signature is FILE_INITRD_SRC + '.sig'.
+FILE_KERNEL_SIG_SRC: str = '/usr/lib/live/mount/medium/live/vmlinuz.sig'
 ISO_DOWNLOAD_PATH: str = ''
 
 external_download_script: str = f'{base_dir}/simple-download.py'
@@ -163,9 +174,12 @@ external_latest_image_url_script: str = f'{base_dir}/latest-image-url.py'
 (flavor_sercon_type, flavor_sercon_num, flavor_sercon_speed) = get_image_serial_console()
 
 # default boot variables
-# PSL - timeout = 0 in combination with timeout_style-hidden to suppress grub menu/timeout
+# PSL - TEMP (dm-verity bring-up): show the GRUB menu for 10s so an older image
+# can be selected if a verity image fails to boot. Restore timeout '0' and drop
+# timeout_style (or set it 'hidden') to suppress the menu again after testing.
 DEFAULT_BOOT_VARS: dict[str, str] = {
-    'timeout': '0',
+    'timeout': '10',
+    'timeout_style': 'menu',
     'console_type': 'tty',
     'console_num': flavor_sercon_num,
     'console_speed': flavor_sercon_speed,
@@ -1077,13 +1091,9 @@ def install_image() -> None:
                  symlinks=True)
 
         # PSL - from previous copytree() the dtb and grub directories were copied to the
-        #       installation directory, so we can remove them so the installation looks
-        #       EXACTLY like an iso installation using "add system image <isoname>"
-        tmppath = Path(f'{DIR_DST_ROOT}/boot/{image_name}/dtb')
-        if tmppath.exists():
-            print(f"Pruning unused {image_name}/dtb directory")
-            rmtree(tmppath, ignore_errors=True)
-
+        #       installation directory, so we can leave the release specific DTBs but
+        #       remove the grub directory so the installation looks EXACTLY like
+        #       an iso installation using "add system image <iso_name>"
         tmppath = Path(f'{DIR_DST_ROOT}/boot/{image_name}/grub')
         if tmppath.exists():
             print(f"Pruning unused {image_name}/grub directory")
@@ -1092,12 +1102,33 @@ def install_image() -> None:
         copy(FILE_ROOTFS_SRC,
              f'{DIR_DST_ROOT}/boot/{image_name}/{image_name}.squashfs')
 
-        # PSL - START copy over all dtb files for arm64 processors
-        if Path(f"{DIR_KERNEL_SRC}/dtb/ti").exists():
-            print('Copying DTB files')
-            copytree(f"{DIR_KERNEL_SRC}/dtb/ti",
-                     f"{DIR_DST_ROOT}/boot/dtb/ti",
-                     dirs_exist_ok=True)
+        # dm-verity: re-source the version initrd from the live medium (baked
+        # with the root hash by 28-igos-dm-verity.binary); the /boot copytree
+        # above carries only the squashfs-internal initrd. No-op for non-verity.
+        if get_image_dm_verity() and Path(FILE_INITRD_SRC).exists():
+            print('Installing dm-verity baked initrd for image')
+            copy(FILE_INITRD_SRC,
+                 f'{DIR_DST_ROOT}/boot/{image_name}/initrd.img')
+
+            # secure-boot: carry the detached signatures for kernel + initrd when
+            # the image was signed by 29-igos-sign-boot.binary. Best-effort --
+            # unsigned verity builds simply have no .sig files to copy.
+            for _sig_src, _sig_dst in (
+                (f'{FILE_INITRD_SRC}.sig',
+                 f'{DIR_DST_ROOT}/boot/{image_name}/initrd.img.sig'),
+                (FILE_KERNEL_SIG_SRC,
+                 f'{DIR_DST_ROOT}/boot/{image_name}/vmlinuz.sig'),
+            ):
+                if Path(_sig_src).exists():
+                    print(f'Installing boot signature {Path(_sig_dst).name}')
+                    copy(_sig_src, _sig_dst)
+
+        # PSL - no longer copy the whole DTB tree (any vendor subdir: ti/, perle/, ...) to global /boot/dtb
+        # if Path(f"{DIR_KERNEL_SRC}/dtb").exists():
+        #     print('Copying DTB files')
+        #     copytree(
+        #         f"{DIR_KERNEL_SRC}/dtb", f"{DIR_DST_ROOT}/boot/dtb", dirs_exist_ok=True
+        #    )
 
         # copy saved config data and SSH keys
         # owner restored on copy of config data by chmod_2775, above
@@ -1141,10 +1172,10 @@ def install_image() -> None:
             dirs_exist_ok=True,
             symlinks=True)
 
-        tmppath = Path(f'{DIR_DST_ROOT}/boot/{default_image_name}/dtb')
-        if tmppath.exists():
-            print(f"Pruning unused {default_image_name}/dtb directory")
-            rmtree(tmppath, ignore_errors=True)
+        # tmppath = Path(f'{DIR_DST_ROOT}/boot/{default_image_name}/dtb')
+        # if tmppath.exists():
+        #     print(f"Pruning unused {default_image_name}/dtb directory")
+        #     rmtree(tmppath, ignore_errors=True)
 
         tmppath = Path(f'{DIR_DST_ROOT}/boot/{default_image_name}/grub')
         if tmppath.exists():
@@ -1153,6 +1184,24 @@ def install_image() -> None:
 
         copy(FILE_ROOTFS_SRC,
             f'{DIR_DST_ROOT}/boot/{default_image_name}/default-firmware.squashfs')
+
+        # dm-verity: baked initrd for the factory default-firmware entry too.
+        if get_image_dm_verity() and Path(FILE_INITRD_SRC).exists():
+            print('Installing dm-verity baked initrd for default-firmware')
+            copy(FILE_INITRD_SRC,
+                 f'{DIR_DST_ROOT}/boot/{default_image_name}/initrd.img')
+
+            # secure-boot: carry detached signatures for the default-firmware
+            # kernel + initrd too (best-effort; unsigned builds have no .sig).
+            for _sig_src, _sig_dst in (
+                (f'{FILE_INITRD_SRC}.sig',
+                 f'{DIR_DST_ROOT}/boot/{default_image_name}/initrd.img.sig'),
+                (FILE_KERNEL_SIG_SRC,
+                 f'{DIR_DST_ROOT}/boot/{default_image_name}/vmlinuz.sig'),
+            ):
+                if Path(_sig_src).exists():
+                    print(f'Installing boot signature {Path(_sig_dst).name}')
+                    copy(_sig_src, _sig_dst)
 
         grub.version_add(default_image_name, DIR_DST_ROOT)
         grub.set_factory_default(default_image_name, DIR_DST_ROOT)
@@ -1260,6 +1309,42 @@ def migrate_known_hosts(target_dir: str):
         _mkdir_and_copy_file(known_hosts_file, target_known_hosts)
 
 
+def _image_dm_verity(squashfs_file: str) -> bool | None:
+    """Read the dm-verity flavor flag from an image's own squashfs.
+
+    The GRUB entry for a newly added image must reflect THAT image's dm-verity
+    setting, not the running system's, so upgrades and downgrades between
+    verity and non-verity images seal (or unseal) correctly. dm-verity is
+    integrity protection, not encryption, so the squashfs mounts read-only and
+    stays readable offline even for sealed images.
+
+    Returns None if the flag cannot be determined, letting the caller fall back
+    to the running image's flavor.
+    """
+    if not Path(squashfs_file).exists():
+        print(f'WARNING: dm-verity: image squashfs {squashfs_file} not found; '
+              'cannot read its verity flag (grub entry falls back to the '
+              'running image flavor)')
+        return None
+    try:
+        with TemporaryDirectory() as squashfs_mounted:
+            if not disk.partition_mount(squashfs_file, squashfs_mounted, 'squashfs'):
+                print(f'WARNING: dm-verity: could not mount {squashfs_file} to '
+                      'read its verity flag (grub entry falls back to the '
+                      'running image flavor)')
+                return None
+            try:
+                flavor_json = f'{squashfs_mounted}/usr/share/vyos/flavor.json'
+                return get_image_dm_verity(fname=flavor_json)
+            finally:
+                disk.partition_umount(squashfs_file)
+    except Exception as e:
+        print(f'WARNING: dm-verity: error reading verity flag from '
+              f'{squashfs_file}: {e} (grub entry falls back to the running '
+              'image flavor)')
+        return None
+
+
 @compat.grub_cfg_update
 def add_image(image_path: str, vrf: str = None, username: str = '',
               password: str = '', no_prompt: bool = False, force: bool = False) -> None:
@@ -1345,6 +1430,7 @@ def add_image(image_path: str, vrf: str = None, username: str = '',
         # a config dir. It is the deepest one, so the command will
         # create all the rest in a single step
         target_config_dir: str = f'{root_dir}/boot/{image_name}/rw{DIR_CONFIG}/'
+        target_tpm_dir: str = f'{root_dir}/boot/{image_name}/rw{DIR_TPM_REEFS}/'
         # copy config
         if no_prompt or migrate_config():
             if Path('/dev/mapper/vyos_config').exists():
@@ -1379,6 +1465,14 @@ def add_image(image_path: str, vrf: str = None, username: str = '',
                 # This can be used for a future automatic rollback into the old image.
                 tmp = {'previous_image' : image.get_running_image()}
                 write_file(f'{target_config_dir}/first_boot', dumps(tmp))
+
+                print('Migrating TPM REEFS storage...')
+                # copytree preserves perms but not ownership:
+                Path(target_tpm_dir).mkdir(parents=True)
+                chown(target_tpm_dir, group='root')
+                # chmod_2775(target_tpm_dir)
+                copytree(f'{DIR_TPM_REEFS}/', target_tpm_dir, symlinks=True,
+                        copy_function=copy_preserve_owner, dirs_exist_ok=True)
         else:
             Path(target_config_dir).mkdir(parents=True)
             chown(target_config_dir, group='vyattacfg')
@@ -1408,18 +1502,26 @@ def add_image(image_path: str, vrf: str = None, username: str = '',
         move(f'{root_dir}/boot/{image_name}/filesystem.squashfs',
              f'{root_dir}/boot/{image_name}/{image_name}.squashfs')
 
-        # PSL - START copy over all dtb files for arm64 processors
-        if Path(f"{DIR_ISO_MOUNT}/boot/dtb/ti").exists():
-            print('Copying DTB files')
-            copytree(f"{DIR_ISO_MOUNT}/boot/dtb/ti",
-                     f"{root_dir}/boot/dtb/ti",
-                     dirs_exist_ok=True)
+        # PSL - for arm64 - copy the whole DTB tree (any vendor subdir: ti/, perle/, ...) to firmware directory
+        if machine() == 'aarch64':
+            if Path(f"{DIR_ISO_MOUNT}/boot/dtb").exists():
+                print('Copying DTB files')
+                # copytree(f"{DIR_ISO_MOUNT}/boot/dtb", f"{root_dir}/boot/dtb", dirs_exist_ok=True)
+                copytree(f"{DIR_ISO_MOUNT}/boot/dtb", f"{root_dir}/boot/{image_name}/dtb",
+                         dirs_exist_ok=True, symlinks=True)
 
         # unmount an ISO and cleanup
         cleanup([str(iso_path)])
 
         # add information about version
-        grub.version_add(image_name, root_dir)
+        #
+        # dm-verity: seal/unseal the GRUB entry to match the IMAGE BEING ADDED,
+        # not the running one, by reading dm_verity from the new image's own
+        # flavor.json inside its just-copied squashfs. Falls back to the running
+        # image's flavor (version_add default) if it cannot be read.
+        target_dm_verity = _image_dm_verity(
+            f'{root_dir}/boot/{image_name}/{image_name}.squashfs')
+        grub.version_add(image_name, root_dir, dm_verity=target_dm_verity)
         if set_as_default:
             # PSL - grub.set_default(image_name, root_dir)
             grub.set_current_default(image_name, root_dir)

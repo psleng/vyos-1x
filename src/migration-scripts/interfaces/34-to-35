@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+#
+# Copyright VyOS maintainers and contributors <maintainers@vyos.io>
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License version 2 or later as
+# published by the Free Software Foundation.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+# WWAN ip-passthrough management address keys were renamed to avoid
+# CLI keyword collisions that force host-only prefix validation.
+
+from vyos.configtree import ConfigTree
+
+base = ['interfaces', 'wwan']
+
+
+def _get_leaf(config: ConfigTree, path: list[str]) -> str | None:
+    if not config.exists(path):
+        return None
+    value = config.return_value(path)
+    if value is None:
+        return None
+    return str(value)
+
+
+def migrate(config: ConfigTree) -> None:
+    if not config.exists(base):
+        return
+
+    for ifname in config.list_nodes(base):
+        ipt = base + [ifname, 'ip-passthrough']
+        if not config.exists(ipt):
+            continue
+
+        old_v4_path = ipt + ['management-address']
+        old_v6_path = ipt + ['management-address-ipv6']
+        old_v6_nested_path = ipt + ['management-address', 'ipv6']
+
+        new_v4_path = ipt + ['passthrough-management-address']
+        new_v6_path = ipt + ['passthrough-management-address-ipv6']
+
+        old_v4 = _get_leaf(config, old_v4_path)
+        old_v6 = _get_leaf(config, old_v6_path)
+        if old_v6 is None:
+            old_v6 = _get_leaf(config, old_v6_nested_path)
+
+        if old_v4 and not config.exists(new_v4_path):
+            config.set(new_v4_path, value=old_v4)
+        if old_v6 and not config.exists(new_v6_path):
+            config.set(new_v6_path, value=old_v6)
+
+        if config.exists(old_v6_path):
+            config.delete(old_v6_path)
+        if config.exists(old_v6_nested_path):
+            config.delete(old_v6_nested_path)
+        if config.exists(old_v4_path):
+            config.delete(old_v4_path)

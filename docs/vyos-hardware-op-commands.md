@@ -31,6 +31,9 @@ Show state for a single GPIO pin.
 |---|---|
 | `<pin-name>` | Declared GPIO pin name (tab-completion available) |
 
+### `test hardware show rtc`
+Show the RV-3028 real-time clock's backup switchover mode.
+
 ---
 
 ## Serial transceiver control
@@ -99,6 +102,28 @@ Pulse the named pin (default 200 ms, asserted = 1).
 
 ---
 
+## RTC backup switchover mode
+
+The RV-3028 backup switchover mode (BSM) controls whether the RTC keeps
+time from its backup cell when main power is removed. It is a **one-time,
+non-volatile** setting stored in the RTC's own EEPROM — it survives power
+loss and eMMC reflashes — so it is normally written **once at
+manufacturing**, not at boot. This command exists only as a field/repair
+escape hatch (e.g. after an RTC is replaced).
+
+### `test hardware rtc backup-mode <mode>`
+Set the RV-3028 backup switchover mode.
+
+| Parameter | Values |
+|---|---|
+| `<mode>` | `level-switching` (LSM, production default), `direct-switching` (DSM), `disabled` |
+
+On hardware without an RV-3028 (EVM, x86, …) the command is a safe no-op:
+it detects the chip by driver name and reports that no RV-3028 is present
+rather than touching any other RTC.
+
+---
+
 ## Examples
 
 ```sh
@@ -106,10 +131,10 @@ Pulse the named pin (default 200 ms, asserted = 1).
 test hardware show serial
 test hardware show modem
 test hardware show pin
-test hardware show pin name modem0_reset
+test hardware show pin name MODEM0_UNCOND_RESET
 
-# Switch serial port 0 to RS-485 half-duplex with termination
-test hardware serial port0 protocol rs485h termination on
+# Switch serial port UARTC2 to RS-485 half-duplex with termination
+test hardware serial UARTC2 protocol rs485h termination on
 
 # Same thing, addressed by tty path instead of port name
 test hardware serial /dev/ttyS2 protocol rs485h termination on
@@ -120,8 +145,12 @@ test hardware modem modem0 sim 1
 test hardware modem modem0 reset
 
 # Raw GPIO poke
-test hardware pin user_led set 1
-test hardware pin modem0_reset pulse
+test hardware pin SYS_STAT_GREEN set 1
+test hardware pin MODEM0_UNCOND_RESET pulse
+
+# RTC backup mode (repair only; normally set at manufacturing)
+test hardware show rtc
+test hardware rtc backup-mode level-switching
 ```
 
 ---

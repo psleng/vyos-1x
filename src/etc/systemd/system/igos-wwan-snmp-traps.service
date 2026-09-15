@@ -6,6 +6,9 @@ Wants=network-online.target
 BindsTo=igos-wwan-manager.service
 # Optional service - does not block boot if missing trap target / dest unset.
 ConditionPathExists=/etc/default/igos-wwan-snmp-traps
+# Restart rate-limit — these are [Unit]-section keys (silently ignored under [Service]).
+StartLimitIntervalSec=300
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -13,8 +16,6 @@ EnvironmentFile=-/etc/default/igos-wwan-snmp-traps
 ExecStart=/usr/bin/igos-wwan-snmp-traps
 Restart=on-failure
 RestartSec=10
-StartLimitBurst=3
-StartLimitIntervalSec=300
 User=root
 Group=vyattacfg
 

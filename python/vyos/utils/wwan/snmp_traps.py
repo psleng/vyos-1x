@@ -53,7 +53,9 @@ import logging
 import os
 import shutil
 import signal
+import socket
 import sys
+import tempfile
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -199,7 +201,7 @@ def _normalize_alert(alert: Dict[str, Any]) -> Dict[str, Any]:
     flat['_ipv4'] = str(flat.get('ipv4_address') or flat.get('ipv4') or '')
     flat['_ipv6'] = str(flat.get('ipv6_address') or flat.get('ipv6') or '')
     flat['_disconnect_cause'] = str(flat.get('reason') or flat.get('disconnect_cause') or '')
-    flat['_pct_used'] = _int(flat.get('percent_used') or flat.get('pct'), 0)
+    flat['_pct_used'] = max(0, min(200, _int(flat.get('percent_used') or flat.get('pct'), 0)))
     flat['_limit_bytes'] = _int(flat.get('limit_bytes') or flat.get('size'), 0)
     flat['_used_bytes']  = _int(flat.get('used_bytes') or flat.get('cumulative_bytes'), 0)
     flat['_limit_action_code'] = _enum(flat.get('action'), DATA_LIMIT_ACTION_MAP, 0)
@@ -209,6 +211,7 @@ def _normalize_alert(alert: Dict[str, Any]) -> Dict[str, Any]:
 def _build_trap_tail(
     code: str,
     alert: Dict[str, Any],
+    flat: Optional[Dict[str, Any]] = None,
 ) -> Optional[List[str]]:
     """Build the version-independent tail of an snmptrap invocation.
 
@@ -227,7 +230,8 @@ def _build_trap_tail(
     uptime_ticks = _int(alert.get('uptime_seconds'), 0) * 100
 
     tail: List[str] = [str(uptime_ticks), notif_oid]
-    flat = _normalize_alert(alert)
+    if flat is None:
+        flat = _normalize_alert(alert)
 
     # Resolve ifIndex from the alert's interface.  The AlertBus payload carries
     # ``interface_number`` (an integer N for wwanN); map it to the kernel
@@ -235,7 +239,6 @@ def _build_trap_tail(
     # its own distinct index — and so it matches the SNMP agent, which builds
     # its table ifIndex the same way (if_nametoindex on the discovered name).
     # Fall back to an explicit name field if one is ever present.
-    import socket as _socket
     if_index = 0
     iface_num = flat.get('interface_number')
     candidates = []
@@ -246,7 +249,7 @@ def _build_trap_tail(
         candidates.append(name_field)
     for cand in candidates:
         try:
-            if_index = _socket.if_nametoindex(cand)
+            if_index = socket.if_nametoindex(cand)
             break
         except OSError:
             continue
@@ -296,11 +299,11 @@ class _TargetStore:
         if legacy_dest:
             self._legacy = ['-v', '2c', '-c', legacy_community, legacy_dest]
         self._mtime: Optional[float] = None
-        self._targets: List[List[str]] = []
+        self._targets: List[Tuple[List[str], str]] = []
         self.reload()
 
-    def _fallback(self) -> List[List[str]]:
-        return [list(self._legacy)] if self._legacy else []
+    def _fallback(self) -> List[Tuple[List[str], str]]:
+        return [(list(self._legacy), '')] if self._legacy else []
 
     def reload(self) -> None:
         if not self._path:
@@ -318,17 +321,20 @@ class _TargetStore:
         try:
             with open(self._path, encoding='utf-8') as f:
                 data = json.load(f)
-            targets: List[List[str]] = []
+            targets: List[Tuple[List[str], str]] = []
             for entry in data.get('targets', []):
-                argv = entry.get('argv') if isinstance(entry, dict) else None
+                if not isinstance(entry, dict):
+                    continue
+                argv = entry.get('argv')
+                conf = entry.get('conf') or ''
                 if isinstance(argv, list) and argv:
-                    targets.append([str(x) for x in argv])
+                    targets.append(([str(x) for x in argv], str(conf)))
             self._targets = targets or self._fallback()
         except (OSError, ValueError) as exc:
             logger.warning('Failed to read targets file %s: %s', self._path, exc)
             # Keep the previously-loaded targets on a transient read error.
 
-    def get(self) -> List[List[str]]:
+    def get(self) -> List[Tuple[List[str], str]]:
         self.reload()
         return self._targets
 
@@ -351,33 +357,60 @@ def _dedupe_ok(code: str, ifname: str, slot: int, window: float) -> bool:
     return True
 
 
-async def _run_snmptrap(binary: str, prefix: List[str], tail: List[str],
-                        code: str) -> None:
-    """Run one snmptrap invocation to a single target without blocking."""
+async def _run_snmptrap(binary: str, prefix: List[str], conf: str,
+                        tail: List[str], code: str) -> None:
+    """Run one snmptrap invocation to a single target without blocking.
+
+    When *conf* is non-empty it is staged as a private 0600 ``snmp.conf`` and
+    handed to snmptrap via ``SNMPCONFPATH`` (an env var, not argv) so that v3
+    passphrases never appear in /proc/<pid>/cmdline.
+    """
     args = [binary, *prefix, *tail]
+    env = None
+    tmpdir = None
+    if conf:
+        try:
+            tmpdir = tempfile.mkdtemp(prefix='igos-snmptrap-')
+            conf_path = os.path.join(tmpdir, 'snmp.conf')
+            fd = os.open(conf_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, 'w') as f:
+                f.write(conf)
+        except OSError as exc:
+            logger.warning('failed to stage snmp.conf (%s): %s', code, exc)
+            if tmpdir:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+            tmpdir = None
+        else:
+            env = dict(os.environ)
+            env['SNMPCONFPATH'] = tmpdir
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *args,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-        )
-    except OSError as exc:
-        logger.warning('snmptrap invocation failed (%s): %s', code, exc)
-        return
-    try:
-        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=5)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
-        logger.warning('snmptrap timed out (%s)', code)
-        return
-    if proc.returncode and stderr:
-        logger.debug(
-            'snmptrap %s rc=%s: %s',
-            code,
-            proc.returncode,
-            stderr.decode(errors='replace').strip(),
-        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *args,
+                env=env,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except OSError as exc:
+            logger.warning('snmptrap invocation failed (%s): %s', code, exc)
+            return
+        try:
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=5)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            logger.warning('snmptrap timed out (%s)', code)
+            return
+        if proc.returncode and stderr:
+            logger.debug(
+                'snmptrap %s rc=%s: %s',
+                code,
+                proc.returncode,
+                stderr.decode(errors='replace').strip(),
+            )
+    finally:
+        if tmpdir:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 async def _send_trap(
@@ -407,7 +440,7 @@ async def _send_trap(
         )
         return
 
-    tail = _build_trap_tail(code, alert)
+    tail = _build_trap_tail(code, alert, flat=flat)
     if not tail:
         return
 
@@ -420,7 +453,7 @@ async def _send_trap(
     # unreachable sink must not delay delivery to the others, nor stall the
     # asyncio event loop driving the AlertBus consumer.
     await asyncio.gather(
-        *(_run_snmptrap(binary, prefix, tail, code) for prefix in targets)
+        *(_run_snmptrap(binary, argv, conf, tail, code) for (argv, conf) in targets)
     )
 
 

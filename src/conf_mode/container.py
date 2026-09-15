@@ -369,6 +369,21 @@ def generate_run_arguments(name, container_config, host_ident):
     restart = container_config['restart']
     log_driver = container_config['log_driver']
 
+    # Keep container swap effectively disabled while remaining compatible
+    # with OCI runtimes that reject '--memory-swap 0' when memory is set.
+    # With non-zero memory limit, setting memory+swap equal to memory means
+    # no swap for that container.
+    memory_arg = ''
+    memory_swap_arg = ''
+    try:
+        memory_limit_mb = int(memory)
+    except (TypeError, ValueError):
+        memory_limit_mb = 0
+
+    if memory_limit_mb > 0:
+        memory_arg = f'--memory {memory_limit_mb}m'
+        memory_swap_arg = f'--memory-swap {memory_limit_mb}m'
+
     # Add sysctl options
     sysctl_opt = ''
     if 'sysctl' in container_config and 'parameter' in container_config['sysctl']:
@@ -470,7 +485,7 @@ def generate_run_arguments(name, container_config, host_ident):
         name_server = ''
 
     container_base_cmd = f'--detach --interactive --tty --replace {capabilities} {privileged} --cpus {cpu_quota} {sysctl_opt} ' \
-                         f'--memory {memory}m --shm-size {shared_memory}m --memory-swap 0 --restart {restart} --log-driver={log_driver} ' \
+                         f'{memory_arg} --shm-size {shared_memory}m {memory_swap_arg} --restart {restart} --log-driver={log_driver} ' \
                          f'--name {name} {hostname} {device} {port} {name_server} {volume} {tmpfs} {env_opt} {label} {uid} {host_pid}'
 
     entrypoint = ''

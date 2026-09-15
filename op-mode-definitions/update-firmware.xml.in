@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interfaceDefinition>
+  <node name="update">
+    <properties>
+      <help>Update system components</help>
+    </properties>
+    <children>
+      <node name="firmware">
+        <properties>
+          <help>Update boot firmware on disk</help>
+        </properties>
+        <children>
+          <node name="uboot">
+            <properties>
+              <help>Update U-Boot raw image on boot device</help>
+            </properties>
+            <command>${vyos_op_scripts_dir}/update_firmware.py --component uboot</command>
+            <children>
+              <leafNode name="now">
+                <properties>
+                  <help>Update U-Boot without confirmation prompt</help>
+                </properties>
+                <command>${vyos_op_scripts_dir}/update_firmware.py --component uboot --yes</command>
+              </leafNode>
+              <tagNode name="image">
+                <properties>
+                  <help>Path to firmware image file</help>
+                  <completionHelp>
+                    <path>/usr/lib/u-boot/platform/</path>
+                  </completionHelp>
+                </properties>
+                <command>${vyos_op_scripts_dir}/update_firmware.py --component uboot --image "${5}"</command>
+                <children>
+                  <tagNode name="device">
+                    <properties>
+                      <help>Target block device (for example /dev/mmcblk0)</help>
+                    </properties>
+                    <command>${vyos_op_scripts_dir}/update_firmware.py --component uboot --image "${5}" --device "${7}"</command>
+                  </tagNode>
+                </children>
+              </tagNode>
+              <tagNode name="device">
+                <properties>
+                  <help>Target block device (for example /dev/mmcblk0)</help>
+                </properties>
+                <command>${vyos_op_scripts_dir}/update_firmware.py --component uboot --device "${5}"</command>
+                <children>
+                  <tagNode name="image">
+                    <properties>
+                      <help>Path to firmware image file</help>
+                      <completionHelp>
+                        <path>/usr/lib/u-boot/platform/</path>
+                      </completionHelp>
+                    </properties>
+                    <command>${vyos_op_scripts_dir}/update_firmware.py --component uboot --device "${5}" --image "${7}"</command>
+                  </tagNode>
+                </children>
+              </tagNode>
+            </children>
+          </node>
+          <node name="grub">
+            <properties>
+              <help>Update GRUB EFI binary on EFI partition</help>
+            </properties>
+            <command>${vyos_op_scripts_dir}/update_firmware.py --component grub</command>
+            <children>
+              <leafNode name="now">
+                <properties>
+                  <help>Update GRUB EFI without confirmation prompt</help>
+                </properties>
+                <command>${vyos_op_scripts_dir}/update_firmware.py --component grub --yes</command>
+              </leafNode>
+            </children>
+          </node>
+        </children>
+      </node>
+    </children>
+  </node>
+</interfaceDefinition>

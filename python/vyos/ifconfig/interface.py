@@ -23,7 +23,7 @@ from glob import glob
 
 from ipaddress import IPv4Network
 from ipaddress import IPv6Interface
-from netifaces import ifaddresses # pylint: disable = no-name-in-module
+from netifaces import ifaddresses  # pylint: disable = no-name-in-module
 from socket import AF_INET
 from socket import AF_INET6
 from netaddr import EUI
@@ -37,6 +37,7 @@ from vyos.pki import find_chain
 from vyos.pki import encode_certificate
 from vyos.pki import load_certificate
 from vyos.pki import wrap_private_key
+from vyos.system.hardware import get_stable_hardware_id
 from vyos.template import is_ipv4
 from vyos.template import is_ipv6
 from vyos.template import render
@@ -67,6 +68,7 @@ from vyos.ifconfig import Section
 
 link_local_prefix = 'fe80::/64'
 
+
 class Interface(Control):
     # This is the class which will be used to create
     # self.operational, it allows subclasses, such as
@@ -84,22 +86,28 @@ class Interface(Control):
         'vlan': False,
         'bondable': False,
         'broadcast': False,
-        'bridgeable':  False,
+        'bridgeable': False,
         'eternal': '',
     }
 
     _command_get = {
         'admin_state': {
             'shellcmd': 'ip -json link show dev {ifname}',
-            'format': lambda j: 'up' if 'UP' in jmespath.search('[*].flags | [0]', json.loads(j)) else 'down',
+            'format': lambda j: (
+                'up'
+                if 'UP' in jmespath.search('[*].flags | [0]', json.loads(j))
+                else 'down'
+            ),
         },
         'alias': {
             'shellcmd': 'ip -json -detail link list dev {ifname}',
-            'format': lambda j: jmespath.search('[*].ifalias | [0]', json.loads(j)) or '',
+            'format': lambda j: jmespath.search('[*].ifalias | [0]', json.loads(j))
+            or '',
         },
         'ifindex': {
             'shellcmd': 'ip -json -detail link list dev {ifname}',
-            'format': lambda j: jmespath.search('[*].ifindex | [0]', json.loads(j)) or '',
+            'format': lambda j: jmespath.search('[*].ifindex | [0]', json.loads(j))
+            or '',
         },
         'mac': {
             'shellcmd': 'ip -json -detail link list dev {ifname}',
@@ -123,7 +131,9 @@ class Interface(Control):
         },
         'vrf': {
             'shellcmd': 'ip -json -detail link list dev {ifname}',
-            'format': lambda j: jmespath.search('[?linkinfo.info_slave_kind == `vrf`].master | [0]', json.loads(j)),
+            'format': lambda j: jmespath.search(
+                '[?linkinfo.info_slave_kind == `vrf`].master | [0]', json.loads(j)
+            ),
         },
     }
 
@@ -163,7 +173,7 @@ class Interface(Control):
             'location': '/proc/sys/net/ipv4/conf/{ifname}/arp_filter',
         },
         'arp_accept': {
-            'validate': lambda arp: assert_range(arp,0,2),
+            'validate': lambda arp: assert_range(arp, 0, 2),
             'location': '/proc/sys/net/ipv4/conf/{ifname}/arp_accept',
         },
         'arp_announce': {
@@ -183,19 +193,19 @@ class Interface(Control):
             'location': '/proc/sys/net/ipv4/conf/{ifname}/bc_forwarding',
         },
         'ipv6_accept_ra': {
-            'validate': lambda ara: assert_range(ara,0,3),
+            'validate': lambda ara: assert_range(ara, 0, 3),
             'location': '/proc/sys/net/ipv6/conf/{ifname}/accept_ra',
         },
         'ipv6_autoconf': {
-            'validate': lambda aco: assert_range(aco,0,2),
+            'validate': lambda aco: assert_range(aco, 0, 2),
             'location': '/proc/sys/net/ipv6/conf/{ifname}/autoconf',
         },
         'ipv6_forwarding': {
-            'validate': lambda fwd: assert_range(fwd,0,2),
+            'validate': lambda fwd: assert_range(fwd, 0, 2),
             'location': '/proc/sys/net/ipv6/conf/{ifname}/forwarding',
         },
         'ipv6_accept_dad': {
-            'validate': lambda dad: assert_range(dad,0,3),
+            'validate': lambda dad: assert_range(dad, 0, 3),
             'location': '/proc/sys/net/ipv6/conf/{ifname}/accept_dad',
         },
         'ipv6_dad_transmits': {
@@ -209,28 +219,28 @@ class Interface(Control):
             # XXX: we should set a maximum
             'validate': assert_positive,
             'location': '/sys/class/net/{ifname}/brport/path_cost',
-            'errormsg': '{ifname} is not a bridge port member'
+            'errormsg': '{ifname} is not a bridge port member',
         },
         'path_priority': {
             # XXX: we should set a maximum
             'validate': assert_positive,
             'location': '/sys/class/net/{ifname}/brport/priority',
-            'errormsg': '{ifname} is not a bridge port member'
+            'errormsg': '{ifname} is not a bridge port member',
         },
         'bpdu_guard': {
             'validate': assert_boolean,
             'location': '/sys/class/net/{ifname}/brport/bpdu_guard',
-            'errormsg': '{ifname} is not a bridge port member'
+            'errormsg': '{ifname} is not a bridge port member',
         },
         'root_guard': {
             'validate': assert_boolean,
             'location': '/sys/class/net/{ifname}/brport/root_block',
-            'errormsg': '{ifname} is not a bridge port member'
+            'errormsg': '{ifname} is not a bridge port member',
         },
         'learning': {
-            'validate':  assert_boolean,
+            'validate': assert_boolean,
             'location': '/sys/class/net/{ifname}/brport/learning',
-            'errormsg': '{ifname} is not a bridge port member'
+            'errormsg': '{ifname} is not a bridge port member',
         },
         'proxy_arp': {
             'validate': assert_boolean,
@@ -242,7 +252,7 @@ class Interface(Control):
         },
         # link_detect vs link_filter name weirdness
         'link_detect': {
-            'validate': lambda link: assert_range(link,0,3),
+            'validate': lambda link: assert_range(link, 0, 3),
             'location': '/proc/sys/net/ipv4/conf/{ifname}/link_filter',
         },
         'per_client_thread': {
@@ -307,10 +317,10 @@ class Interface(Control):
     }
 
     @classmethod
-    def exists(cls, ifname: str, netns: str=None) -> bool:
+    def exists(cls, ifname: str, netns: str = None) -> bool:
         cmd = f'ip link show dev {ifname}'
         if netns:
-           cmd = f'ip netns exec {netns} {cmd}'
+            cmd = f'ip netns exec {netns} {cmd}'
         return run(cmd) == 0
 
     @classmethod
@@ -366,15 +376,17 @@ class Interface(Control):
         self.operational = self.OperationalClass(ifname)
         self.vrrp = VRRP(ifname)
 
-    def _create(self, type: str=''):
+    def _create(self, type: str = ''):
         # Do not create interface that already exist or exists in netns
         netns = self.config.get('netns', None)
         if self.exists(f'{self.ifname}', netns=netns):
             return
 
         cmd = f'ip link add dev {self.ifname}'
-        if type: cmd += f' type {type}'
-        if 'netns' in self.config: cmd = f'ip netns exec {netns} {cmd}'
+        if type:
+            cmd += f' type {type}'
+        if 'netns' in self.config:
+            cmd = f'ip netns exec {netns} {cmd}'
         self._cmd(cmd)
 
     def remove(self, skip_delete=False):
@@ -425,7 +437,8 @@ class Interface(Control):
         cmd = 'ip link del dev {ifname}'.format(**self.config)
         # for delete we can't get data from self.config{'netns'}
         netns = get_interface_namespace(self.ifname)
-        if netns: cmd = f'ip netns exec {netns} {cmd}'
+        if netns:
+            cmd = f'ip netns exec {netns} {cmd}'
         return self._cmd(cmd)
 
     def _nft_check_and_run(self, nft_command):
@@ -436,7 +449,9 @@ class Interface(Control):
             self._cmd(f'nft {nft_command}')
 
     def _del_interface_from_ct_iface_map(self):
-        nft_command = f'delete element inet vrf_zones ct_iface_map {{ \'"{self.ifname}"\' }}'
+        nft_command = (
+            f'delete element inet vrf_zones ct_iface_map {{ \'"{self.ifname}"\' }}'
+        )
         self._nft_check_and_run(nft_command)
 
     def _add_interface_to_ct_iface_map(self, vrf_table_id: int):
@@ -529,8 +544,7 @@ class Interface(Control):
         """
         from hashlib import sha256
 
-        # Get processor ID number
-        cpu_id = self._cmd('sudo dmidecode -t 4 | grep ID | head -n1 | sed "s/.*ID://;s/ //g"')
+        hardware_id = get_stable_hardware_id()
 
         # XXX: T3894 - it seems not all systems have eth0 - get a list of all
         # available Ethernet interfaces on the system (without VLAN subinterfaces)
@@ -539,10 +553,9 @@ class Interface(Control):
         first_mac = Interface(all_eth_ifs[0]).get_mac()
 
         sha = sha256()
-        # Calculate SHA256 sum based on the CPU ID number, eth0 mac address and
-        # this interface identifier - this is as predictable as an interface
-        # MAC address and thus can be used in the same way
-        sha.update(cpu_id.encode())
+        # Calculate SHA256 from the architecture-appropriate hardware ID, first
+        # Ethernet MAC, and this interface identifier.
+        sha.update(hardware_id.encode())
         sha.update(first_mac.encode())
         sha.update(self.ifname.encode())
         # take the most significant 48 bits from the SHA256 string
@@ -551,7 +564,7 @@ class Interface(Control):
         # MAC address
         tmp = EUI(tmp).value
         # set locally administered bit in MAC address
-        tmp |= 0xf20000000000
+        tmp |= 0xF20000000000
         # convert integer to "real" MAC address representation
         mac = EUI(hex(tmp).split('x')[-1])
         # change dialect to use : as delimiter instead of -
@@ -583,7 +596,7 @@ class Interface(Control):
             self.set_admin_state('up')
 
     def del_netns(self, netns: str) -> bool:
-        """ Remove interface from given network namespace """
+        """Remove interface from given network namespace"""
         # If network namespace does not exist then there is nothing to delete
         if not os.path.exists(f'/run/netns/{netns}'):
             return False
@@ -704,7 +717,9 @@ class Interface(Control):
             if f'oifname "{ifname}"' in line:
                 handle_search = re.search('handle (\d+)', line)
                 if handle_search:
-                    self._cmd(f'nft delete rule {table} VYOS_TCP_MSS handle {handle_search[1]}')
+                    self._cmd(
+                        f'nft delete rule {table} VYOS_TCP_MSS handle {handle_search[1]}'
+                    )
 
     def set_tcp_ipv4_mss(self, mss):
         """
@@ -728,7 +743,9 @@ class Interface(Control):
             self._cmd(f"{nft_prefix} '{base_cmd} tcp option maxseg size set rt mtu'")
         elif int(mss) > 0:
             low_mss = str(int(mss) + 1)
-            self._cmd(f"{nft_prefix} '{base_cmd} tcp option maxseg size {low_mss}-65535 tcp option maxseg size set {mss}'")
+            self._cmd(
+                f"{nft_prefix} '{base_cmd} tcp option maxseg size {low_mss}-65535 tcp option maxseg size set {mss}'"
+            )
 
     def set_tcp_ipv6_mss(self, mss):
         """
@@ -752,7 +769,9 @@ class Interface(Control):
             self._cmd(f"{nft_prefix} '{base_cmd} tcp option maxseg size set rt mtu'")
         elif int(mss) > 0:
             low_mss = str(int(mss) + 1)
-            self._cmd(f"{nft_prefix} '{base_cmd} tcp option maxseg size {low_mss}-65535 tcp option maxseg size set {mss}'")
+            self._cmd(
+                f"{nft_prefix} '{base_cmd} tcp option maxseg size {low_mss}-65535 tcp option maxseg size set {mss}'"
+            )
 
     def set_arp_filter(self, arp_filter):
         """
@@ -836,14 +855,14 @@ class Interface(Control):
         return self.set_interface('arp_ignore', arp_ignore)
 
     def set_ipv4_forwarding(self, forwarding):
-        """ Configure IPv4 forwarding. """
+        """Configure IPv4 forwarding."""
         tmp = self.get_interface('ipv4_forwarding')
         if tmp == forwarding:
             return None
         return self.set_interface('ipv4_forwarding', forwarding)
 
     def set_ipv4_directed_broadcast(self, forwarding):
-        """ Configure IPv4 directed broadcast forwarding. """
+        """Configure IPv4 directed broadcast forwarding."""
         tmp = self.get_interface('ipv4_directed_broadcast')
         if tmp == forwarding:
             return None
@@ -855,7 +874,9 @@ class Interface(Control):
             if f'iifname "{ifname}"' in line:
                 handle_search = re.search('handle (\d+)', line)
                 if handle_search:
-                    self._cmd(f'nft delete rule ip raw vyos_rpfilter handle {handle_search[1]}')
+                    self._cmd(
+                        f'nft delete rule ip raw vyos_rpfilter handle {handle_search[1]}'
+                    )
 
     def set_ipv4_source_validation(self, mode):
         """
@@ -884,7 +905,9 @@ class Interface(Control):
             if f'iifname "{ifname}"' in line:
                 handle_search = re.search('handle (\d+)', line)
                 if handle_search:
-                    self._cmd(f'nft delete rule ip6 raw vyos_rpfilter handle {handle_search[1]}')
+                    self._cmd(
+                        f'nft delete rule ip6 raw vyos_rpfilter handle {handle_search[1]}'
+                    )
 
     def set_ipv6_source_validation(self, mode):
         """
@@ -1244,8 +1267,9 @@ class Interface(Control):
         if AF_INET in ifaddresses(self.config['ifname']):
             for v4_addr in ifaddresses(self.config['ifname'])[AF_INET]:
                 # we need to manually assemble a list of IPv4 address/prefix
-                prefix = '/' + \
-                    str(IPv4Network('0.0.0.0/' + v4_addr['netmask']).prefixlen)
+                prefix = '/' + str(
+                    IPv4Network('0.0.0.0/' + v4_addr['netmask']).prefixlen
+                )
                 ipv4.append(v4_addr['addr'] + prefix)
         return ipv4
 
@@ -1284,7 +1308,7 @@ class Interface(Control):
         """
         return self.get_addr_v4() + self.get_addr_v6()
 
-    def add_addr(self, addr: str, vrf_changed: bool=False) -> bool:
+    def add_addr(self, addr: str, vrf_changed: bool = False) -> bool:
         """
         Add IP(v6) address to interface. Address is only added if it is not
         already assigned to that interface. Address format must be validated
@@ -1321,10 +1345,11 @@ class Interface(Control):
         elif addr == 'dhcpv6':
             self.set_dhcpv6(True, vrf_changed=vrf_changed)
         elif not is_intf_addr_assigned(self.ifname, addr, netns=netns):
-            netns_cmd  = f'ip netns exec {netns}' if netns else ''
+            netns_cmd = f'ip netns exec {netns}' if netns else ''
             tmp = f'{netns_cmd} ip addr add {addr} dev {self.ifname}'
             # Add broadcast address for IPv4
-            if is_ipv4(addr): tmp += ' brd +'
+            if is_ipv4(addr):
+                tmp += ' brd +'
             self._cmd(tmp)
         else:
             return False
@@ -1370,7 +1395,7 @@ class Interface(Control):
         elif addr == 'dhcpv6':
             self.set_dhcpv6(False)
         elif is_intf_addr_assigned(self.ifname, addr, netns=netns):
-            netns_cmd  = f'ip netns exec {netns}' if netns else ''
+            netns_cmd = f'ip netns exec {netns}' if netns else ''
             self._cmd(f'{netns_cmd} ip addr del {addr} dev {self.ifname}')
         else:
             return False
@@ -1423,8 +1448,7 @@ class Interface(Control):
         for addr_info in tmp['addr_info']:
             if 'protocol' not in addr_info:
                 continue
-            if (addr_info['protocol'] == 'kernel_ra' and
-                addr_info['scope'] == 'global'):
+            if addr_info['protocol'] == 'kernel_ra' and addr_info['scope'] == 'global':
                 # Flush IPv6 addresses installed by router advertisement
                 ra_addr = f"{addr_info['local']}/{addr_info['prefixlen']}"
                 flushed.append(ra_addr)
@@ -1432,7 +1456,7 @@ class Interface(Control):
                 self._cmd(cmd)
         return flushed
 
-    def flush_ipv6_slaac_routes(self, ra_addrs: list=[]) -> None:
+    def flush_ipv6_slaac_routes(self, ra_addrs: list = []) -> None:
         """
         Flush IPv6 default routes installed in response to router advertisement
         messages from this interface.
@@ -1455,13 +1479,19 @@ class Interface(Control):
         # 'metrics': [{'hoplimit': 64}], 'pref': 'medium'}
         for route in tmp:
             # If it's a default route received from RA, delete it
-            if (dict_search('dst', route) == 'default' and
-                dict_search('protocol', route) == 'ra'):
-                self._cmd(f'{netns_cmd} ip -6 route del default via {route["gateway"]} dev {self.ifname}')
+            if (
+                dict_search('dst', route) == 'default'
+                and dict_search('protocol', route) == 'ra'
+            ):
+                self._cmd(
+                    f'{netns_cmd} ip -6 route del default via {route["gateway"]} dev {self.ifname}'
+                )
             # Remove connected prefixes received from RA
             if dict_search('dst', route) in connected:
                 # If it's a connected prefix, delete it
-                self._cmd(f'{netns_cmd} ip -6 route del {route["dst"]} dev {self.ifname}')
+                self._cmd(
+                    f'{netns_cmd} ip -6 route del {route["dst"]} dev {self.ifname}'
+                )
 
         return None
 
@@ -1487,13 +1517,15 @@ class Interface(Control):
             if 'priority' in bridge_config:
                 self.set_path_priority(bridge_config['priority'])
 
-            bridge_vlan_filter = Section.klass(bridge)(bridge, create=True).get_vlan_filter()
+            bridge_vlan_filter = Section.klass(bridge)(
+                bridge, create=True
+            ).get_vlan_filter()
 
             if int(bridge_vlan_filter):
                 cur_vlan_ids = get_vlan_ids(self.ifname)
                 add_vlan = []
                 native_vlan_id = None
-                allowed_vlan_ids= []
+                allowed_vlan_ids = []
 
                 if 'native_vlan' in bridge_config:
                     vlan_id = bridge_config['native_vlan']
@@ -1504,7 +1536,9 @@ class Interface(Control):
                     for vlan in bridge_config['allowed_vlan']:
                         vlan_range = vlan.split('-')
                         if len(vlan_range) == 2:
-                            for vlan_add in range(int(vlan_range[0]),int(vlan_range[1]) + 1):
+                            for vlan_add in range(
+                                int(vlan_range[0]), int(vlan_range[1]) + 1
+                            ):
                                 add_vlan.append(str(vlan_add))
                                 allowed_vlan_ids.append(str(vlan_add))
                         else:
@@ -1524,7 +1558,7 @@ class Interface(Control):
                     cmd = f'bridge vlan add dev {self.ifname} vid {native_vlan_id} pvid untagged master'
                     self._cmd(cmd)
 
-    def set_dhcp(self, enable: bool, vrf_changed: bool=False):
+    def set_dhcp(self, enable: bool, vrf_changed: bool = False):
         """
         Enable/Disable DHCP client on a given interface.
         """
@@ -1534,7 +1568,9 @@ class Interface(Control):
         config_base = directories['isc_dhclient_dir'] + '/dhclient'
         dhclient_config_file = f'{config_base}_{self.ifname}.conf'
         dhclient_lease_file = f'{config_base}_{self.ifname}.leases'
-        systemd_override_file = f'/run/systemd/system/dhclient@{self.ifname}.service.d/10-override.conf'
+        systemd_override_file = (
+            f'/run/systemd/system/dhclient@{self.ifname}.service.d/10-override.conf'
+        )
         systemd_service = f'dhclient@{self.ifname}.service'
 
         # Rendered client configuration files require the apsolute config path
@@ -1551,7 +1587,7 @@ class Interface(Control):
                 hostname_file = '/etc/hostname'
                 if os.path.isfile(hostname_file):
                     hostname = read_file(hostname_file)
-                tmp = {'dhcp_options' : { 'host_name' : hostname}}
+                tmp = {'dhcp_options': {'host_name': hostname}}
                 self.config = dict_merge(tmp, self.config)
 
             render(systemd_override_file, 'dhcp-client/override.conf.j2', self.config)
@@ -1565,9 +1601,11 @@ class Interface(Control):
             # the old lease is released a new one is acquired (T4203). We will
             # only restart DHCP client if it's option changed, or if it's not
             # running, but it should be running (e.g. on system startup)
-            if (vrf_changed or
-                ('dhcp_options_changed' in self.config) or
-                (not is_systemd_service_active(systemd_service, netns=netns))):
+            if (
+                vrf_changed
+                or ('dhcp_options_changed' in self.config)
+                or (not is_systemd_service_active(systemd_service, netns=netns))
+            ):
                 return self._cmd(f'systemctl restart {systemd_service}')
         else:
             netns = self.config['netns'] if 'netns' in self.config else None
@@ -1588,13 +1626,17 @@ class Interface(Control):
                         self.del_addr(f'{address}/{prefixlen}')
 
             # cleanup old config files
-            for file in [dhclient_config_file, systemd_override_file, dhclient_lease_file]:
+            for file in [
+                dhclient_config_file,
+                systemd_override_file,
+                dhclient_lease_file,
+            ]:
                 if os.path.isfile(file):
                     os.remove(file)
 
         return None
 
-    def set_dhcpv6(self, enable: bool, vrf_changed: bool=False):
+    def set_dhcpv6(self, enable: bool, vrf_changed: bool = False):
         """
         Enable/Disable DHCPv6 client on a given interface.
         """
@@ -1603,8 +1645,10 @@ class Interface(Control):
 
         config_base = directories['dhcp6_client_dir']
         config_file = f'{config_base}/dhcp6c.{self.ifname}.conf'
-        script_file = f'/etc/wide-dhcpv6/dhcp6c.{self.ifname}.script' # can not live under /run b/c of noexec mount option
-        systemd_override_file = f'/run/systemd/system/dhcp6c@{self.ifname}.service.d/10-override.conf'
+        script_file = f'/etc/wide-dhcpv6/dhcp6c.{self.ifname}.script'  # can not live under /run b/c of noexec mount option
+        systemd_override_file = (
+            f'/run/systemd/system/dhcp6c@{self.ifname}.service.d/10-override.conf'
+        )
         systemd_service = f'dhcp6c@{self.ifname}.service'
 
         # Rendered client configuration files require additional settings
@@ -1615,7 +1659,9 @@ class Interface(Control):
         if enable and 'disable' not in config:
             render(systemd_override_file, 'dhcp-client/ipv6.override.conf.j2', config)
             render(config_file, 'dhcp-client/ipv6.j2', config)
-            render(script_file, 'dhcp-client/dhcp6c-script.j2', config, permission=0o755)
+            render(
+                script_file, 'dhcp-client/dhcp6c-script.j2', config, permission=0o755
+            )
 
             # Reload systemd unit definitions as some options are dynamically generated
             self._cmd('systemctl daemon-reload')
@@ -1623,9 +1669,11 @@ class Interface(Control):
             netns = self.config['netns'] if 'netns' in self.config else None
             # We must ignore any return codes. This is required to enable
             # DHCPv6-PD for interfaces which are yet not up and running.
-            if (vrf_changed or
-                ('dhcpv6_options_changed' in self.config) or
-                (not is_systemd_service_active(systemd_service, netns=netns))):
+            if (
+                vrf_changed
+                or ('dhcpv6_options_changed' in self.config)
+                or (not is_systemd_service_active(systemd_service, netns=netns))
+            ):
                 return self._popen(f'systemctl restart {systemd_service}')
         else:
             netns = self.config['netns'] if 'netns' in self.config else None
@@ -1676,24 +1724,31 @@ class Interface(Control):
                     parent = '1:'
 
                 # Mirror traffic
-                mirror_cmd  = f'tc qdisc add dev {source_if} handle {handle}; '
+                mirror_cmd = f'tc qdisc add dev {source_if} handle {handle}; '
                 # Export the mirrored traffic to the interface
-                mirror_cmd += f'tc filter add dev {source_if} parent {parent} protocol '\
-                              f'all prio 10 u32 match u32 0 0 flowid 1:1 action mirred '\
-                              f'egress mirror dev {target_if}'
+                mirror_cmd += (
+                    f'tc filter add dev {source_if} parent {parent} protocol '
+                    f'all prio 10 u32 match u32 0 0 flowid 1:1 action mirred '
+                    f'egress mirror dev {target_if}'
+                )
                 _, err = self._popen(mirror_cmd)
-                if err: print('tc filter for mirror port failed')
+                if err:
+                    print('tc filter for mirror port failed')
 
         # Apply interface traffic redirection policy
         elif 'redirect' in self.config:
             _, err = self._popen(f'tc qdisc add dev {source_if} handle ffff: ingress')
-            if err: print(f'tc qdisc add for redirect failed!')
+            if err:
+                print(f'tc qdisc add for redirect failed!')
 
             target_if = self.config['redirect']
-            _, err = self._popen(f'tc filter add dev {source_if} parent ffff: protocol '\
-                                 f'all prio 10 u32 match u32 0 0 flowid 1:1 action mirred '\
-                                 f'egress redirect dev {target_if}')
-            if err: print('tc filter for redirect failed')
+            _, err = self._popen(
+                f'tc filter add dev {source_if} parent ffff: protocol '
+                f'all prio 10 u32 match u32 0 0 flowid 1:1 action mirred '
+                f'egress redirect dev {target_if}'
+            )
+            if err:
+                print('tc filter for redirect failed')
 
     def set_per_client_thread(self, enable):
         """
@@ -1720,19 +1775,21 @@ class Interface(Control):
         self.set_interface('per_client_thread', enable)
 
     def set_eapol(self) -> None:
-        """ Take care about EAPoL supplicant daemon """
+        """Take care about EAPoL supplicant daemon"""
 
         # XXX: wpa_supplicant works on the source interface
         cfg_dir = '/run/wpa_supplicant'
         wpa_supplicant_conf = f'{cfg_dir}/{self.ifname}.conf'
-        eapol_action='stop'
+        eapol_action = 'stop'
 
         if 'eapol' in self.config:
             # The default is a fallback to hw_id which is not present for any interface
             # other then an ethernet interface. Thus we emulate hw_id by reading back the
             # Kernel assigned MAC address
             if 'hw_id' not in self.config:
-                self.config['hw_id'] = read_file(f'/sys/class/net/{self.ifname}/address')
+                self.config['hw_id'] = read_file(
+                    f'/sys/class/net/{self.ifname}/address'
+                )
             render(wpa_supplicant_conf, 'ethernet/wpa_supplicant.conf.j2', self.config)
 
             cert_file_path = os.path.join(cfg_dir, f'{self.ifname}_cert.pem')
@@ -1742,13 +1799,21 @@ class Interface(Control):
             pki_cert = self.config['pki']['certificate'][cert_name]
 
             loaded_pki_cert = load_certificate(pki_cert['certificate'])
-            loaded_ca_certs = {load_certificate(c['certificate'])
-                for c in self.config['pki']['ca'].values()} if 'ca' in self.config['pki'] else {}
+            loaded_ca_certs = (
+                {
+                    load_certificate(c['certificate'])
+                    for c in self.config['pki']['ca'].values()
+                }
+                if 'ca' in self.config['pki']
+                else {}
+            )
 
             cert_full_chain = find_chain(loaded_pki_cert, loaded_ca_certs)
 
-            write_file(cert_file_path,
-                    '\n'.join(encode_certificate(c) for c in cert_full_chain))
+            write_file(
+                cert_file_path,
+                '\n'.join(encode_certificate(c) for c in cert_full_chain),
+            )
             write_file(cert_key_path, wrap_private_key(pki_cert['private']['key']))
 
             if 'ca_certificate' in self.config['eapol']:
@@ -1760,11 +1825,12 @@ class Interface(Control):
                     loaded_ca_cert = load_certificate(pki_ca_cert['certificate'])
                     ca_full_chain = find_chain(loaded_ca_cert, loaded_ca_certs)
                     ca_chains.append(
-                        '\n'.join(encode_certificate(c) for c in ca_full_chain))
+                        '\n'.join(encode_certificate(c) for c in ca_full_chain)
+                    )
 
                 write_file(ca_cert_file_path, '\n'.join(ca_chains))
 
-            eapol_action='reload-or-restart'
+            eapol_action = 'reload-or-restart'
 
         # start/stop WPA supplicant service
         self._cmd(f'systemctl {eapol_action} wpa_supplicant-wired@{self.ifname}')
@@ -1775,13 +1841,14 @@ class Interface(Control):
                 os.unlink(wpa_supplicant_conf)
 
     def update(self, config):
-        """ General helper function which works on a dictionary retrieved by
+        """General helper function which works on a dictionary retrieved by
         get_config_dict(). It's main intention is to consolidate the scattered
         interface setup code and provide a single point of entry when working
-        on any interface. """
+        on any interface."""
 
         if self.debug:
             import pprint
+
             pprint.pprint(config)
 
         # Cache the configuration - it will be reused inside e.g. DHCP handler
@@ -1947,6 +2014,7 @@ class Interface(Control):
 
         # PSL: Also do it if "block" requested
         import vyos.configquery
+
         q = vyos.configquery.ConfigTreeQuery()
         block_ipv6 = q.exists(['firewall', 'ipv6', 'block'])
         if block_ipv6:
@@ -1985,20 +2053,24 @@ class Interface(Control):
         tmp = dict_search('ipv6.accept_dad', config)
         # Not all interface types got this CLI option, but if they do, there
         # is an XML defaultValue available
-        if (tmp != None): self.set_ipv6_dad_accept(tmp)
+        if tmp != None:
+            self.set_ipv6_dad_accept(tmp)
 
         # IPv6 DAD tries
         tmp = dict_search('ipv6.dup_addr_detect_transmits', config)
         # Not all interface types got this CLI option, but if they do, there
         # is an XML defaultValue available
-        if (tmp != None): self.set_ipv6_dad_messages(tmp)
+        if tmp != None:
+            self.set_ipv6_dad_messages(tmp)
 
         # Delete old IPv6 EUI64 addresses before changing MAC
-        for addr in (dict_search('ipv6.address.eui64_old', config) or []):
+        for addr in dict_search('ipv6.address.eui64_old', config) or []:
             self.del_ipv6_eui64_address(addr)
 
         # Manage IPv6 link-local addresses
-        no_default_link_local = dict_search('ipv6.address.no_default_link_local', config) is not None
+        no_default_link_local = (
+            dict_search('ipv6.address.no_default_link_local', config) is not None
+        )
         if block_ipv6:
             no_default_link_local = True
         if no_default_link_local:
@@ -2139,7 +2211,8 @@ class Interface(Control):
 
 
 class VLANIf(Interface):
-    """ Specific class which abstracts 802.1q and 802.1ad (Q-in-Q) VLAN interfaces """
+    """Specific class which abstracts 802.1q and 802.1ad (Q-in-Q) VLAN interfaces"""
+
     def _create(self):
         # bail out early if interface already exists
         if self.exists(f'{self.ifname}'):

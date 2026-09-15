@@ -28,12 +28,16 @@ logger = logging.getLogger(__name__)
 RUN_DIR = Path('/run/wwan')
 RADVD = '/usr/sbin/radvd'
 
-# Defaults used when the carrier RA lifetimes are not surfaced to the FSM.
-# Kept short so SLAAC clients renumber quickly if we ever do miss a
-# prefix change.  Operators do not configure these — they are not knobs.
-DEFAULT_PREFERRED_LIFETIME = 1800   # 30 min
-DEFAULT_VALID_LIFETIME = 3600       # 60 min
-DEPRECATE_VALID_LIFETIME = 30       # used when deprecating the previous prefix
+# RFC 4861 Router Advertisement timers.  These seed the radvd.conf and are
+# operator-tunable via `interfaces wwan <if> ipv6-bridging router-advert ...`.
+# The defaults are kept short so SLAAC clients renumber quickly on a carrier
+# prefix change; the values below are used when the operator leaves a knob
+# unset (and as the fallback when the carrier lifetimes are not surfaced).
+DEFAULT_PREFERRED_LIFETIME = 1800   # AdvPreferredLifetime — 30 min
+DEFAULT_VALID_LIFETIME = 3600       # AdvValidLifetime — 60 min
+DEPRECATE_VALID_LIFETIME = 30       # valid_lft used when deprecating the old prefix
+DEFAULT_MIN_RTR_ADV_INTERVAL = 3    # MinRtrAdvInterval — seconds
+DEFAULT_MAX_RTR_ADV_INTERVAL = 10   # MaxRtrAdvInterval — seconds
 
 
 class BridgingRadvdManager:
@@ -56,6 +60,10 @@ class BridgingRadvdManager:
         self._last_lan: Optional[str] = None
         self._last_prefix: Optional[str] = None
         self._last_plen: Optional[int] = None
+        # Last-applied RA cadence, re-used by deprecate_previous() so the
+        # deprecation burst keeps the operator's configured interval.
+        self._last_min_interval: int = DEFAULT_MIN_RTR_ADV_INTERVAL
+        self._last_max_interval: int = DEFAULT_MAX_RTR_ADV_INTERVAL
         self._log_extra = {'interface_number': interface_number}
         RUN_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -75,8 +83,15 @@ class BridgingRadvdManager:
                     plen: int,
                     dns_servers: Optional[Sequence[str]] = None,
                     preferred_lft: int = DEFAULT_PREFERRED_LIFETIME,
-                    valid_lft: int = DEFAULT_VALID_LIFETIME) -> None:
+                    valid_lft: int = DEFAULT_VALID_LIFETIME,
+                    min_interval: int = DEFAULT_MIN_RTR_ADV_INTERVAL,
+                    max_interval: int = DEFAULT_MAX_RTR_ADV_INTERVAL) -> None:
         """Write conf and start/reload radvd to advertise prefix on lan.
+
+        min_interval / max_interval map to RFC 4861 MinRtrAdvInterval /
+        MaxRtrAdvInterval and control how often the LAN hears the prefix —
+        i.e. how quickly SLAAC clients renumber on a carrier prefix change.
+        preferred_lft / valid_lft are the advertised prefix lifetimes.
 
         If the LAN interface name changed since last apply, a hard restart
         is performed — radvd's SIGHUP path does not handle interface-name
@@ -90,12 +105,16 @@ class BridgingRadvdManager:
         )
         self._write_conf(lan, prefix, plen, dns_servers or (),
                          preferred_lft=preferred_lft,
-                         valid_lft=valid_lft)
+                         valid_lft=valid_lft,
+                         min_interval=min_interval,
+                         max_interval=max_interval)
         await self._start_or_reload(force_restart=force_restart)
 
         self._last_lan = lan
         self._last_prefix = prefix
         self._last_plen = plen
+        self._last_min_interval = min_interval
+        self._last_max_interval = max_interval
 
     async def deprecate_previous(self) -> None:
         """One-shot RA burst advertising preferred_lft=0 on the previous prefix.
@@ -111,6 +130,8 @@ class BridgingRadvdManager:
             self._last_lan, self._last_prefix, self._last_plen, (),
             preferred_lft=0,
             valid_lft=DEPRECATE_VALID_LIFETIME,
+            min_interval=self._last_min_interval,
+            max_interval=self._last_max_interval,
         )
         await self._start_or_reload(force_restart=False)
 
@@ -156,11 +177,24 @@ class BridgingRadvdManager:
                     plen: int,
                     dns_servers: Sequence[str],
                     preferred_lft: int,
-                    valid_lft: int) -> None:
+                    valid_lft: int,
+                    min_interval: int = DEFAULT_MIN_RTR_ADV_INTERVAL,
+                    max_interval: int = DEFAULT_MAX_RTR_ADV_INTERVAL) -> None:
         """Render a minimal SLAAC+RDNSS radvd.conf for one interface."""
         # Clamp: valid must be >= preferred per RFC 4861.
         if preferred_lft > valid_lft:
             preferred_lft = valid_lft
+
+        # Defensive clamp so a value reaching us straight from the JSON config
+        # (bypassing conf_mode verify) can never make radvd refuse to start:
+        #   MaxRtrAdvInterval : 4..1800
+        #   MinRtrAdvInterval : 3..0.75*MaxRtrAdvInterval
+        max_interval = min(1800, max(4, int(max_interval)))
+        min_interval = max(3, min(int(min_interval), int(0.75 * max_interval)))
+        # AdvDefaultLifetime (router lifetime) MUST be 0 or between
+        # MaxRtrAdvInterval and 9000 (RFC 4861).  Follow radvd's 3*max default
+        # but never drop below the historical 60 s floor.
+        default_lifetime = min(9000, max(60, 3 * max_interval))
 
         rdnss_block = ''
         if dns_servers:
@@ -176,11 +210,11 @@ class BridgingRadvdManager:
             f'interface {lan}\n'
             '{\n'
             '    AdvSendAdvert on;\n'
-            '    MinRtrAdvInterval 3;\n'
-            '    MaxRtrAdvInterval 10;\n'
+            f'    MinRtrAdvInterval {min_interval};\n'
+            f'    MaxRtrAdvInterval {max_interval};\n'
             '    AdvManagedFlag off;\n'
             '    AdvOtherConfigFlag off;\n'
-            '    AdvDefaultLifetime 60;\n'
+            f'    AdvDefaultLifetime {default_lifetime};\n'
             f'    prefix {prefix}/{plen}\n'
             '    {\n'
             '        AdvOnLink on;\n'

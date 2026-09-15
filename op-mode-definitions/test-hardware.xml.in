@@ -51,6 +51,32 @@
                   </tagNode>
                 </children>
               </node>
+              <leafNode name="rtc">
+                <properties>
+                  <help>Show RTC (RV-3028) backup switchover mode</help>
+                </properties>
+                <command>${vyos_op_scripts_dir}/test_hardware.py rtc_show</command>
+              </leafNode>
+            </children>
+          </node>
+
+          <!-- ===== rtc backup-mode &lt;mode&gt; =====
+               One-time RV-3028 EEPROM setting; normally written at
+               manufacturing, exposed here only for board bring-up/repair. -->
+          <node name="rtc">
+            <properties>
+              <help>RTC (RV-3028) maintenance (out-of-band)</help>
+            </properties>
+            <children>
+              <tagNode name="backup-mode">
+                <properties>
+                  <help>Set the RTC backup switchover mode (stored in the RTC EEPROM; use only for board bring-up/repair)</help>
+                  <completionHelp>
+                    <list>level-switching direct-switching disabled</list>
+                  </completionHelp>
+                </properties>
+                <command>${vyos_op_scripts_dir}/test_hardware.py rtc_backup_mode --mode="$5"</command>
+              </tagNode>
             </children>
           </node>
 
