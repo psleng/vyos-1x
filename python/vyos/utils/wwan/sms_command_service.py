@@ -127,8 +127,19 @@ class SmsCommandService:
         except Exception as err:  # pragma: no cover - best effort
             logger.warning('Failed to send response SMS: %s', err)
 
-    def _execute_reboot(self):
-        subprocess.Popen(['/usr/bin/systemctl', 'reboot'])
+    def _execute_reboot(self) -> bool:
+        try:
+            subprocess.run(
+                ['/usr/bin/systemctl', 'reboot'],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            return True
+        except (OSError, subprocess.SubprocessError) as err:
+            logger.error('Failed to execute reboot: %s', err)
+            return False
 
     def _process_message(self, if_name: str, if_num: int, msg: dict):
         msg_id = int(msg.get('id', -1))
@@ -141,7 +152,7 @@ class SmsCommandService:
                 if_name,
                 number,
             )
-            self._send_response(if_num, number, 'ERROR: UNAUTHORIZED')
+            self._send_response(if_num, number, 'UNAUTHORIZED')
             return
 
         text = str(msg.get('text', ''))
@@ -152,7 +163,7 @@ class SmsCommandService:
                 msg_id,
                 if_name,
             )
-            self._send_response(if_num, number, 'ERROR: INVALID FORMAT')
+            self._send_response(if_num, number, 'INVALID')
             return
 
         logger.warning(
@@ -161,8 +172,10 @@ class SmsCommandService:
             if_name,
             number,
         )
-        self._send_response(if_num, number, 'OK: REBOOT')
-        self._execute_reboot()
+        if self._execute_reboot():
+            self._send_response(if_num, number, 'OK')
+        else:
+            self._send_response(if_num, number, 'REBOOT FAILED')
 
     def _poll_interface(self, if_name: str):
         if_num = _if_number(if_name)
@@ -174,11 +187,23 @@ class SmsCommandService:
             logger.debug('SMS poll skipped for %s: %s', if_name, err)
             return
 
+        # Clearing SMS storage recycles message IDs from 1; drop stale
+        # "seen" entries no longer present so recycled IDs aren't skipped.
+        current_ids = {int(msg.get('id', -1)) for msg in messages}
+        seen.intersection_update(current_ids)
+
         for msg in messages:
-            if msg.get('direction') != 'incoming':
-                continue
             msg_id = int(msg.get('id', -1))
+            if msg.get('direction') != 'incoming':
+                logger.debug(
+                    'Skipping SMS id=%s on %s: direction=%r',
+                    msg_id,
+                    if_name,
+                    msg.get('direction'),
+                )
+                continue
             if msg_id <= 0:
+                logger.debug('Skipping SMS with invalid id=%s on %s', msg_id, if_name)
                 continue
             if msg.get('read', False):
                 seen.add(msg_id)
@@ -186,6 +211,7 @@ class SmsCommandService:
             if msg_id in seen:
                 continue
 
+            logger.debug('New unread SMS id=%s on %s', msg_id, if_name)
             try:
                 full_msg = self.client.read_sms(if_num, msg_id)
             except Exception as err:
@@ -193,7 +219,14 @@ class SmsCommandService:
                 continue
 
             seen.add(msg_id)
-            self._process_message(if_name, if_num, full_msg)
+            try:
+                self._process_message(if_name, if_num, full_msg)
+            except Exception as err:
+                # Message is already marked read/seen and won't be retried,
+                # so a crash here must never pass silently.
+                logger.error(
+                    'Error processing SMS id=%s on %s: %s', msg_id, if_name, err
+                )
 
     def run(self):
         if not self.cfg.allowed_senders:
