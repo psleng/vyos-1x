@@ -26,6 +26,69 @@ from vyos.utils.process import rc_cmd
 from vyos.utils.process import run
 from pathlib import Path
 from systemd import journal
+from vyos.utils.wwan.wwan_client import (  # noqa: E402
+    WWANClientSync,
+    WWANError,
+)
+from vyos.config import Config
+
+
+def _interface_modem_check(iface):
+    print('interface modem check')
+    ifnum = int(iface[4:])
+    # NB: this runs on every failover poll from the long-lived daemon loop, so
+    # the client MUST be closed each time.  A leaked WWANClientSync keeps its
+    # D-Bus MessageBus connection open; accumulating one per poll eventually
+    # exhausts dbus-daemon's max_connections_per_user (default 256), after
+    # which the IGOS daemon is no longer reachable (ServiceUnknown).
+    client = WWANClientSync()
+    try:
+        client.add_interface(ifnum)
+        print('added interface: ', ifnum)
+        config = client.set_configuration(ifnum, {
+            "connection_mode": "dial-on-demand",
+            "primary_sim_slot": 1,
+        })
+        client.wait_for_bearer(ifnum, "connected", timeout=2)
+        print('set config for dial-on-demand')
+        bearer_status = client.get_bearer_status(ifnum)
+        print("got bearer status: ", bearer_status)
+        return bearer_status in ("connected", "registered")
+    finally:
+        client.close()
+
+
+def _interface_modem_disconnect(iface):
+    """Tear down the dial-on-demand bearer on a WWAN interface.
+
+    Uses WWANClientSync to fire ENTER_IDLE (bearer drops, modem stays
+    registered) so the modem stops dialing after failing back to a
+    higher-priority interface but can still redial on demand later.
+    """
+    try:
+        client = WWANClientSync()
+        ifnum = int(iface[4:])
+        try:
+            # Only drop an actually-established bearer; a registered/idle modem
+            # has nothing to tear down.
+            if client.get_bearer_status(ifnum) == "connected":
+                print_debug(
+                    f'    [ MODEM_DISCONNECT ] failback: disconnecting bearer on {iface}'
+                )
+                client.disconnect(ifnum)
+                journal.send(
+                    f'Dial-on-demand failback: disconnected bearer on {iface}',
+                    SYSLOG_IDENTIFIER=my_name,
+                )
+        finally:
+            # Always release the D-Bus connection, even if the poll/disconnect
+            # raised — a leaked client would otherwise accumulate one open bus
+            # connection per failback in this long-lived daemon.
+            client.close()
+    except WWANError as exc:
+        print_debug(
+            f'    [ MODEM_DISCONNECT ] disconnect failed for {iface}: {exc}'
+        )
 
 
 my_name = Path(__file__).stem
@@ -41,6 +104,65 @@ debug = False
 debug_output_journal = False
 debug_output_print = True
 
+def dial_on_demand_check(ifname):
+    """
+    Return True if ifname is a WWAN interface configured for dial-on-demand.
+
+    Only wwanX interfaces with dial-on-demand use the modem bearer check; every
+    other interface (ethX, ...) uses the normal IP health check.
+    """
+    if not ifname.startswith('wwan'):
+        return False
+    conf = Config()
+    return bool(conf.exists_effective(
+        ['interfaces', 'wwan', ifname, 'connection-mode', 'dial-on-demand']))
+
+
+def handle_dial_on_demand_failback(route_config, nexthop_status, active_interface_by_route):
+    """Disconnect a dial-on-demand WWAN bearer on failback to a better route.
+
+    When the active nexthop for a route moves from a dial-on-demand WWAN
+    interface (lower priority / higher metric) to a higher-priority non-WWAN
+    interface such as ``eth0`` (lower metric), tear down the WWAN bearer so the
+    modem does not stay dialed.
+
+    Args:
+        route_config(RouteNamedTuple): the route being evaluated.
+        nexthop_status(list): tuples of (metric, interface, is_alive) collected
+            for the route's nexthops during this pass.
+        active_interface_by_route(dict): per-route memory of the previously
+            active interface, keyed by (destination, vrf). Updated in place.
+    """
+    # The active nexthop is the reachable one with the lowest metric.
+    alive = [(metric, iface) for metric, iface, is_alive in nexthop_status if is_alive]
+    current_iface = min(alive)[1] if alive else None
+
+    key = (route_config.destination, route_config.vrf)
+    previous_iface = active_interface_by_route.get(key)
+
+    # Remember the current winner for the next pass.
+    if current_iface is not None:
+        active_interface_by_route[key] = current_iface
+
+    # Need a real transition between two known interfaces to act on.
+    if previous_iface is None or current_iface is None:
+        return
+    if current_iface == previous_iface:
+        return
+
+    # Only fail back FROM a dial-on-demand WWAN interface ...
+    if not previous_iface.startswith('wwan'):
+        return
+    if not dial_on_demand_check(previous_iface):
+        return
+
+    # ... TO a higher-priority non-WWAN interface (e.g. a LAN interface). Since
+    # current_iface is now the lowest-metric reachable nexthop, it is by
+    # definition higher priority than the WWAN interface it replaced.
+    if current_iface.startswith('wwan'):
+        return
+
+    _interface_modem_disconnect(previous_iface)
 
 def print_debug(*args, **kwargs):
     if debug:
@@ -137,6 +259,11 @@ def is_target_alive(
         # in any case if 'interface' is given, use it
         if options.interface:
             iface_opt = f'-I {options.interface}'
+
+        if dial_on_demand_check(target_iface):
+            print('failover activated')
+            return _interface_modem_check(target_iface)
+
         match proto:
             case 'icmp':
                 command = f'/usr/bin/ping -q {target} {iface_opt} -n -c 2 -W 1'
@@ -518,6 +645,12 @@ if __name__ == '__main__':
     # Translates nexthop with dhcp_interface to usual nexthop
     nexthop_by_dhcp_nexthop = {}
 
+    # keys: (route destination, vrf)
+    # values: interface name of the previously active (lowest-metric reachable)
+    # nexthop. Used to detect a dial-on-demand WWAN -> higher-priority failback.
+    active_interface_by_route = {}
+
+    print('failover started')
     had_sleeps = True
     while not kill_called:
         # Check in case daemon was launched without routes
@@ -533,6 +666,10 @@ if __name__ == '__main__':
             route = route_config.destination
             vrf = route_config.vrf
             vrf_opt = route_config.vrf_opt
+
+            # (metric, interface, is_alive) for each nexthop, used after the
+            # loop to detect a dial-on-demand WWAN -> higher-priority failback.
+            nexthop_status = []
 
             for nhc in route_config.nexthops:
                 # Perle change start: process dhcp_interface
@@ -558,6 +695,8 @@ if __name__ == '__main__':
                     is_dhcp_interface=is_dhcp_iface,
                     # Perle change end
                 )
+
+                nexthop_status.append((nhc.conf_metric, nhc.conf_iface, is_alive))
 
                 # Route not found in the current routing table
                 if not is_route_exists(ip_args):
@@ -599,5 +738,11 @@ if __name__ == '__main__':
                 time.sleep(int(nhc.timeout))
                 if kill_called:
                     break
+
+            # After evaluating every nexthop for this route, disconnect a
+            # dial-on-demand WWAN bearer if we failed back to a better route.
+            handle_dial_on_demand_failback(
+                route_config, nexthop_status, active_interface_by_route
+            )
 
     print_debug(f"Out of main loop, {kill_called=}")

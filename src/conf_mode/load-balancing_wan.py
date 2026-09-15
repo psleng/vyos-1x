@@ -22,6 +22,11 @@ from vyos.utils.dict import dict_search_args
 from vyos.utils.process import cmd
 from vyos import ConfigError
 from vyos import airbag
+from vyos.utils.process import call
+from vyos.configdict import get_interface_dict
+from systemd import journal
+
+
 airbag.enable()
 
 service = 'vyos-wan-load-balance.service'
@@ -56,6 +61,11 @@ def get_config(config=None):
             del lb['rule'][rule]['limit']
 
     set_dependents('conntrack', conf)
+
+    if lb:
+        # WWAN interfaces whose dial-on-demand service must be restarted to
+        # pick up a load-balancing configuration change (e.g. inbound-interface).
+        lb['restart_dial_on_demand'] = _dial_on_demand_restart_interfaces(conf, lb)
 
     return lb
 
@@ -148,11 +158,64 @@ def verify(lb):
 def generate(lb):
     return None
 
+
+def _dial_on_demand_restart_interfaces(conf, lb):
+    """Return dial-on-demand WWAN interfaces whose relevant WAN load-balancing
+    configuration changed since the last commit.
+
+    The dial-on-demand@<ifname> service builds its dialing behaviour from the
+    WAN load-balancing configuration (which inbound interfaces trigger a dial,
+    the failover flag, interface membership and the interface-health tests), so
+    a change to any of those must restart the service for that interface --
+    e.g. when a rule's inbound-interface is changed.
+    """
+    effective = conf.get_config_dict(['load-balancing', 'wan'],
+                                     key_mangling=('-', '_'),
+                                     no_tag_node_value_mangle=True,
+                                     get_first_key=True,
+                                     effective=True)
+
+    # Rule fields that influence when/how the dial-on-demand service dials.
+    rule_keys = ('inbound_interface', 'interface', 'failover', 'exclude')
+
+    def relevant(config, ifname):
+        health = dict_search_args(config, 'interface_health', ifname)
+        rules = {}
+        for rule_no, rule_conf in (config.get('rule') or {}).items():
+            if ifname in (rule_conf.get('interface') or []):
+                rules[rule_no] = {key: rule_conf.get(key) for key in rule_keys}
+        return {'interface_health': health, 'rule': rules}
+
+    # WWAN interfaces referenced anywhere in the new or previous config.
+    candidates = set(lb.get('interface_health') or {})
+    candidates |= set(effective.get('interface_health') or {})
+    for config in (lb, effective):
+        for rule_conf in (config.get('rule') or {}).values():
+            candidates |= set(rule_conf.get('interface') or [])
+
+    restart = []
+    for ifname in sorted(candidates):
+        if not ifname.startswith('wwan'):
+            continue
+        # Only interfaces configured for dial-on-demand run the service.
+        if not conf.exists(['interfaces', 'wwan', ifname,
+                            'connection-mode', 'dial-on-demand']):
+            continue
+        if relevant(lb, ifname) != relevant(effective, ifname):
+            restart.append(ifname)
+
+    return restart
+
+
 def apply(lb):
     if not lb:
         cmd(f'systemctl stop {service}')
     else:
         cmd(f'systemctl restart {service}')
+        # Restart the dial-on-demand service for any WWAN interface whose
+        # load-balancing configuration changed, so it picks up the change.
+        for ifname in lb.get('restart_dial_on_demand', []):
+            call(f'systemctl restart dial-on-demand@{ifname}:*.service')
 
     call_dependents()
 

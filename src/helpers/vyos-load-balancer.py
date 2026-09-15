@@ -34,12 +34,59 @@ from vyos.wanloadbalance import health_ping_host_ttl
 from vyos.wanloadbalance import parse_dhcp_nexthop
 from vyos.wanloadbalance import parse_ppp_nexthop
 
+from vyos.utils.wwan.wwan_client import (  # noqa: E402
+    WWANClientSync,
+)
+
+
 nftables_wlb_conf = '/run/nftables_wlb.conf'
 wlb_status_file = '/run/wlb_status.json'
 wlb_pid_file = '/run/wlb_daemon.pid'
 sleep_interval = 5 # Main loop sleep interval
 
+def _interface_modem_check(iface):
+    #print('interface modem check')
+    client = WWANClientSync()
+    client.add_interface(int(iface[4:]))
+    #print('added interface: ', iface[4:])
+    client.set_configuration(int(iface[4:]), {
+        "connection_mode": "dial-on-demand",
+        "primary_sim_slot": 1,
+    })
+    client.wait_for_bearer(int(iface[4:]), 'connected', timeout=2)
+    bearer_status = client.get_bearer_status(int(iface[4:]))
+    client.close()
+    #print("got bearer status: ", bearer_status)
+    if bearer_status == "connected" or bearer_status == "registered":
+        print('bearer status is connected/registered')
+        return True
+    else:
+        print('bearer status is disconnected')
+        return False
+
+def dial_on_demand_check(ifname, conf=None):
+    """
+    Return True if ifname is a WWAN interface configured for dial-on-demand.
+
+    Only wwanX interfaces with dial-on-demand use the modem bearer check; every
+    other interface (ethX, ...) uses the normal IP health check.
+    """
+    if not ifname.startswith('wwan'):
+        return False
+    if conf is None:
+        conf = Config()
+    mode = conf.return_effective_value(
+        ['interfaces', 'wwan', ifname, 'connection-mode'])
+    return mode == 'dial-on-demand'
+
+
 def health_check(ifname, conf, state, test_defaults):
+    # If dial-on-demand is active for this WWAN interface, intercept the health
+    # check with the modem bearer-state check regardless of the configured test
+    # type. Otherwise fall through to the normal IP health check.
+    if dial_on_demand_check(ifname):
+        return _interface_modem_check(ifname)
+
     # Run health tests for interface
 
     if get_ipv4_address(ifname) is None:
@@ -54,7 +101,7 @@ def health_check(ifname, conf, state, test_defaults):
 
         if not target:
             return False
-
+        print('pinging host')
         return health_ping_host(target, ifname, wait_time=resp_time)
 
     for test_id, test_conf in conf['test'].items():
@@ -319,6 +366,7 @@ if __name__ == '__main__':
                 for ifname, health_conf in lb['interface_health'].items():
                     state = lb['health_state'][ifname]
 
+                    print('Doing health check now')
                     result = health_check(ifname, health_conf, state=state, test_defaults=lb['test_defaults'])
 
                     state_changed = result != state['state']
