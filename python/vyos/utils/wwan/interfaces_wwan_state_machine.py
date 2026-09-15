@@ -10558,6 +10558,9 @@ class ModemStateMachine:
         Restart-worthy changes:
           * ``primary_sim_slot`` — switches which SIM is in service;
           * ``network_mode``     — modem-level RAT selection (SetCurrentModes);
+          * ``connection_mode``  — switching into/out of dial-on-demand changes
+            whether the FSM emits health-check probe traffic, so rebuild from a
+            clean startup rather than reconciling a live monitor mid-flight;
           * connection parameters (APN, auth, pdp-type, roaming, bands) of the
             **active** SIM slot only.
         """
@@ -10565,8 +10568,11 @@ class ModemStateMachine:
             return False  # First-time configuration doesn't need disconnection
 
         # primary_sim_slot / network_mode are modem-level and always impact the
-        # running session when changed.
-        for param in ('primary_sim_slot', 'network_mode'):
+        # running session when changed.  connection_mode is included so a switch
+        # into/out of dial-on-demand rebuilds from a clean startup — that is
+        # where the dial-on-demand probe-traffic suppression is decided — rather
+        # than trying to stop a live ping monitor mid-flight.
+        for param in ('primary_sim_slot', 'network_mode', 'connection_mode'):
             if old_config.get(param) != new_config.get(param):
                 logger.info(f"Connection parameter '{param}' changed - restart required",
                            extra={'interface_number': self.interface_number, 'param': param})
@@ -10758,7 +10764,11 @@ class ModemStateMachine:
             await self._configure_modem_initial()
             return
 
-        # ── Monitoring-only change (e.g. connection-mode, timers) ────────
+        # ── Monitoring-only change (e.g. timers, monitoring/limits) ──────
+        # NOTE: connection-mode is NOT handled here — it is restart-worthy
+        # (see _requires_disconnection) so it takes the graceful-restart branch
+        # above, ensuring dial-on-demand's probe-traffic suppression is decided
+        # from a clean startup.
         logger.info("Configuration updated without disconnection - only monitoring/timer changes",
                    extra={'interface_number': self.interface_number})
         # For non-connection changes, just update internal state.
@@ -13420,6 +13430,12 @@ class ModemStateMachine:
         True (inconclusive ⇒ do NOT fail over on the signal number alone).
         """
         try:
+            # dial-on-demand must emit no probe traffic (the operator's app
+            # treats any egress as "keep the link up"), so skip the ping
+            # cross-check and treat it as inconclusive — never fail over on the
+            # signal number alone.
+            if self.connection_mode == 'dial-on-demand':
+                return True
             if not self.bearer_path:
                 return True  # inconclusive — never switch on signal alone
             interface_name = await self._get_bearer_interface_name()
@@ -16274,6 +16290,18 @@ class ModemStateMachine:
         connectivity_config = self.config.get('connectivity_monitoring', {})
         if not connectivity_config.get('enabled', True):
             logger.info("Connectivity monitoring disabled",
+                       extra={'interface_number': self.interface_number})
+            return
+
+        # dial-on-demand: the operator's application decides when the link is
+        # needed by watching wwanN for traffic.  FSM health-check pings are
+        # traffic too, so they would defeat that idle detection and pin the
+        # bearer up forever — emit no probe traffic in this mode.  A
+        # connection-mode change forces a full restart, so this is always
+        # re-evaluated from a clean startup.
+        if self.connection_mode == 'dial-on-demand':
+            logger.info("Connectivity monitoring suppressed in dial-on-demand "
+                       "(no FSM-generated probe traffic)",
                        extra={'interface_number': self.interface_number})
             return
 

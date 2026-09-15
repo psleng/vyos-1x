@@ -246,6 +246,11 @@ discarded — the change is treated as "rebuild from scratch":
 
 - `sim primary-slot` (switches which SIM is in service)
 - `network-mode` (modem RAT selection)
+- `connection-mode` (switching into/out of dial-on-demand changes whether the
+  FSM emits health-check probe traffic, so it rebuilds from a clean startup
+  rather than reconciling a live monitor mid-flight; changing it therefore
+  brings the bearer down and back up). This is expected to be a rare, at-
+  provisioning-time change.
 - the **active** SIM slot's connection parameters: `apn`, `username`,
   `password`, `auth-type`, `pdp-type`, `roaming`, `supported-bands`
 
@@ -1097,8 +1102,8 @@ then:
 2. Call D-Bus `connect_bearer()` → bearer is re-established.
 3. Poll D-Bus `get_bearer_status()` → returns `"connected"` or `"disconnected"`.
 
-**While the bearer is up, dial-on-demand behaves identically to always-on.**
-Every event that always-on reacts to is honored and propagated to Linux:
+**While the bearer is up, dial-on-demand reacts to the same events as
+always-on**, all honored and propagated to Linux:
 
 - bearer drops unexpectedly (carrier deactivation, signal loss) → the kernel
   interface is brought down and auto-recovery re-establishes the bearer;
@@ -1107,7 +1112,18 @@ Every event that always-on reacts to is honored and propagated to Linux:
   re-addressed;
 - the SIM swaps / fails over → full teardown and reconnect on the new SIM.
 
-The only difference from always-on is the **explicit** `disconnect_bearer()`
+**No FSM-originated probe traffic.**  Unlike always-on, dial-on-demand emits
+**no** connectivity health-check pings — the `connectivity-monitoring` ping
+loop is suppressed for the whole life of the interface in this mode.  The
+dial-on-demand consumer is expected to watch `wwanN` for traffic to decide
+whether the link is still needed; FSM-generated pings are traffic too, so they
+would defeat that idle detection and pin the bearer up forever.  For the same
+reason the signal-loss failover's connectivity cross-check is skipped (weak
+signal is treated as inconclusive rather than probed).  Passive event handling
+above (bearer-state, IP-change, registration, SIM) is unaffected — none of it
+puts packets on the wire.
+
+The other difference from always-on is the **explicit** `disconnect_bearer()`
 (or on-demand `disconnect()`): that, and only that, drops the bearer without
 notifying Linux and suppresses auto-reconnect until the next `connect_bearer()`.
 A transient/unexpected failure while connected does **not** suppress recovery.
@@ -1173,6 +1189,13 @@ set interfaces wwan wwan0 interface-management interface-up-timeout 10
 ### Connectivity Health Monitoring
 
 > **If unconfigured:** Enabled — active ping probes to detect dead paths.  Interval 60 s, timeout 10 s, failure-threshold 2, IPv4 targets: 8.8.8.8 + 1.1.1.1.
+>
+> **Suppressed under `connection-mode dial-on-demand`.**  In that mode the FSM
+> emits no probe traffic at all (the consumer watches `wwanN` for traffic to
+> decide whether the link is needed, so FSM pings would keep it up forever).
+> The monitor is disabled for the life of the interface regardless of the
+> settings below.  Because `connection-mode` is a full-restart parameter,
+> switching modes re-evaluates this from a clean startup.
 
 ```
 # To disable connectivity monitoring:
