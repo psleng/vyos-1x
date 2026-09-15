@@ -369,10 +369,18 @@ def verify(login):
                 if enhanced_password_policy:
                     policy_error = password_policy_check(
                         plaintext_password,
-                        minlen=int(enhanced_password_policy.get('min_len', 9)),
-                        dcredit=-int(enhanced_password_policy.get('min_digits', 1)),
-                        ucredit=-int(enhanced_password_policy.get('min_uppercase', 1)),
-                        ocredit=-int(enhanced_password_policy.get('min_special', 1)),
+                        minlen=int(
+                            enhanced_password_policy.get('minimum_length', 9)
+                        ),
+                        dcredit=-int(
+                            enhanced_password_policy.get('minimum_digit', 1)
+                        ),
+                        ucredit=-int(
+                            enhanced_password_policy.get('minimum_uppercase', 1)
+                        ),
+                        ocredit=-int(
+                            enhanced_password_policy.get('minimum_special', 1)
+                        ),
                     )
                     if policy_error:
                         raise ConfigError(f'User "{user}" - {policy_error}')

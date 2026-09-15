@@ -572,7 +572,7 @@
                    <help>Password policy requirements</help>
                  </properties>
                  <children>
-                   <leafNode name="min-len">
+                   <leafNode name="minimum-length">
                      <properties>
                        <help>Minimum password length</help>
                        <valueHelp>
@@ -586,7 +586,7 @@
                      </properties>
                      <defaultValue>9</defaultValue>
                    </leafNode>
-                   <leafNode name="min-digits">
+                   <leafNode name="minimum-digit">
                      <properties>
                        <help>Minimum number of digits in the password</help>
                        <valueHelp>
@@ -600,7 +600,7 @@
                      </properties>
                      <defaultValue>1</defaultValue>
                    </leafNode>
-                   <leafNode name="min-uppercase">
+                   <leafNode name="minimum-uppercase">
                      <properties>
                        <help>Minimum number of uppercase letters in the password</help>
                        <valueHelp>
@@ -614,7 +614,7 @@
                      </properties>
                      <defaultValue>1</defaultValue>
                    </leafNode>
-                   <leafNode name="min-special">
+                   <leafNode name="minimum-special">
                      <properties>
                        <help>Minimum number of special characters in the password</help>
                        <valueHelp>
