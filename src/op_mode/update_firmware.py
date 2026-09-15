@@ -24,7 +24,8 @@ from time import monotonic
 from vyos.utils.io import ask_yes_no
 from vyos.utils.process import rc_cmd
 from vyos.flavor import get_image_secure_grub
-from vyos.system import grub
+from vyos.system import grub, disk
+from vyos.template import render
 
 DEFAULT_IMAGE = '/usr/lib/u-boot/platform/u-boot-raw-boot.img'
 DEFAULT_DEVICE = '/dev/mmcblk0'
@@ -295,6 +296,21 @@ def ensure_efi_mounted(mount_point: Path, requested_device: str | None):
         rc_cmd(f'umount {quote(str(mount_point))}')
 
 
+def offer_grub_config_regen(force: bool = False) -> None:
+    # Rewrites only grub.cfg.d/25-vyos-common-autoload.cfg from THIS image's
+    # template. render() directly, NOT grub.common_write() — the latter is gated
+    # `if PLATFORM == "x86_64"` and silently no-ops on arm64.
+    if not force and not ask_yes_no(
+            'Also regenerate the GRUB boot config on disk from this image?',
+            default=True):
+        return
+
+    root_dir = disk.find_persistence()
+    common_config = f'{root_dir}/{grub.CFG_VYOS_COMMON}'
+    render(common_config, grub.TMPL_GRUB_COMMON, {})
+    print(f'Regenerated GRUB boot config: {common_config}')
+
+
 def update_grub(grub_source: Path, target_relpath: str, mount_point: Path,
                 efi_device: str | None, force: bool = False) -> None:
     if not grub_source.is_file():
@@ -311,26 +327,23 @@ def update_grub(grub_source: Path, target_relpath: str, mount_point: Path,
         target_path = mount_point.joinpath(target_rel)
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Pre-write "already up-to-date" checksum comparison intentionally removed
-        # (consistent with the uboot path): manual operation, gated by the prompt.
+        # The core update and the boot-config regen are offered independently,
+        # so declining the core copy still reaches the config-regen offer below.
+        if force or ask_yes_no('Proceed with GRUB EFI update?', default=False):
+            print('Copying GRUB EFI binary. Do not power off the system ...')
+            copy2(grub_source, target_path)
+            sync()
 
-        if not force:
-            if not ask_yes_no('Proceed with GRUB EFI update?', default=False):
-                print('GRUB EFI update cancelled.')
-                return
+            print('Verifying written data ...')
+            target_hash_after = sha256_file(target_path)
+            if sha256_file(grub_source) != target_hash_after:
+                exit('Verification failed: written GRUB EFI binary does not match source')
 
-        print('Copying GRUB EFI binary. Do not power off the system ...')
-        copy2(grub_source, target_path)
-        sync()
+            print('GRUB EFI update completed successfully.')
+        else:
+            print('GRUB EFI core update skipped.')
 
-        print('Verifying written data ...')
-        target_hash_after = sha256_file(target_path)
-
-    source_hash = sha256_file(grub_source)
-    if source_hash != target_hash_after:
-        exit('Verification failed: written GRUB EFI binary does not match source')
-
-    print('GRUB EFI update completed successfully.')
+    offer_grub_config_regen(force)
 
 
 def install_grub(device: str | None, boot_dir: str, mount_point: Path,
@@ -350,16 +363,15 @@ def install_grub(device: str | None, boot_dir: str, mount_point: Path,
     with ensure_efi_mounted(mount_point, efi_device) as mounted_source:
         print(f'EFI partition  : {mounted_source} (mounted at {mount_point})')
 
-        if not force:
-            if not ask_yes_no('Proceed with GRUB install?', default=False):
-                print('GRUB install cancelled.')
-                return
+        if force or ask_yes_no('Proceed with GRUB install?', default=False):
+            print('Installing GRUB. Do not power off the system ...')
+            grub.install(drive, boot_dir, str(mount_point))
+            sync()
+            print('GRUB install completed successfully.')
+        else:
+            print('GRUB install skipped.')
 
-        print('Installing GRUB. Do not power off the system ...')
-        grub.install(drive, boot_dir, str(mount_point))
-        sync()
-
-    print('GRUB install completed successfully.')
+    offer_grub_config_regen(force)
 
 
 def update_firmware(image_path: Path, device_path: Path, force: bool = False) -> None:
