@@ -85,6 +85,12 @@ MAX_TACACS_COUNT: int = 8
 # Minimum USER id for TACACS users
 MIN_TACACS_UID = 900
 
+# PERLE: Default minimum requirements for the enhanced password policy.
+PASSWORD_POLICY_DEFAULT_MINIMUM_LENGTH = 9
+PASSWORD_POLICY_DEFAULT_MINIMUM_DIGIT = 1
+PASSWORD_POLICY_DEFAULT_MINIMUM_UPPERCASE = 1
+PASSWORD_POLICY_DEFAULT_MINIMUM_SPECIAL = 1
+
 # As of OpenSSH 9.8p1 in Debian trixie, DSA keys are no longer supported
 SSH_DSA_DEPRECATION_WARNING: str = (
     f'{SSH_DSA_DEPRECATION_WARNING} '
@@ -94,24 +100,34 @@ SSH_DSA_DEPRECATION_WARNING: str = (
 
 def password_policy_check(
     password: str,
-    minlen: int = 9,
-    ucredit: int = -1,
-    dcredit: int = -1,
-    ocredit: int = -1,
+    minlen: int = PASSWORD_POLICY_DEFAULT_MINIMUM_LENGTH,
+    ucredit: int = -PASSWORD_POLICY_DEFAULT_MINIMUM_UPPERCASE,
+    dcredit: int = -PASSWORD_POLICY_DEFAULT_MINIMUM_DIGIT,
+    ocredit: int = -PASSWORD_POLICY_DEFAULT_MINIMUM_SPECIAL,
 ) -> str | None:
+    """
+        PERLE: Validate a password against enhanced policy requirements.
+    """
 
+    errors = []
     uppercase_count = sum(1 for character in password if character.isupper())
     digit_count = sum(1 for character in password if character.isdigit())
     other_count = sum(1 for character in password if not character.isalnum())
 
     if ucredit < 0 and uppercase_count < abs(ucredit):
-        return f'Password must contain at least {abs(ucredit)} uppercase letter(s).'
+        errors.append(
+            f'Password must contain at least {abs(ucredit)} uppercase letter(s).'
+        )
 
     if dcredit < 0 and digit_count < abs(dcredit):
-        return f'Password must contain at least {abs(dcredit)} digit(s).'
+        errors.append(
+            f'Password must contain at least {abs(dcredit)} digit(s).'
+        )
 
     if ocredit < 0 and other_count < abs(ocredit):
-        return f'Password must contain at least {abs(ocredit)} special character(s).'
+        errors.append(
+            f'Password must contain at least {abs(ocredit)} special character(s).'
+        )
 
     credited_length = len(password)
     if ucredit > 0:
@@ -122,12 +138,12 @@ def password_policy_check(
         credited_length += min(other_count, ocredit)
 
     if credited_length < minlen:
-        return (
+        errors.append(
             f'Password length score is {credited_length}; '
             f'it must be at least {minlen}.'
         )
 
-    return None
+    return '\n'.join(errors) if errors else None
 
 
 def get_shadow_password(username):
@@ -234,10 +250,11 @@ def expand_with_origin(lst):
 
 
 def verify(login):
+    # PERLE: Begin - get enhanced-policy config.
     enhanced_password_policy = dict_search(
         'enhanced_policy.password', login
     )
-
+    # PERLE: End - get enhanced-policy config.
     if 'rm_users' in login:
         # This check is required as the script is also executed from vyos-router
         # init script and there is no SUDO_USER environment variable available
@@ -366,30 +383,48 @@ def verify(login):
             # A user password should be sufficiently complex
             failed_check_status = [EPasswdStrength.WEAK, EPasswdStrength.ERROR]
             if plaintext_password and len(plaintext_password) > 0:
+                # PERLE: Begin - enforce the configured minimum password requirements.
                 if enhanced_password_policy:
                     policy_error = password_policy_check(
                         plaintext_password,
                         minlen=int(
-                            enhanced_password_policy.get('minimum_length', 9)
+                            enhanced_password_policy.get(
+                                'minimum_length',
+                                PASSWORD_POLICY_DEFAULT_MINIMUM_LENGTH,
+                            )
                         ),
                         dcredit=-int(
-                            enhanced_password_policy.get('minimum_digit', 1)
+                            enhanced_password_policy.get(
+                                'minimum_digit',
+                                PASSWORD_POLICY_DEFAULT_MINIMUM_DIGIT,
+                            )
                         ),
                         ucredit=-int(
-                            enhanced_password_policy.get('minimum_uppercase', 1)
+                            enhanced_password_policy.get(
+                                'minimum_uppercase',
+                                PASSWORD_POLICY_DEFAULT_MINIMUM_UPPERCASE,
+                            )
                         ),
                         ocredit=-int(
-                            enhanced_password_policy.get('minimum_special', 1)
+                            enhanced_password_policy.get(
+                                'minimum_special',
+                                PASSWORD_POLICY_DEFAULT_MINIMUM_SPECIAL,
+                            )
                         ),
                     )
                     if policy_error:
-                        raise ConfigError(f'User "{user}" - {policy_error}')
-
+                        raise ConfigError(
+                            f'User "{user}" - Failed to meet the password '
+                            f'requirements:\n{policy_error}'
+                        )
+                # PERLE: End - enforce the configured minimum password requirements.
                 result = evaluate_strength(plaintext_password)
                 if result['strength'] in failed_check_status:
                     tmp = result['error']
+                    # PERLE: Begin - raise error if enhanced-policy is enabled and error happened.
                     if enhanced_password_policy:
                         raise ConfigError(f'User "{user}" - {tmp}')
+                    # PERLE: End - raise error if enhanced-policy is enabled and error happened.
                     Warning(f'User "{user}" - {tmp}')
 
             for pubkey, pubkey_options in dict_search(
