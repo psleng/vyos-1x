@@ -20,6 +20,10 @@ Send `SHOW SYSTEM INFO` from an authorized number to receive the hostname,
 version, system time, timezone, and uptime. This read-only command does not
 require the PIN, but the sender must still be whitelisted.
 
+Send `PING <host-or-ip>` to test reachability. This read-only command does not
+accept a PIN; IPv4, IPv6, and resolvable hostnames are supported. The reply is
+`PING <target> OK` or `PING <target> FAILED`.
+
 Bare `REBOOT` messages are rejected. Existing authorized-number configurations
 must have a PIN added before committing. The legacy
 `IGOS_SMS_COMMAND_ALLOWED_SENDERS` environment variable no longer authorizes SMS.

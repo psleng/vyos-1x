@@ -38,10 +38,9 @@ Matching is case-sensitive (capital letters only).
 
 from __future__ import annotations
 
-import logging
-from logging.handlers import SysLogHandler
 import hmac
 import json
+import logging
 import os
 import re
 import signal
@@ -50,6 +49,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from logging.handlers import SysLogHandler
 from typing import Dict, List
 
 from vyos.utils.wwan.wwan_client import WWANClientSync, WWANError
@@ -130,6 +130,7 @@ class ServiceConfig:
 class SmsCommandService:
     CMD_RE = re.compile(r'\s*([0-9]{6})\s+REBOOT\s*')
     INFO_RE = re.compile(r'\s*SHOW\s+SYSTEM\s+INFO\s*')
+    PING_RE = re.compile(r'\s*PING\s+(\S+)\s*')
 
     def __init__(self, cfg: ServiceConfig):
         self.cfg = cfg
@@ -165,6 +166,8 @@ class SmsCommandService:
     @staticmethod
     def _system_info() -> str:
         """Return the compact system information displayed by the web UI."""
+        from vyos.utils.system import get_uptime_seconds
+
         def output(command, fallback='N/A'):
             try:
                 return subprocess.check_output(command, text=True, timeout=3).strip() or fallback
@@ -178,14 +181,57 @@ class SmsCommandService:
         except OSError:
             pass
         timezone_name = output(['timedatectl', 'show', '-p', 'Timezone', '--value'])
+        try:
+            uptime_minutes, uptime_seconds = divmod(int(get_uptime_seconds()), 60)
+            uptime = f'{uptime_minutes} minutes {uptime_seconds} seconds'
+        except (TypeError, ValueError, OSError):
+            uptime = 'N/A'
         info = (
             f'Hostname: {socket.gethostname()}\n'
             f'Version: {version}\n'
-            f'System time: {time.strftime("%Y-%m-%d %H:%M:%S %Z")}\n'
+            f'System time: {time.strftime("%m/%d/%Y, %I:%M:%S %p")}\n'
             f'Timezone: {timezone_name}\n'
-            f'Uptime: {output(["uptime", "-p"])}'
+            f'Uptime: {uptime}'
         )
         return info[:160]
+
+    @staticmethod
+    def _ping_host(host: str) -> str:
+        try:
+            addresses = socket.getaddrinfo(host, None, 0, socket.SOCK_STREAM)
+            family = addresses[0][0] if addresses else socket.AF_INET
+            command = '/bin/ping6' if family == socket.AF_INET6 else '/bin/ping'
+            result = subprocess.run(
+                [command, '-c', '1', '-W', '5', host],
+                check=False, capture_output=True, text=True, timeout=10,
+            )
+            output = (result.stdout or result.stderr).strip()
+            loss_match = re.search(r'(\d+)%\s+packet loss', output)
+            loss = loss_match.group(1) if loss_match else ('0' if result.returncode == 0 else '100')
+            latency_match = re.search(r'time[=<]([0-9.]+)\s*ms', output)
+            if result.returncode == 0 and latency_match:
+                return f'OK, latency={latency_match.group(1)} ms, loss={loss}%'
+            return f'FAILED, loss={loss}%'
+        except (OSError, socket.gaierror, subprocess.SubprocessError):
+            return 'FAILED, loss=100%'
+
+    def _handle_system_info(self, if_num, number, audit):
+        response = self._system_info()
+        audit(response.replace('\n', ' | '))
+        self._send_response(if_num, number, response)
+
+    def _handle_ping(self, if_num, number, host, audit):
+        response = f'PING {host}: {self._ping_host(host)}'
+        audit(response)
+        self._send_response(if_num, number, response[:160])
+
+    def _handle_reboot(self, if_num, number, audit):
+        if self._execute_reboot():
+            audit('OK')
+            self._send_response(if_num, number, 'OK')
+        else:
+            audit('REBOOT FAILED')
+            self._send_response(if_num, number, 'REBOOT FAILED')
 
     def _process_message(self, if_name: str, if_num: int, msg: dict):
         msg_id = int(msg.get('id', -1))
@@ -200,9 +246,10 @@ class SmsCommandService:
             command = '[EMPTY]'
 
         def audit(result):
-            logger.warning(
+            logger.info(
                 'SMS command timestamp=%s sender=%r command=%s result=%s interface=%s id=%s',
-                datetime.now(timezone.utc).isoformat(), number, repr(command),
+                datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
+                number, repr(command),
                 result, if_name, msg_id,
             )
 
@@ -213,10 +260,12 @@ class SmsCommandService:
             return
 
         if self.INFO_RE.fullmatch(text):
-            response = self._system_info()
-            # Keep the complete reply in one syslog line for easy filtering.
-            audit(response.replace('\n', ' | '))
-            self._send_response(if_num, number, response)
+            self._handle_system_info(if_num, number, audit)
+            return
+
+        ping_match = self.PING_RE.fullmatch(text)
+        if ping_match:
+            self._handle_ping(if_num, number, ping_match.group(1), audit)
             return
 
         if not match:
@@ -234,12 +283,7 @@ class SmsCommandService:
             self._send_response(if_num, number, 'UNAUTHORIZED')
             return
 
-        if self._execute_reboot():
-            audit('OK')
-            self._send_response(if_num, number, 'OK')
-        else:
-            audit('REBOOT FAILED')
-            self._send_response(if_num, number, 'REBOOT FAILED')
+        self._handle_reboot(if_num, number, audit)
 
     def _poll_interface(self, if_name: str):
         if_num = _if_number(if_name)
@@ -297,7 +341,7 @@ class SmsCommandService:
             logger.error('No authorized numbers with PINs configured')
             return 2
 
-        logger.warning(
+        logger.info(
             'Starting WWAN SMS command service for interfaces=%s response_enabled=%s',
             ','.join(self.cfg.interfaces),
             self.cfg.response_enabled,
@@ -308,7 +352,7 @@ class SmsCommandService:
                 self._poll_interface(if_name)
             time.sleep(self.cfg.poll_interval)
 
-        logger.warning('WWAN SMS command service stopped')
+        logger.info('WWAN SMS command service stopped')
         return 0
 
 
