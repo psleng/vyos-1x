@@ -16,6 +16,7 @@
 
 from pathlib import Path
 from sys import exit
+import json
 import re
 
 from vyos.config import Config
@@ -47,7 +48,7 @@ def get_config(config=None):
         return None
 
     enabled_interfaces = []
-    allowed_senders = set()
+    authorized_numbers = {}
     errors = []
 
     for ifname in (conf.list_nodes(base) or []):
@@ -57,7 +58,7 @@ def get_config(config=None):
 
         allowed = [
             str(x).strip()
-            for x in (conf.return_values(sms_base + ['authorized-number']) or [])
+            for x in (conf.list_nodes(sms_base + ['authorized-number']) or [])
             if str(x).strip()
         ]
         if not allowed:
@@ -67,13 +68,21 @@ def get_config(config=None):
             continue
 
         enabled_interfaces.append(ifname)
-        allowed_senders.update(allowed)
+        authorized_numbers[ifname] = {}
+        for number in allowed:
+            pin = conf.return_value(sms_base + ['authorized-number', number, 'pin'])
+            if not re.fullmatch(r'\+?[0-9]{6,20}', number):
+                errors.append(f'Invalid authorized number for {ifname}')
+            if not isinstance(pin, str) or not re.fullmatch(r'[0-9]{6}', pin):
+                errors.append(f'A six-digit PIN is required for {ifname} authorized-number {number}')
+                continue
+            authorized_numbers[ifname][number] = pin
 
     enabled_interfaces = sorted(enabled_interfaces, key=_wwan_sort_key)
     return {
         'interfaces': enabled_interfaces,
-        'allowed_senders': sorted(allowed_senders),
-        'enabled': bool(enabled_interfaces and allowed_senders),
+        'authorized_numbers_json': json.dumps(authorized_numbers, separators=(',', ':')),
+        'enabled': bool(enabled_interfaces and authorized_numbers),
         'errors': errors,
     }
 
@@ -98,7 +107,7 @@ def generate(config):
         config_file.unlink(missing_ok=True)
         return None
 
-    render(config_file, 'wwan/igos-wwan-sms-command.j2', config)
+    render(config_file, 'wwan/igos-wwan-sms-command.j2', config, permission=0o600)
 
     return None
 

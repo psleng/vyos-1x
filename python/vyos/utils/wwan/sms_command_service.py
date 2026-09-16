@@ -23,15 +23,15 @@ Environment variables:
 
 - IGOS_SMS_COMMAND_INTERFACES: comma-separated list, e.g. "wwan0,wwan1"
   (default: "wwan0")
-- IGOS_SMS_COMMAND_ALLOWED_SENDERS: comma-separated list of E.164 numbers
-  (required)
+- IGOS_SMS_COMMAND_AUTHORIZED_NUMBERS: JSON mapping of interface names to
+  sender-number/PIN mappings (required)
 - IGOS_SMS_COMMAND_POLL_INTERVAL: polling interval in seconds (default: 5)
 - IGOS_SMS_COMMAND_RESPONSE_ENABLED: 1/true/yes to send
     ACCEPTED/REJECTED SMS responses (default: true)
 
 Accepted command format:
 
-    REBOOT
+    123456 REBOOT
 
 Matching is case-sensitive (capital letters only).
 """
@@ -39,12 +39,16 @@ Matching is case-sensitive (capital letters only).
 from __future__ import annotations
 
 import logging
+from logging.handlers import SysLogHandler
+import hmac
+import json
 import os
 import re
 import signal
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Dict, List
 
 from vyos.utils.wwan.wwan_client import WWANClientSync, WWANError
@@ -80,7 +84,7 @@ def _if_number(name: str) -> int:
 @dataclass
 class ServiceConfig:
     interfaces: List[str]
-    allowed_senders: List[str]
+    authorized_numbers: Dict[str, Dict[str, str]] = field(repr=False)
     poll_interval: float
     response_enabled: bool
 
@@ -90,8 +94,23 @@ class ServiceConfig:
             os.environ.get('IGOS_SMS_COMMAND_INTERFACES', 'wwan0')
         )
 
-        senders_raw = os.environ.get('IGOS_SMS_COMMAND_ALLOWED_SENDERS', '')
-        allowed_senders = [s.strip() for s in senders_raw.split(',') if s.strip()]
+        try:
+            authorized_numbers = json.loads(
+                os.environ.get('IGOS_SMS_COMMAND_AUTHORIZED_NUMBERS', '{}')
+            )
+        except (ValueError, TypeError):
+            raise ValueError('Invalid authorized-number configuration') from None
+        if not isinstance(authorized_numbers, dict) or not authorized_numbers:
+            raise ValueError('Authorized numbers with six-digit PINs are required')
+        for interface in interfaces:
+            numbers = authorized_numbers.get(interface)
+            if not isinstance(numbers, dict) or not numbers:
+                raise ValueError(f'Authorized numbers are required for {interface}')
+            for number, pin in numbers.items():
+                if (not re.fullmatch(r'\+?[0-9]{6,20}', number)
+                        or not isinstance(pin, str)
+                        or not re.fullmatch(r'[0-9]{6}', pin)):
+                    raise ValueError(f'Invalid authorized-number or PIN for {interface}')
 
         poll_interval = float(os.environ.get('IGOS_SMS_COMMAND_POLL_INTERVAL', '1'))
         response_enabled = _as_bool(
@@ -101,14 +120,14 @@ class ServiceConfig:
 
         return cls(
             interfaces=interfaces,
-            allowed_senders=allowed_senders,
+            authorized_numbers=authorized_numbers,
             poll_interval=max(1.0, poll_interval),
             response_enabled=response_enabled,
         )
 
 
 class SmsCommandService:
-    CMD_RE = re.compile(r'^\s*REBOOT\s*$')
+    CMD_RE = re.compile(r'\s*([0-9]{6})\s+REBOOT\s*')
 
     def __init__(self, cfg: ServiceConfig):
         self.cfg = cfg
@@ -145,36 +164,40 @@ class SmsCommandService:
         msg_id = int(msg.get('id', -1))
         number = str(msg.get('number', '')).strip()
 
-        if number not in self.cfg.allowed_senders:
+        text = str(msg.get('text', ''))
+        match = self.CMD_RE.fullmatch(text)
+        # Never include the SMS body or PIN in audit records.
+        command = 'REBOOT' if text.split()[-1:] == ['REBOOT'] else 'UNKNOWN'
+
+        def audit(result):
             logger.warning(
-                'Command rejected: unauthorized number (id=%s interface=%s number=%s)',
-                msg_id,
-                if_name,
-                number,
+                'SMS command timestamp=%s sender=%r command=%s result=%s interface=%s id=%s',
+                datetime.now(timezone.utc).isoformat(), number, command,
+                result, if_name, msg_id,
             )
+
+        expected_pin = self.cfg.authorized_numbers.get(if_name, {}).get(number)
+        if expected_pin is None:
+            audit('REJECTED_UNAUTHORIZED_SENDER')
             self._send_response(if_num, number, 'UNAUTHORIZED')
             return
 
-        text = str(msg.get('text', ''))
-        match = self.CMD_RE.fullmatch(text)
         if not match:
-            logger.warning(
-                'Command rejected: invalid format (id=%s interface=%s)',
-                msg_id,
-                if_name,
-            )
+            audit('REJECTED_INVALID_FORMAT')
             self._send_response(if_num, number, 'INVALID')
             return
 
-        logger.warning(
-            'Command accepted: reboot (id=%s interface=%s number=%s)',
-            msg_id,
-            if_name,
-            number,
-        )
+        if not hmac.compare_digest(match.group(1), expected_pin):
+            audit('REJECTED_INVALID_PIN')
+            self._send_response(if_num, number, 'UNAUTHORIZED')
+            return
+
+        audit('ACCEPTED')
         if self._execute_reboot():
+            audit('REBOOT_REQUESTED')
             self._send_response(if_num, number, 'OK')
         else:
+            audit('REBOOT_FAILED')
             self._send_response(if_num, number, 'REBOOT FAILED')
 
     def _poll_interface(self, if_name: str):
@@ -229,8 +252,8 @@ class SmsCommandService:
                 )
 
     def run(self):
-        if not self.cfg.allowed_senders:
-            logger.error('No allowed senders configured; set IGOS_SMS_COMMAND_ALLOWED_SENDERS')
+        if not self.cfg.authorized_numbers:
+            logger.error('No authorized numbers with PINs configured')
             return 2
 
         logger.warning(
@@ -255,6 +278,14 @@ def _configure_logging():
         level=level,
         format='%(asctime)s igos-wwan-sms-command[%(process)d]: %(levelname)s: %(message)s',
     )
+    if os.path.exists('/dev/log'):
+        handler = SysLogHandler(address='/dev/log')
+        handler.setFormatter(logging.Formatter(
+            'igos-wwan-sms-command[%(process)d]: %(levelname)s: %(message)s'
+        ))
+        logger.addHandler(handler)
+        logger.setLevel(level)
+        logger.propagate = False
 
 
 def main() -> int:
