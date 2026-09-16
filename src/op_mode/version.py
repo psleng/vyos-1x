@@ -52,8 +52,6 @@ Hardware vendor:  {{hardware_vendor}}
 Hardware model:   {{hardware_model}}
 Hardware S/N:     {{hardware_serial}}
 Hardware UUID:    {{hardware_uuid}}
-
-Copyright:        VyOS maintainers and contributors
 {%- if limerick %}
 {{limerick}}
 {% endif -%}
@@ -94,4 +92,3 @@ if __name__ == '__main__':
     except (ValueError, vyos.opmode.Error) as e:
         print(e)
         sys.exit(1)
-
