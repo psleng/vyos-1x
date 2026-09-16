@@ -23,8 +23,6 @@ from vyos.utils.process import cmd
 from vyos import ConfigError
 from vyos import airbag
 from vyos.utils.process import call
-from vyos.configdict import get_interface_dict
-from systemd import journal
 
 
 airbag.enable()
