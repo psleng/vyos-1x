@@ -5657,26 +5657,29 @@ class ModemStateMachine:
         except Exception:
             return False
 
-    async def _maybe_set_system_time_from_network(self, source: str = 'initial') -> bool:
+    async def _maybe_set_system_time_from_network(self, source: str = 'initial',
+                                                  force: bool = False) -> bool:
         """Set the system clock from cellular network time (NITZ) — opt-in.
 
         Runs only when ``network-time`` is configured on the interface.  Reads
         ``Modem.Time.GetNetworkTime()`` (delivered over the registration/NAS
         signaling — no data bearer required) and sets the clock, but ONLY when
-        NTP has not already synchronized it, so it never fights chrony.  Applied
-        at most once per service run and persisted to the RTC.  Fully guarded:
-        every failure is logged and left non-fatal so the connection cascade is
-        never disrupted.
+        NTP has not already synchronized it, so it never fights chrony.
+        Persisted to the RTC.  Fully guarded: every failure is logged and left
+        non-fatal so the connection cascade is never disrupted.
 
-        ``source`` identifies the trigger (``initial`` / ``retry`` / ``signal``)
-        for logging.  Returns ``True`` when the clock has been set OR the set is
-        no longer needed (NTP already owns it) — i.e. when the retry loop can
-        stop — and ``False`` when a later attempt should still be made.
+        ``source`` identifies the trigger (``initial`` / ``retry`` / ``signal``
+        / ``periodic``) for logging.  ``force`` bypasses the "already applied
+        this run" short-circuit so the periodic re-sync loop can correct drift;
+        the NTP guard still applies, so a real NTP fix is never overridden.
+        Returns ``True`` when the clock has been set OR the set is no longer
+        needed (NTP already owns it), ``False`` when a later attempt should
+        still be made.
         """
         try:
             if not (self.config and self.config.get('network_time_enabled')):
                 return True
-            if self._network_time_applied:
+            if self._network_time_applied and not force:
                 return True
             if not self.proxy:
                 return False
@@ -5783,17 +5786,15 @@ class ModemStateMachine:
         return bool(self.config and self.config.get('network_time_enabled'))
 
     def _ensure_network_time_started(self):
-        """Arm background NITZ acquisition (signal + bounded poll) if needed.
+        """Arm background NITZ acquisition + periodic re-sync if needed.
 
-        Idempotent and cheap: does nothing when the feature is off, the clock
-        has already been set this run, or the loop is already running.  Called
-        from the registration gate on every (re)configuration, so a run that
-        started with no NITZ available gets a fresh acquisition window on the
-        next attach / SIM switch / recovery.
+        Idempotent and cheap: does nothing when the feature is off or the loop
+        is already running.  Called from the registration gate on every
+        (re)configuration, so a run that started with no NITZ available gets a
+        fresh acquisition window on the next attach / SIM switch / recovery, and
+        the periodic re-sync loop is re-armed after a modem removal / bus swap.
         """
         if not self._network_time_config_enabled():
-            return
-        if self._network_time_applied:
             return
         # Subscribe to NITZ push notifications so a late update is captured even
         # after the bounded poll window closes.
@@ -5804,32 +5805,40 @@ class ModemStateMachine:
             self._network_time_retry_loop())
 
     async def _network_time_retry_loop(self):
-        """Poll for network time until the clock is set (or no longer needed).
+        """Acquire NITZ, then periodically re-sync the clock for drift control.
 
-        NITZ can arrive seconds-to-minutes after registration, and some carriers
-        send it late or only sporadically.  This is the CRITICAL acquisition
-        path for a unit whose data plan has expired: the SIM still REGISTERS (so
-        NITZ is obtainable over NAS signaling) but no data bearer can come up, so
-        NTP can never reach a server — modem network time is then the ONLY way to
-        correct a wrong RTC.  We therefore never simply give up: poll fast at
-        first (NITZ usually lands within seconds), then fall back to a slow
-        steady cadence indefinitely so the clock still recovers whenever the
-        network eventually provides the time.
+        **Phase 1 — acquisition.**  NITZ can arrive seconds-to-minutes after
+        registration, and some carriers send it late or only sporadically. This
+        is the CRITICAL path for a unit whose data plan has expired: the SIM
+        still REGISTERS (so NITZ is obtainable over NAS signaling) but no data
+        bearer can come up, so NTP can never reach a server — modem network time
+        is then the ONLY way to correct a wrong RTC.  Poll fast at first (NITZ
+        usually lands within seconds), then fall back to a slow steady cadence
+        indefinitely until the first successful set.
 
-        The loop exits only when the clock has been set, NTP has taken over, or
-        the feature is disabled.  It is cancelled with all other tasks on modem
-        removal / bus swap, and re-armed on the next registration.
+        **Phase 2 — periodic re-sync.**  Once the clock has been set, re-apply
+        NITZ every ``network-time update-interval`` seconds so a free-running
+        oscillator does not drift on a box with no reachable NTP.  Like
+        acquisition this rides NAS signaling only — it generates NO data-bearer
+        traffic, so it is safe on dial-on-demand / metered links.  The NTP guard
+        still applies on every tick, so a real NTP fix is never overridden (the
+        tick no-ops while chrony owns the clock, and resumes correcting if NTP
+        later loses sync).
+
+        The task is cancelled with all others on modem removal / bus swap and
+        re-armed on the next registration.
         """
         fast_interval = 15
         fast_deadline = time.time() + 900   # 15 min of tight polling
         slow_interval = 300                 # then every 5 min, indefinitely
         announced_slow = False
         try:
-            while True:
-                if not self._network_time_config_enabled() or self._network_time_applied:
+            # ── Phase 1: acquire the first fix as fast as the network allows ──
+            while not self._network_time_applied:
+                if not self._network_time_config_enabled():
                     return
                 if await self._maybe_set_system_time_from_network('retry'):
-                    return
+                    break
                 if time.time() < fast_deadline:
                     interval = fast_interval
                 else:
@@ -5842,6 +5851,18 @@ class ModemStateMachine:
                             extra={'interface_number': self.interface_number})
                     interval = slow_interval
                 await asyncio.sleep(interval)
+
+            # ── Phase 2: slow periodic re-sync for drift correction ──
+            while True:
+                interval = int((self.config or {}).get(
+                    'network_time_update_interval', 3600))
+                if interval <= 0:
+                    return  # re-sync disabled — behave as a one-shot set
+                await asyncio.sleep(interval)
+                if not self._network_time_config_enabled():
+                    return
+                await self._maybe_set_system_time_from_network(
+                    'periodic', force=True)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -10558,6 +10579,9 @@ class ModemStateMachine:
         Restart-worthy changes:
           * ``primary_sim_slot`` — switches which SIM is in service;
           * ``network_mode``     — modem-level RAT selection (SetCurrentModes);
+          * ``connection_mode``  — switching into/out of dial-on-demand changes
+            whether the FSM emits health-check probe traffic, so rebuild from a
+            clean startup rather than reconciling a live monitor mid-flight;
           * connection parameters (APN, auth, pdp-type, roaming, bands) of the
             **active** SIM slot only.
         """
@@ -10565,8 +10589,11 @@ class ModemStateMachine:
             return False  # First-time configuration doesn't need disconnection
 
         # primary_sim_slot / network_mode are modem-level and always impact the
-        # running session when changed.
-        for param in ('primary_sim_slot', 'network_mode'):
+        # running session when changed.  connection_mode is included so a switch
+        # into/out of dial-on-demand rebuilds from a clean startup — that is
+        # where the dial-on-demand probe-traffic suppression is decided — rather
+        # than trying to stop a live ping monitor mid-flight.
+        for param in ('primary_sim_slot', 'network_mode', 'connection_mode'):
             if old_config.get(param) != new_config.get(param):
                 logger.info(f"Connection parameter '{param}' changed - restart required",
                            extra={'interface_number': self.interface_number, 'param': param})
@@ -10758,7 +10785,11 @@ class ModemStateMachine:
             await self._configure_modem_initial()
             return
 
-        # ── Monitoring-only change (e.g. connection-mode, timers) ────────
+        # ── Monitoring-only change (e.g. timers, monitoring/limits) ──────
+        # NOTE: connection-mode is NOT handled here — it is restart-worthy
+        # (see _requires_disconnection) so it takes the graceful-restart branch
+        # above, ensuring dial-on-demand's probe-traffic suppression is decided
+        # from a clean startup.
         logger.info("Configuration updated without disconnection - only monitoring/timer changes",
                    extra={'interface_number': self.interface_number})
         # For non-connection changes, just update internal state.
@@ -13420,6 +13451,12 @@ class ModemStateMachine:
         True (inconclusive ⇒ do NOT fail over on the signal number alone).
         """
         try:
+            # dial-on-demand must emit no probe traffic (the operator's app
+            # treats any egress as "keep the link up"), so skip the ping
+            # cross-check and treat it as inconclusive — never fail over on the
+            # signal number alone.
+            if self.connection_mode == 'dial-on-demand':
+                return True
             if not self.bearer_path:
                 return True  # inconclusive — never switch on signal alone
             interface_name = await self._get_bearer_interface_name()
@@ -16274,6 +16311,18 @@ class ModemStateMachine:
         connectivity_config = self.config.get('connectivity_monitoring', {})
         if not connectivity_config.get('enabled', True):
             logger.info("Connectivity monitoring disabled",
+                       extra={'interface_number': self.interface_number})
+            return
+
+        # dial-on-demand: the operator's application decides when the link is
+        # needed by watching wwanN for traffic.  FSM health-check pings are
+        # traffic too, so they would defeat that idle detection and pin the
+        # bearer up forever — emit no probe traffic in this mode.  A
+        # connection-mode change forces a full restart, so this is always
+        # re-evaluated from a clean startup.
+        if self.connection_mode == 'dial-on-demand':
+            logger.info("Connectivity monitoring suppressed in dial-on-demand "
+                       "(no FSM-generated probe traffic)",
                        extra={'interface_number': self.interface_number})
             return
 

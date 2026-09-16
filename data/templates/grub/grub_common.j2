@@ -1,23 +1,34 @@
 # load EFI video modules
 if [ "${grub_platform}" == "efi" ]; then
     insmod efi_gop
-    insmod efi_uga
+    # efi_uga exists only on x86 EFI; on arm64 EFI it errors "not found"
+    if [ "${grub_cpu}" == "i386" -o "${grub_cpu}" == "x86_64" ]; then
+        insmod efi_uga
+    fi
 fi
 
 # create and activate serial console
 function setup_serial {
-    # initialize the first serial port by default
-    if [ "${console_type}" == "ttyS" -o "${console_type}" == "ttyAMA" ]; then
-        if [ "${console_num}" == "0" ]; then
-          serial --unit=0 --speed=${console_speed}
+    # grub's native serial (serial --unit=N) is an x86 ISA COM port; it does
+    # not exist on arm64 (real HW or VM), where the EFI/firmware console already
+    # carries serial output. So only register native serial on x86.
+    if [ "${grub_cpu}" == "i386" -o "${grub_cpu}" == "x86_64" ]; then
+        # initialize the first serial port by default
+        if [ "${console_type}" == "ttyS" -o "${console_type}" == "ttyAMA" ]; then
+            if [ "${console_num}" == "0" ]; then
+              serial --unit=0 --speed=${console_speed}
+            else
+              serial --unit=${console_num} --speed=115200
+            fi
         else
-          serial --unit=${console_num} --speed=115200
+            serial --unit=0 --speed=${console_speed}
         fi
+        terminal_output --append serial console
+        terminal_input --append serial console
     else
-        serial --unit=0 --speed=${console_speed}
+        terminal_output --append console
+        terminal_input --append console
     fi
-    terminal_output --append serial console
-    terminal_input --append serial console
 }
 
 setup_serial

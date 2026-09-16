@@ -33,6 +33,9 @@ menuentry "{{ version_name }}" --id {{ version_uuid }} {
     else
         set boot_opts="${boot_opts} ${console_opts}"
     fi
+{% if has_dtb is vyos_defined and has_dtb %}
+    devicetree "/boot/{{ version_name }}/dtb/${prod_id}-${model}.dtb"
+{% endif %}
     linux "/boot/{{ version_name }}/vmlinuz" ${boot_opts}
     initrd "/boot/{{ version_name }}/initrd.img"
 }

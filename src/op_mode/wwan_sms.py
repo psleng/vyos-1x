@@ -85,10 +85,10 @@ def _format_message_detail(msg: dict) -> str:
 
 # ── Public op-mode entry points ─────────────────────────────────────────
 
-def send_sms(raw: bool, interface: str, number: str, message: str):
+def generate_sms(raw: bool, interface: str, number: str, message: str):
     """Send an SMS message.
 
-    CLI: send sms interface <wwan0> number <phone> message <text>
+    CLI: generate interfaces wwan <wwan0> sms number <phone> message <text>
     """
     _check_interface(interface)
     if_num = _get_interface_number(interface)

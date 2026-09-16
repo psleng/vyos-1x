@@ -558,7 +558,7 @@ Send an SMS message via the WWAN modem.
 igos@igos:~$ generate interfaces wwan wwan0 sms number '+15551234567' message 'Router rebooted successfully'
 ```
 
-**Script:** `wwan_sms.py send_sms --interface="$4" --number="$7" --message="$9"`
+**Script:** `wwan_sms.py generate_sms --interface="$4" --number="$7" --message="$9"`
 
 > **Phone number format:** Use E.164 format (`+<countrycode><subscriber>`,
 > for example `+14168310352`) for best interoperability. Non-E.164 formats

@@ -36,7 +36,6 @@ from os import sync
 
 # PSL - access to additional routines
 from shutil import move
-from platform import machine
 # PSL - access to additional routines
 
 from json import loads
@@ -56,6 +55,7 @@ from vyos.defaults import directories
 from vyos.defaults import activation_hint
 from vyos.flavor import get_image_serial_console
 from vyos.flavor import get_image_dm_verity
+from vyos.flavor import get_image_secure_grub
 from vyos.remote import download
 from vyos.system import disk
 from vyos.system import grub
@@ -974,6 +974,26 @@ def validate_compatibility(iso_path: str, force: bool = False) -> None:
         cleanup()
         exit(MSG_INFO_INSTALL_EXIT)
 
+
+def install_secure_grub_core(efi_mount: str) -> None:
+    """secure_grub: CONSUME the prebuilt enforcing monolithic core carried in the
+    running image (built by 25-igos-grub-core.chroot) -- copy it onto the ESP.
+    The caller SKIPS grub-install for secure images (a monolithic core needs no
+    on-disk module tree; /boot/grub config is generated separately). No-op on
+    non-secure images; mirrors prod_image.py.
+    """
+    if not get_image_secure_grub():
+        return
+    core_src = Path('/usr/lib/grub/arm64-efi/monolithic/grubaa64.efi')
+    core_dst = Path(f'{efi_mount}/EFI/VyOS/grubaa64.efi')
+    if not core_src.is_file():
+        exit(f'secure_grub image is missing the enforcing GRUB core at {core_src} '
+             '-- refusing to install a non-enforcing bootloader')
+    print('Installing enforcing GRUB core to ESP EFI/VyOS/grubaa64.efi')
+    core_dst.parent.mkdir(parents=True, exist_ok=True)
+    copy(core_src, core_dst)
+
+
 def install_image() -> None:
     """Install an image to a disk
     """
@@ -1215,16 +1235,22 @@ def install_image() -> None:
         # install GRUB
         if is_raid_install(install_target):
             print('Installing GRUB to the drives')
-            l = install_target.disks
-            for disk_target in l:
+            disks = install_target.disks
+            for disk_target in disks:
                 disk.partition_mount(disk_target.partition['efi'], f'{DIR_DST_ROOT}/boot/efi')
-                grub.install(disk_target.name, f'{DIR_DST_ROOT}/boot/',
-                             f'{DIR_DST_ROOT}/boot/efi')
+                # secure builds consume the prebuilt core (below) -- skip grub-install
+                if not get_image_secure_grub():
+                    grub.install(disk_target.name, f'{DIR_DST_ROOT}/boot/',
+                                 f'{DIR_DST_ROOT}/boot/efi')
+                install_secure_grub_core(f'{DIR_DST_ROOT}/boot/efi')
                 disk.partition_umount(disk_target.partition['efi'])
         else:
             print('Installing GRUB to the drive')
-            grub.install(install_target.name, f'{DIR_DST_ROOT}/boot/',
-                         f'{DIR_DST_ROOT}/boot/efi')
+            # secure builds consume the prebuilt core (below) -- skip grub-install
+            if not get_image_secure_grub():
+                grub.install(install_target.name, f'{DIR_DST_ROOT}/boot/',
+                             f'{DIR_DST_ROOT}/boot/efi')
+            install_secure_grub_core(f'{DIR_DST_ROOT}/boot/efi')
 
         # sort inodes (to make GRUB read config files in alphabetical order)
         grub.sort_inodes(f'{DIR_DST_ROOT}/{grub.GRUB_DIR_VYOS}')
@@ -1502,13 +1528,12 @@ def add_image(image_path: str, vrf: str = None, username: str = '',
         move(f'{root_dir}/boot/{image_name}/filesystem.squashfs',
              f'{root_dir}/boot/{image_name}/{image_name}.squashfs')
 
-        # PSL - for arm64 - copy the whole DTB tree (any vendor subdir: ti/, perle/, ...) to firmware directory
-        if machine() == 'aarch64':
-            if Path(f"{DIR_ISO_MOUNT}/boot/dtb").exists():
-                print('Copying DTB files')
-                # copytree(f"{DIR_ISO_MOUNT}/boot/dtb", f"{root_dir}/boot/dtb", dirs_exist_ok=True)
-                copytree(f"{DIR_ISO_MOUNT}/boot/dtb", f"{root_dir}/boot/{image_name}/dtb",
-                         dirs_exist_ok=True, symlinks=True)
+        # Copy the image's DTBs when present -- no arch guard so 32-bit ARM (armhf)
+        # works too; a natural no-op on x86, which ships no /boot/dtb.
+        if Path(f"{DIR_ISO_MOUNT}/boot/dtb").exists():
+            print('Copying DTB files')
+            copytree(f"{DIR_ISO_MOUNT}/boot/dtb", f"{root_dir}/boot/{image_name}/dtb",
+                     dirs_exist_ok=True, symlinks=True)
 
         # unmount an ISO and cleanup
         cleanup([str(iso_path)])

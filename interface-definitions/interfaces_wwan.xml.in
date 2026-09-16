@@ -215,12 +215,27 @@
             <defaultValue>auto</defaultValue>
           </leafNode>
           <!-- ── Network time (NITZ) ─────────────────────────────── -->
-          <leafNode name="network-time">
+          <node name="network-time">
             <properties>
-              <help>Set the system clock from cellular network time (NITZ) at registration</help>
-              <valueless/>
+              <help>Set the system clock from cellular network time (NITZ); opt-in, presence enables</help>
             </properties>
-          </leafNode>
+            <children>
+              <leafNode name="update-interval">
+                <properties>
+                  <help>Re-sync cadence for drift correction over NAS signaling (generates no data-bearer traffic)</help>
+                  <valueHelp>
+                    <format>u32:300-2592000</format>
+                    <description>Seconds between NITZ re-syncs (default: 3600)</description>
+                  </valueHelp>
+                  <constraint>
+                    <validator name="numeric" argument="--range 300-2592000"/>
+                  </constraint>
+                  <constraintErrorMessage>Network-time update-interval must be between 300 and 2592000 seconds</constraintErrorMessage>
+                </properties>
+                <defaultValue>3600</defaultValue>
+              </leafNode>
+            </children>
+          </node>
           <!-- ── Default route metric ────────────────────────────── -->
           <leafNode name="default-route-metric">
             <properties>

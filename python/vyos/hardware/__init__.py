@@ -41,4 +41,13 @@ Typical caller usage::
     hw.set_pin("UARTC0_MODE0", 1)
 """
 
+import logging
+
 from vyos.hardware.board import BOARD  # noqa: F401
+
+# A library must not print to stderr on its own. Attaching a no-op handler to
+# the package logger means that, with no application logging config, records
+# are dropped silently instead of falling through to logging.lastResort (which
+# would dump WARNING+ to the console). Consumers who want the INFO action log
+# call vyos.hardware.api.enable_logging() or configure logging themselves.
+logging.getLogger(__name__).addHandler(logging.NullHandler())
