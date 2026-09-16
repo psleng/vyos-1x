@@ -33,7 +33,8 @@ interfaces
         ├── vrf <name>                                    # VRF instance name
         ├── connection-mode <always-on|connect-on-demand|dial-on-demand>
         ├── network-mode <auto|lte|5g|5g-only|3g|2g>      # modem-level RAT selection
-        ├── network-time                                  # valueless — set system clock from NITZ at registration
+        ├── network-time                                  # NITZ → system clock (opt-in; presence enables; NAS signaling, no data traffic)
+        │     └── update-interval <300-2592000>           # re-sync cadence for drift correction, s (default: 3600)
         ├── default-route-metric <0-255>                  # metric for the FSM-installed carrier default route(s) (default: 220; keeps cellular below a wired primary — failover/static=1, DHCP=210)
         │
         ├── ip                                            # IPv4 routing parameters (standard VyOS interface options; ARP/broadcast knobs are inert on a point-to-point cellular bearer)
@@ -228,7 +229,7 @@ bearer is established:
 - `data-usage` / per-SIM `data-limit` thresholds, actions, billing-date, warnings
 - `connectivity-monitoring`, `reconnection`, `failed-retry`, `hardware-reset`,
   `sim-failover` / `sim-failback` policy, `apn-discovery`, `logging`
-- `network-time` (read at the next registration; does not bounce the bearer)
+- `network-time` and its `update-interval` (re-sync cadence is picked up live; never bounces the bearer)
 - `ip-passthrough` and `ipv6-bridging` (reconciled in place)
 - **edits to the SIM slot you are *not* currently running on** — e.g.
   provisioning the backup SIM, fixing its APN, setting its PIN. These touch the
@@ -246,6 +247,11 @@ discarded — the change is treated as "rebuild from scratch":
 
 - `sim primary-slot` (switches which SIM is in service)
 - `network-mode` (modem RAT selection)
+- `connection-mode` (switching into/out of dial-on-demand changes whether the
+  FSM emits health-check probe traffic, so it rebuilds from a clean startup
+  rather than reconciling a live monitor mid-flight; changing it therefore
+  brings the bearer down and back up). This is expected to be a rare, at-
+  provisioning-time change.
 - the **active** SIM slot's connection parameters: `apn`, `username`,
   `password`, `auth-type`, `pdp-type`, `roaming`, `supported-bands`
 
@@ -370,8 +376,15 @@ set interfaces wwan wwan0 network-mode 'auto'
 # Acquisition is resilient to late NITZ: it is armed on ANY registration (not
 # just first boot), tries once immediately, then keeps polling — fast for the
 # first 15 min, then slowly and indefinitely — AND subscribes to the modem's
-# NetworkTimeChanged push.  It stops only once the clock is set, NTP takes over,
-# or the feature is disabled.  The clock is set at most once per service run.
+# NetworkTimeChanged push, until the clock is first set (or NTP takes over).
+#
+# Drift correction: after that first set the FSM RE-SYNCS the clock from NITZ
+# every `update-interval` seconds (default 3600) so a free-running oscillator
+# does not drift on a box with no reachable NTP.  Re-sync rides the same NAS
+# signaling as acquisition — it generates NO data-bearer traffic, so it is safe
+# on dial-on-demand / metered links — and the NTP guard still applies on every
+# tick, so it silently no-ops whenever chrony owns the clock and resumes
+# correcting only if NTP later loses sync.
 #
 # WHY THIS MATTERS — expired-data-plan recovery: if the data plan is exhausted,
 # no data bearer can come up, so a configured NTP client can never reach a
@@ -381,6 +394,8 @@ set interfaces wwan wwan0 network-mode 'auto'
 # with this option the modem's network time is the one remaining way to fix the
 # clock.  It keeps trying until the carrier provides the time.
 # set interfaces wwan wwan0 network-time
+# Re-sync every hour (default); raise for less chatter, lower for tighter time:
+# set interfaces wwan wwan0 network-time update-interval 3600
 
 # MTU — fallback if carrier does not provide one; also ceiling (per-SIM mtu overrides when that SIM is active)
 set interfaces wwan wwan0 mtu 1420
@@ -1097,8 +1112,8 @@ then:
 2. Call D-Bus `connect_bearer()` → bearer is re-established.
 3. Poll D-Bus `get_bearer_status()` → returns `"connected"` or `"disconnected"`.
 
-**While the bearer is up, dial-on-demand behaves identically to always-on.**
-Every event that always-on reacts to is honored and propagated to Linux:
+**While the bearer is up, dial-on-demand reacts to the same events as
+always-on**, all honored and propagated to Linux:
 
 - bearer drops unexpectedly (carrier deactivation, signal loss) → the kernel
   interface is brought down and auto-recovery re-establishes the bearer;
@@ -1107,7 +1122,18 @@ Every event that always-on reacts to is honored and propagated to Linux:
   re-addressed;
 - the SIM swaps / fails over → full teardown and reconnect on the new SIM.
 
-The only difference from always-on is the **explicit** `disconnect_bearer()`
+**No FSM-originated probe traffic.**  Unlike always-on, dial-on-demand emits
+**no** connectivity health-check pings — the `connectivity-monitoring` ping
+loop is suppressed for the whole life of the interface in this mode.  The
+dial-on-demand consumer is expected to watch `wwanN` for traffic to decide
+whether the link is still needed; FSM-generated pings are traffic too, so they
+would defeat that idle detection and pin the bearer up forever.  For the same
+reason the signal-loss failover's connectivity cross-check is skipped (weak
+signal is treated as inconclusive rather than probed).  Passive event handling
+above (bearer-state, IP-change, registration, SIM) is unaffected — none of it
+puts packets on the wire.
+
+The other difference from always-on is the **explicit** `disconnect_bearer()`
 (or on-demand `disconnect()`): that, and only that, drops the bearer without
 notifying Linux and suppresses auto-reconnect until the next `connect_bearer()`.
 A transient/unexpected failure while connected does **not** suppress recovery.
@@ -1173,6 +1199,13 @@ set interfaces wwan wwan0 interface-management interface-up-timeout 10
 ### Connectivity Health Monitoring
 
 > **If unconfigured:** Enabled — active ping probes to detect dead paths.  Interval 60 s, timeout 10 s, failure-threshold 2, IPv4 targets: 8.8.8.8 + 1.1.1.1.
+>
+> **Suppressed under `connection-mode dial-on-demand`.**  In that mode the FSM
+> emits no probe traffic at all (the consumer watches `wwanN` for traffic to
+> decide whether the link is needed, so FSM pings would keep it up forever).
+> The monitor is disabled for the life of the interface regardless of the
+> settings below.  Because `connection-mode` is a full-restart parameter,
+> switching modes re-evaluates this from a clean startup.
 
 ```
 # To disable connectivity monitoring:
@@ -1610,6 +1643,8 @@ set interfaces wwan wwan0 logging sink 'both'
 | `failed-retry max-interval` | `failed_retry_max_interval` | `7200` |
 | `failed-retry escalation-threshold` | `failed_retry_escalation_threshold` | `3` |
 | `network-mode` | `network_mode` | `auto` |
+| `network-time` | `network_time_enabled` | `disabled` (opt-in) |
+| `network-time update-interval` | `network_time_update_interval` | `3600` |
 | `mtu` | `mtu` | `1420` |
 | `network-scan timeout` | `network_scan_timeout` | `180` |
 | `timeouts connection` | `connection_timeout` | `120` |

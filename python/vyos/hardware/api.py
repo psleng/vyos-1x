@@ -18,9 +18,38 @@ Stable, board-agnostic facade. Import this from conf-mode scripts, the WWAN
 FSM, serial helpers, etc.
 """
 
+import logging
 from typing import List, Optional
 
 from vyos.hardware.board import BOARD as _b
+
+
+logger = logging.getLogger(__name__)
+
+
+def enable_logging(level: int = logging.INFO, *, stream=None) -> None:
+    """
+    Route this library's INFO action log to ``stream`` (default stderr) for
+    consumers debugging their integration against the API. Without this call —
+    and without the application configuring logging itself — the library stays
+    silent (a NullHandler is installed at package import). Safe to call more
+    than once; the console handler is not duplicated.
+    """
+    import sys
+    lg = logging.getLogger('vyos.hardware')
+    console = [h for h in lg.handlers if isinstance(h, logging.StreamHandler)]
+    if not console:
+        handler = logging.StreamHandler(stream or sys.stderr)
+        handler.setFormatter(
+            logging.Formatter(
+                '%(asctime)s %(levelname)s %(name)s: %(message)s'
+            )
+        )
+        console = [handler]
+        lg.addHandler(handler)
+    for h in console:
+        h.setLevel(level)
+    lg.setLevel(level)
 
 
 # --- wwan netdev <-> pinmap modem binding -----------------------------------
@@ -123,6 +152,7 @@ def board_name() -> str:
 
 # --- low-level pin ops (use sparingly; prefer semantic helpers below) -------
 def set_pin(name: str, value: int) -> None:
+    logger.info('set_pin %s = %d', name, value)
     _b.set_pin(name, value)
 
 
@@ -131,23 +161,29 @@ def get_pin(name: str) -> int:
 
 
 def pulse(name: str, ms: int = 200, asserted: int = 1) -> None:
+    logger.info('pulse %s ms=%d asserted=%d', name, ms, asserted)
     _b.pulse(name, ms, asserted)
 
 
 def apply_defaults(*names: str) -> None:
+    logger.info('apply_defaults %s', ', '.join(names) if names else '<all>')
     _b.apply_defaults(names or None)
 
 
 # --- semantic helpers (board-agnostic verbs) --------------------------------
 def modem_reset(modem: Optional[str] = None) -> None:
+    logger.info('modem_reset modem=%s', modem or '<default>')
     _b.modem_reset(modem=modem)
 
 
 def modem_power(on: bool, modem: Optional[str] = None) -> None:
+    logger.info('modem_power %s modem=%s', 'on' if on else 'off',
+                modem or '<default>')
     _b.modem_power(on, modem=modem)
 
 
 def sim_select(slot: int, modem: Optional[str] = None) -> None:
+    logger.info('sim_select slot=%d modem=%s', slot, modem or '<default>')
     _b.sim_select(slot, modem=modem)
 
 
@@ -301,6 +337,10 @@ def serial_protocol(port: str, proto: str,
     Configure a serial transceiver for one of: ``isolate``, ``rs232``,
     ``rs485h``, ``rs485f``, ``rs422``.
     """
+    logger.info('serial_protocol port=%s proto=%s term=%s slr=%s',
+                port, proto,
+                'default' if term is None else ('on' if term else 'off'),
+                'default' if slr is None else ('on' if slr else 'off'))
     _b.serial_protocol(port, proto, term=term, slr=slr)
 
 
