@@ -23,15 +23,15 @@ using the net-snmp ``pass_persist`` protocol.
 
 Wire-up in /etc/snmp/snmpd.conf::
 
-    pass_persist .1.3.6.1.4.1.44641.1  /usr/bin/igos-wwan-snmp-agent
+    pass_persist .1.3.6.1.4.1.1966.30.1  /usr/bin/igos-wwan-snmp-agent
 
 Tables implemented (read-only):
 
-* igosWwanIfTable        (.1.3.6.1.4.1.44641.1.1.1.1)
-* igosWwanSimTable       (.1.3.6.1.4.1.44641.1.1.2.1)
-* igosWwanRadioTable     (.1.3.6.1.4.1.44641.1.1.3.1)
-* igosWwanBearerTable    (.1.3.6.1.4.1.44641.1.1.4.1)
-* igosWwanFailoverTable  (.1.3.6.1.4.1.44641.1.1.5.1)
+* igosWwanIfTable        (.1.3.6.1.4.1.1966.30.1.1.1.1)
+* igosWwanSimTable       (.1.3.6.1.4.1.1966.30.1.1.2.1)
+* igosWwanRadioTable     (.1.3.6.1.4.1.1966.30.1.1.3.1)
+* igosWwanBearerTable    (.1.3.6.1.4.1.1966.30.1.1.4.1)
+* igosWwanFailoverTable  (.1.3.6.1.4.1.1966.30.1.1.5.1)
 
 The PD table is reserved (not yet populated).
 """
@@ -51,7 +51,7 @@ logger = logging.getLogger('vyos.wwan.snmp_agent')
 
 
 # ── OID layout ──────────────────────────────────────────────────────────────
-ROOT = (1, 3, 6, 1, 4, 1, 44641, 1)            # igosWwanMIB
+ROOT = (1, 3, 6, 1, 4, 1, 1966, 30, 1)         # igosWwanMIB ({ igos 1 })
 OBJ  = ROOT + (1,)                              # igosWwanObjects
 
 IF_ENTRY       = OBJ + (1, 1, 1)                # .interface.ifTable.entry
