@@ -27,8 +27,8 @@ from vyos import airbag
 
 airbag.enable()
 
-service_name = 'igos-wwan-sms-command.service'
-config_file = Path('/etc/default/igos-wwan-sms-command')
+service_name = 'sms-command.service'
+config_file = Path('/etc/default/sms-command')
 
 
 def _wwan_sort_key(ifname):
@@ -107,7 +107,7 @@ def generate(config):
         config_file.unlink(missing_ok=True)
         return None
 
-    render(config_file, 'wwan/igos-wwan-sms-command.j2', config, permission=0o600)
+    render(config_file, 'wwan/sms-command.j2', config, permission=0o600)
 
     return None
 

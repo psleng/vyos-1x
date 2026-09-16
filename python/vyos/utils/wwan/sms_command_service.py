@@ -45,6 +45,7 @@ import json
 import os
 import re
 import signal
+import socket
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -128,6 +129,7 @@ class ServiceConfig:
 
 class SmsCommandService:
     CMD_RE = re.compile(r'\s*([0-9]{6})\s+REBOOT\s*')
+    INFO_RE = re.compile(r'\s*SHOW\s+SYSTEM\s+INFO\s*')
 
     def __init__(self, cfg: ServiceConfig):
         self.cfg = cfg
@@ -160,44 +162,83 @@ class SmsCommandService:
             logger.error('Failed to execute reboot: %s', err)
             return False
 
+    @staticmethod
+    def _system_info() -> str:
+        """Return the compact system information displayed by the web UI."""
+        def output(command, fallback='N/A'):
+            try:
+                return subprocess.check_output(command, text=True, timeout=3).strip() or fallback
+            except (OSError, subprocess.SubprocessError):
+                return fallback
+
+        version = 'N/A'
+        try:
+            with open('/opt/vyatta/etc/version', encoding='utf-8') as version_file:
+                version = version_file.read().strip()
+        except OSError:
+            pass
+        timezone_name = output(['timedatectl', 'show', '-p', 'Timezone', '--value'])
+        info = (
+            f'Hostname: {socket.gethostname()}\n'
+            f'Version: {version}\n'
+            f'System time: {time.strftime("%Y-%m-%d %H:%M:%S %Z")}\n'
+            f'Timezone: {timezone_name}\n'
+            f'Uptime: {output(["uptime", "-p"])}'
+        )
+        return info[:160]
+
     def _process_message(self, if_name: str, if_num: int, msg: dict):
         msg_id = int(msg.get('id', -1))
         number = str(msg.get('number', '')).strip()
 
         text = str(msg.get('text', ''))
         match = self.CMD_RE.fullmatch(text)
-        # Never include the SMS body or PIN in audit records.
-        command = 'REBOOT' if text.split()[-1:] == ['REBOOT'] else 'UNKNOWN'
+        # Show the received message for audit purposes, while masking the
+        # leading PIN (including malformed PIN attempts).
+        command = re.sub(r'^(\s*)[0-9]+(?=\s+)', r'\1[PIN]', text).strip()
+        if not command:
+            command = '[EMPTY]'
 
         def audit(result):
             logger.warning(
                 'SMS command timestamp=%s sender=%r command=%s result=%s interface=%s id=%s',
-                datetime.now(timezone.utc).isoformat(), number, command,
+                datetime.now(timezone.utc).isoformat(), number, repr(command),
                 result, if_name, msg_id,
             )
 
         expected_pin = self.cfg.authorized_numbers.get(if_name, {}).get(number)
         if expected_pin is None:
-            audit('REJECTED_UNAUTHORIZED_SENDER')
+            audit('UNAUTHORIZED')
             self._send_response(if_num, number, 'UNAUTHORIZED')
+            return
+
+        if self.INFO_RE.fullmatch(text):
+            response = self._system_info()
+            # Keep the complete reply in one syslog line for easy filtering.
+            audit(response.replace('\n', ' | '))
+            self._send_response(if_num, number, response)
             return
 
         if not match:
-            audit('REJECTED_INVALID_FORMAT')
-            self._send_response(if_num, number, 'INVALID')
+            tokens = text.split()
+            # Any numeric first token is a PIN attempt, regardless of command
+            # casing or spelling; malformed attempts receive UNAUTHORIZED.
+            malformed_pin = len(tokens) >= 2 and tokens[0].isdigit()
+            result = 'UNAUTHORIZED' if malformed_pin else 'INVALID'
+            audit(result)
+            self._send_response(if_num, number, 'UNAUTHORIZED' if malformed_pin else 'INVALID')
             return
 
         if not hmac.compare_digest(match.group(1), expected_pin):
-            audit('REJECTED_INVALID_PIN')
+            audit('UNAUTHORIZED')
             self._send_response(if_num, number, 'UNAUTHORIZED')
             return
 
-        audit('ACCEPTED')
         if self._execute_reboot():
-            audit('REBOOT_REQUESTED')
+            audit('OK')
             self._send_response(if_num, number, 'OK')
         else:
-            audit('REBOOT_FAILED')
+            audit('REBOOT FAILED')
             self._send_response(if_num, number, 'REBOOT FAILED')
 
     def _poll_interface(self, if_name: str):
@@ -276,12 +317,12 @@ def _configure_logging():
     level = getattr(logging, level_name, logging.INFO)
     logging.basicConfig(
         level=level,
-        format='%(asctime)s igos-wwan-sms-command[%(process)d]: %(levelname)s: %(message)s',
+        format='%(asctime)s sms-command[%(process)d]: %(levelname)s: %(message)s',
     )
     if os.path.exists('/dev/log'):
         handler = SysLogHandler(address='/dev/log')
         handler.setFormatter(logging.Formatter(
-            'igos-wwan-sms-command[%(process)d]: %(levelname)s: %(message)s'
+            'sms-command[%(process)d]: %(levelname)s: %(message)s'
         ))
         logger.addHandler(handler)
         logger.setLevel(level)

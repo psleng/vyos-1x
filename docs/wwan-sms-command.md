@@ -8,9 +8,17 @@ commit
 save
 ```
 
+The `pin 123456` part is required on the same `set` command. VyOS does not
+interactively prompt for omitted leaf values; entering only the phone number
+creates an incomplete node and commit correctly reports the missing PIN.
+
 Send `123456 REBOOT` from that number. REBOOT is case-sensitive. PINs must
 contain exactly six ASCII digits; leading zeros are preserved. Both the sender
 and PIN must match the configuration for the receiving WWAN interface.
+
+Send `SHOW SYSTEM INFO` from an authorized number to receive the hostname,
+version, system time, timezone, and uptime. This read-only command does not
+require the PIN, but the sender must still be whitelisted.
 
 Bare `REBOOT` messages are rejected. Existing authorized-number configurations
 must have a PIN added before committing. The legacy
@@ -20,6 +28,6 @@ and is restricted to owner access (0600).
 
 Syslog records include the sender, command (REBOOT or UNKNOWN for unrecognized
 input), UTC timestamp, interface, message ID, and result. Results distinguish
-unauthorized senders, invalid format, incorrect PIN, acceptance, and reboot
+unauthorized senders, invalid format, incorrect or malformed PIN, acceptance, and reboot
 request success or failure. Request success means systemctl accepted the request,
 not that the machine has finished rebooting. PINs and SMS bodies are not logged.
