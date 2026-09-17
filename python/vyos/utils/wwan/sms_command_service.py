@@ -131,6 +131,9 @@ class SmsCommandService:
     CMD_RE = re.compile(r'\s*([0-9]{6})\s+REBOOT\s*')
     INFO_RE = re.compile(r'\s*SHOW\s+SYSTEM\s+INFO\s*')
     PING_RE = re.compile(r'\s*PING\s+(\S+)\s*')
+    ADDR_RE = re.compile(r'\s*SHOW\s+WAN\s+IP\s+ADDRESS\s*')
+    CELL_REBOOT_RE = re.compile(r'\s*CELL\s+REBOOT\s*')
+    CELL_RE = re.compile(r'\s*CELL\s+(CONNECT|DISCONNECT)\s*')
 
     def __init__(self, cfg: ServiceConfig):
         self.cfg = cfg
@@ -152,7 +155,7 @@ class SmsCommandService:
     def _execute_reboot(self) -> bool:
         try:
             subprocess.run(
-                ['/usr/bin/systemctl', 'reboot'],
+                ['/usr/libexec/vyos/op_mode/powerctrl.py', '--yes', '--reboot'],
                 check=True,
                 capture_output=True,
                 text=True,
@@ -196,22 +199,38 @@ class SmsCommandService:
         return info[:160]
 
     @staticmethod
+    def _interface_addresses() -> str:
+        """Return compact IPv4/IPv6 addresses for all live interfaces."""
+        try:
+            output = subprocess.check_output(
+                ['/usr/bin/ip', '-o', 'addr', 'show'],
+                text=True, timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return 'Interface addresses unavailable'
+        addresses = {}
+        for line in output.splitlines():
+            fields = line.split()
+            if len(fields) >= 4 and fields[2] in {'inet', 'inet6'}:
+                addresses.setdefault(fields[1], []).append(fields[3].split('/')[0])
+        lines = ['interface    ip address', '------------------------']
+        for interface, values in addresses.items():
+            lines.append(f'{interface:<12}{values[0]}')
+            lines.extend(f'{"":<12}{address}' for address in values[1:])
+        return '\n'.join(lines) if addresses else 'No interface addresses'
+
+    @staticmethod
     def _ping_host(host: str) -> str:
         try:
             addresses = socket.getaddrinfo(host, None, 0, socket.SOCK_STREAM)
             family = addresses[0][0] if addresses else socket.AF_INET
             command = '/bin/ping6' if family == socket.AF_INET6 else '/bin/ping'
             result = subprocess.run(
-                [command, '-c', '1', '-W', '5', host],
+                [command, '-c', '5', '-i', '0.1', '-W', '5', host],
                 check=False, capture_output=True, text=True, timeout=10,
             )
             output = (result.stdout or result.stderr).strip()
-            loss_match = re.search(r'(\d+)%\s+packet loss', output)
-            loss = loss_match.group(1) if loss_match else ('0' if result.returncode == 0 else '100')
-            latency_match = re.search(r'time[=<]([0-9.]+)\s*ms', output)
-            if result.returncode == 0 and latency_match:
-                return f'OK, latency={latency_match.group(1)} ms, loss={loss}%'
-            return f'FAILED, loss={loss}%'
+            return '\n'.join(line.strip() for line in output.splitlines()) if output else 'FAILED, no output'
         except (OSError, socket.gaierror, subprocess.SubprocessError):
             return 'FAILED, loss=100%'
 
@@ -220,10 +239,15 @@ class SmsCommandService:
         audit(response.replace('\n', ' | '))
         self._send_response(if_num, number, response)
 
+    def _handle_interface_addresses(self, if_num, number, audit):
+        response = self._interface_addresses()[:160]
+        audit(response)
+        self._send_response(if_num, number, response)
+
     def _handle_ping(self, if_num, number, host, audit):
         response = f'PING {host}: {self._ping_host(host)}'
         audit(response)
-        self._send_response(if_num, number, response[:160])
+        self._send_response(if_num, number, response)
 
     def _handle_reboot(self, if_num, number, audit):
         if self._execute_reboot():
@@ -232,6 +256,31 @@ class SmsCommandService:
         else:
             audit('REBOOT FAILED')
             self._send_response(if_num, number, 'REBOOT FAILED')
+
+    def _handle_cell(self, if_num, number, action, audit):
+        try:
+            if action == 'CONNECT':
+                self.client.connect_bearer(if_num)
+            else:
+                self.client.disconnect_bearer(if_num)
+            response = 'OK'
+        except Exception as err:
+            logger.warning('Cellular %s failed on interface %s: %s', action.lower(), if_num, err)
+            response = 'FAILED'
+        audit(response)
+        self._send_response(if_num, number, response)
+
+    def _handle_cell_reboot(self, if_num, number, audit):
+        try:
+            self.client.set_airplane_mode(if_num, True)
+            time.sleep(2)
+            self.client.set_airplane_mode(if_num, False)
+            response = 'OK'
+        except Exception as err:
+            logger.warning('Cellular reboot failed on interface %s: %s', if_num, err)
+            response = 'FAILED'
+        audit(response)
+        self._send_response(if_num, number, response)
 
     def _process_message(self, if_name: str, if_num: int, msg: dict):
         msg_id = int(msg.get('id', -1))
@@ -263,9 +312,22 @@ class SmsCommandService:
             self._handle_system_info(if_num, number, audit)
             return
 
+        if self.CELL_REBOOT_RE.fullmatch(text):
+            self._handle_cell_reboot(if_num, number, audit)
+            return
+
+        if self.ADDR_RE.fullmatch(text):
+            self._handle_interface_addresses(if_num, number, audit)
+            return
+
         ping_match = self.PING_RE.fullmatch(text)
         if ping_match:
             self._handle_ping(if_num, number, ping_match.group(1), audit)
+            return
+
+        cell_match = self.CELL_RE.fullmatch(text)
+        if cell_match:
+            self._handle_cell(if_num, number, cell_match.group(1), audit)
             return
 
         if not match:
