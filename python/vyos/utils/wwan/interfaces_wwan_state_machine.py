@@ -13680,11 +13680,12 @@ class ModemStateMachine:
         status['interface_number'] = self.interface_number
         status['interface_name'] = getattr(self, 'interface_name', f"wwan{self.interface_number}")
         status['fsm_state'] = current_state
-        # Time in current FSM state (approximate — sampled when status is built).
-        if getattr(self, '_uptime_tracked_state', None) != current_state:
-            self._uptime_tracked_state = current_state
-            self._uptime_state_since = time.time()
-        status['fsm_state_uptime_seconds'] = int(time.time() - getattr(self, '_uptime_state_since', time.time()))
+        # Time in current FSM state — measured from the authoritative transition
+        # stamp (_state_entered_at, monotonic), not sampled at poll time, so it
+        # reflects real state entry and cannot reset to 0 spuriously.
+        status['fsm_state_uptime_seconds'] = max(
+            0, int(time.monotonic() - getattr(self, '_state_entered_at', time.monotonic()))
+        )
         status['last_event_time'] = self._last_event_time or 0
         status['last_event_description'] = self._last_event_description or ''
         status['modem_path'] = self.modem_path or ''
