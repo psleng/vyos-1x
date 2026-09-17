@@ -25,7 +25,7 @@ Environment variables:
   (default: "wwan0")
 - IGOS_SMS_COMMAND_AUTHORIZED_NUMBERS: JSON mapping of interface names to
   sender-number/PIN mappings (required)
-- IGOS_SMS_COMMAND_POLL_INTERVAL: polling interval in seconds (default: 5)
+- IGOS_SMS_COMMAND_POLL_INTERVAL: polling interval in seconds (default: 0.5)
 - IGOS_SMS_COMMAND_RESPONSE_ENABLED: 1/true/yes to send
     ACCEPTED/REJECTED SMS responses (default: true)
 
@@ -113,7 +113,7 @@ class ServiceConfig:
                         or not re.fullmatch(r'[0-9]{6}', pin)):
                     raise ValueError(f'Invalid authorized-number or PIN for {interface}')
 
-        poll_interval = float(os.environ.get('IGOS_SMS_COMMAND_POLL_INTERVAL', '1'))
+        poll_interval = float(os.environ.get('IGOS_SMS_COMMAND_POLL_INTERVAL', '0.5'))
         response_enabled = _as_bool(
             os.environ.get('IGOS_SMS_COMMAND_RESPONSE_ENABLED'),
             True,
@@ -122,7 +122,7 @@ class ServiceConfig:
         return cls(
             interfaces=interfaces,
             authorized_numbers=authorized_numbers,
-            poll_interval=max(1.0, poll_interval),
+            poll_interval=max(0.5, poll_interval),
             response_enabled=response_enabled,
         )
 
@@ -132,6 +132,7 @@ class SmsCommandService:
     INFO_RE = re.compile(r'\s*SHOW\s+SYSTEM\s+INFO\s*')
     PING_RE = re.compile(r'\s*PING\s+(\S+)\s*')
     ADDR_RE = re.compile(r'\s*SHOW\s+WAN\s+IP\s+ADDRESS\s*')
+    CELL_STATUS_RE = re.compile(r'\s*SHOW\s+CELL\s+STATUS\s*')
     CELL_REBOOT_RE = re.compile(r'\s*CELL\s+REBOOT\s*')
     CELL_RE = re.compile(r'\s*CELL\s+(CONNECT|DISCONNECT)\s*')
 
@@ -177,12 +178,13 @@ class SmsCommandService:
             except (OSError, subprocess.SubprocessError):
                 return fallback
 
-        version = 'N/A'
-        try:
-            with open('/opt/vyatta/etc/version', encoding='utf-8') as version_file:
-                version = version_file.read().strip()
-        except OSError:
-            pass
+        version_output = output(['/usr/libexec/vyos/op_mode/version.py', 'show'])
+        version = next(
+            (line.split(':', 1)[1].strip()
+             for line in version_output.splitlines()
+             if line.strip().lower().startswith('version:')),
+            'N/A',
+        )
         timezone_name = output(['timedatectl', 'show', '-p', 'Timezone', '--value'])
         try:
             uptime_minutes, uptime_seconds = divmod(int(get_uptime_seconds()), 60)
@@ -200,33 +202,36 @@ class SmsCommandService:
 
     @staticmethod
     def _interface_addresses() -> str:
-        """Return compact IPv4/IPv6 addresses for all live interfaces."""
+        """Return interface addresses as plain, one-address-per-line text."""
         try:
             output = subprocess.check_output(
-                ['/usr/bin/ip', '-o', 'addr', 'show'],
+                ['/usr/libexec/vyos/op_mode/interfaces.py', 'show'],
                 text=True, timeout=5,
             )
         except (OSError, subprocess.SubprocessError):
             return 'Interface addresses unavailable'
         addresses = {}
+        current_interface = None
+        address_re = re.compile(r'(?<![\w:])(?:\d{1,3}(?:\.\d{1,3}){3}|[0-9a-fA-F:]+)/(?:\d{1,3})')
         for line in output.splitlines():
-            fields = line.split()
-            if len(fields) >= 4 and fields[2] in {'inet', 'inet6'}:
-                addresses.setdefault(fields[1], []).append(fields[3].split('/')[0])
-        lines = ['interface    ip address', '------------------------']
+            match = re.match(r'^\s*(\S+)\s+', line)
+            if match and not line.startswith((' ', '\t')):
+                current_interface = match.group(1).rstrip(':')
+            if current_interface:
+                values = address_re.findall(line)
+                if values:
+                    addresses.setdefault(current_interface, []).extend(values)
+        lines = []
         for interface, values in addresses.items():
-            lines.append(f'{interface:<12}{values[0]}')
-            lines.extend(f'{"":<12}{address}' for address in values[1:])
-        return '\n'.join(lines) if addresses else 'No interface addresses'
+            lines.extend(f'{interface}: {address}' for address in values)
+        return '\n'.join(lines) if lines else 'No interface addresses'
 
     @staticmethod
     def _ping_host(host: str) -> str:
         try:
-            addresses = socket.getaddrinfo(host, None, 0, socket.SOCK_STREAM)
-            family = addresses[0][0] if addresses else socket.AF_INET
-            command = '/bin/ping6' if family == socket.AF_INET6 else '/bin/ping'
             result = subprocess.run(
-                [command, '-c', '5', '-i', '0.1', '-W', '5', host],
+                ['/usr/libexec/vyos/op_mode/ping.py', '-c', '5',
+                 '-i', '0.1', '-W', '5', host],
                 check=False, capture_output=True, text=True, timeout=10,
             )
             output = (result.stdout or result.stderr).strip()
@@ -240,7 +245,21 @@ class SmsCommandService:
         self._send_response(if_num, number, response)
 
     def _handle_interface_addresses(self, if_num, number, audit):
-        response = self._interface_addresses()[:160]
+        response = self._interface_addresses()
+        audit(response)
+        self._send_response(if_num, number, response)
+
+    def _handle_cell_status(self, if_name, if_num, number, audit):
+        """Return the output of ``show interfaces wwan <name> status``."""
+        try:
+            result = subprocess.run(
+                ['/usr/libexec/vyos/op_mode/show_wwan.py', 'show_status',
+                 f'--interface={if_name}'],
+                check=False, capture_output=True, text=True, timeout=15,
+            )
+            response = (result.stdout or result.stderr).strip() or 'FAILED'
+        except (OSError, subprocess.SubprocessError):
+            response = 'FAILED'
         audit(response)
         self._send_response(if_num, number, response)
 
@@ -259,23 +278,65 @@ class SmsCommandService:
 
     def _handle_cell(self, if_num, number, action, audit):
         try:
-            if action == 'CONNECT':
-                self.client.connect_bearer(if_num)
+            operation = '--connect' if action == 'CONNECT' else '--disconnect'
+            result = subprocess.run(
+                ['/usr/libexec/vyos/op_mode/connect_disconnect.py', operation,
+                 '--interface', f'wwan{if_num}'],
+                check=False, capture_output=True, text=True, timeout=10,
+            )
+            output = (result.stdout or result.stderr).strip()
+            if result.returncode != 0:
+                response = output or 'FAILED'
             else:
-                self.client.disconnect_bearer(if_num)
-            response = 'OK'
+                target = 'connected' if action == 'CONNECT' else 'disconnected'
+                verified = self._wait_bearer_status(if_num, target)
+                status = self.client.get_bearer_status(if_num)
+                logger.info('Cellular %s interface=%s bearer_status=%s verified=%s',
+                            action.lower(), if_num, status, verified)
+                response = 'OK' if verified else 'FAILED'
+        except FileNotFoundError:
+            # Unit-test/minimal environments may not contain the installed
+            # op-mode script; retain the direct WWAN-client fallback there.
+            try:
+                if action == 'CONNECT':
+                    verified = self.client.connect_bearer_and_wait(
+                        if_num, timeout=30, poll_interval=0.5)
+                else:
+                    verified = self.client.disconnect_bearer_and_wait(
+                        if_num, timeout=30, poll_interval=0.5)
+                response = 'OK' if verified else 'FAILED'
+            except Exception as err:
+                logger.warning('Cellular %s failed on interface %s: %s', action.lower(), if_num, err)
+                response = 'FAILED'
         except Exception as err:
             logger.warning('Cellular %s failed on interface %s: %s', action.lower(), if_num, err)
             response = 'FAILED'
         audit(response)
         self._send_response(if_num, number, response)
 
+    def _wait_bearer_status(self, if_num, target, timeout=30):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.client.get_bearer_status(if_num) == target:
+                return True
+            time.sleep(0.5)
+        return False
+
     def _handle_cell_reboot(self, if_num, number, audit):
         try:
-            self.client.set_airplane_mode(if_num, True)
-            time.sleep(2)
-            self.client.set_airplane_mode(if_num, False)
-            response = 'OK'
+            enabled_result = self.client.set_airplane_mode(if_num, True)
+            disabled = self._wait_bearer_status(if_num, 'disconnected')
+            logger.info('Cellular reboot interface=%s airplane_mode=enabled response=%s '
+                        'bearer_status=disconnected verified=%s',
+                        if_num, enabled_result, disabled)
+            if not disabled:
+                raise WWANError('Bearer did not disconnect after enabling airplane mode')
+            disabled_result = self.client.set_airplane_mode(if_num, False)
+            connected = self._wait_bearer_status(if_num, 'connected')
+            logger.info('Cellular reboot interface=%s airplane_mode=disabled response=%s '
+                        'bearer_status=connected verified=%s',
+                        if_num, disabled_result, connected)
+            response = 'OK' if connected else 'FAILED'
         except Exception as err:
             logger.warning('Cellular reboot failed on interface %s: %s', if_num, err)
             response = 'FAILED'
@@ -318,6 +379,10 @@ class SmsCommandService:
 
         if self.ADDR_RE.fullmatch(text):
             self._handle_interface_addresses(if_num, number, audit)
+            return
+
+        if self.CELL_STATUS_RE.fullmatch(text):
+            self._handle_cell_status(if_name, if_num, number, audit)
             return
 
         ping_match = self.PING_RE.fullmatch(text)
