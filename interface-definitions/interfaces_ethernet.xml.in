@@ -63,6 +63,7 @@
             </properties>
           </leafNode>
           #include <include/interface/eapol.xml.i>
+          #include <include/interface/authentication-8021x.xml.i>
           <node name="evpn">
             <properties>
               <help>EVPN Multihoming</help>

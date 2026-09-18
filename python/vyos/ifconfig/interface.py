@@ -1840,6 +1840,79 @@ class Interface(Control):
             if os.path.isfile(wpa_supplicant_conf):
                 os.unlink(wpa_supplicant_conf)
 
+    def set_authentication(self) -> None:
+        """Take care about the hostapd IEEE 802.1X authenticator daemon"""
+        cfg_dir = '/run/hostapd'
+        hostapd_conf = f'{cfg_dir}/{self.ifname}.conf'
+        action = 'stop'
+
+        if 'authentication' in self.config:
+            os.makedirs(cfg_dir, exist_ok=True)
+
+            auth = self.config['authentication']
+            # A local EAP-TLS server needs a server certificate, private key,
+            # optional CA chain and an EAP user file.  The server key is either
+            # TPM-sealed (loaded by OpenSSL via the tpm2 provider - not portable)
+            # or a plaintext PKI key written to the runtime dir (portable).
+            if 'eap_server' in auth:
+                from vyos.tpm import tpm_enabled
+                from vyos.tpm_pki import get_path_str
+
+                cert_name = auth['eap_server']['certificate']
+                loaded_ca_certs = (
+                    {
+                        load_certificate(c['certificate'])
+                        for c in self.config['pki']['ca'].values()
+                    }
+                    if 'ca' in self.config['pki']
+                    else {}
+                )
+
+                if tpm_enabled():
+                    # Reference the TPM-backed certificate and key in place.
+                    auth['eap_server']['cert_file'] = get_path_str('certificate', 'pem', cert_name)
+                    auth['eap_server']['key_file'] = get_path_str('certificate', 'key', cert_name)
+                else:
+                    cert_file_path = os.path.join(cfg_dir, f'{self.ifname}_cert.pem')
+                    cert_key_path = os.path.join(cfg_dir, f'{self.ifname}_cert.key')
+                    pki_cert = self.config['pki']['certificate'][cert_name]
+                    loaded_pki_cert = load_certificate(pki_cert['certificate'])
+                    cert_full_chain = find_chain(loaded_pki_cert, loaded_ca_certs)
+                    write_file(
+                        cert_file_path,
+                        '\n'.join(encode_certificate(c) for c in cert_full_chain),
+                    )
+                    write_file(cert_key_path, wrap_private_key(pki_cert['private']['key']))
+                    auth['eap_server']['cert_file'] = cert_file_path
+                    auth['eap_server']['key_file'] = cert_key_path
+
+                if 'ca_certificate' in auth['eap_server']:
+                    ca_cert_file_path = os.path.join(cfg_dir, f'{self.ifname}_ca.pem')
+                    ca_chains = []
+                    for ca_cert_name in auth['eap_server']['ca_certificate']:
+                        pki_ca_cert = self.config['pki']['ca'][ca_cert_name]
+                        loaded_ca_cert = load_certificate(pki_ca_cert['certificate'])
+                        ca_full_chain = find_chain(loaded_ca_cert, loaded_ca_certs)
+                        ca_chains.append(
+                            '\n'.join(encode_certificate(c) for c in ca_full_chain)
+                        )
+                    write_file(ca_cert_file_path, '\n'.join(ca_chains))
+                    auth['eap_server']['ca_file'] = ca_cert_file_path
+
+                # EAP-TLS is certificate-based; a catch-all identity suffices.
+                write_file(os.path.join(cfg_dir, f'{self.ifname}.eap_user'), '* TLS\n')
+
+            render(hostapd_conf, 'ethernet/hostapd.conf.j2', self.config)
+            action = 'reload-or-restart'
+
+        # start/stop the hostapd authenticator service
+        self._cmd(f'systemctl {action} hostapd-wired@{self.ifname}')
+
+        if 'authentication' not in self.config:
+            # delete configuration on interface removal
+            if os.path.isfile(hostapd_conf):
+                os.unlink(hostapd_conf)
+
     def update(self, config):
         """General helper function which works on a dictionary retrieved by
         get_config_dict(). It's main intention is to consolidate the scattered

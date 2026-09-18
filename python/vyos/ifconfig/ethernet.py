@@ -606,3 +606,6 @@ class EthernetIf(Interface):
 
         # enable/disable EAPoL (Extensible Authentication Protocol over Local Area Network)
         self.set_eapol()
+
+        # enable/disable the IEEE 802.1X authenticator (hostapd)
+        self.set_authentication()

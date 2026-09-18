@@ -1,0 +1,18 @@
+[Unit]
+Description=IEEE 802.1X authenticator (hostapd, wired) for %I
+Requires=sys-subsystem-net-devices-%i.device
+ConditionPathExists=/run/hostapd/%I.conf
+After=vyos-router.service
+RequiresMountsFor=/run
+
+[Service]
+Type=simple
+WorkingDirectory=/run/hostapd
+PIDFile=/run/hostapd/%I.pid
+ExecStart=/usr/sbin/hostapd -P /run/hostapd/%I.pid /run/hostapd/%I.conf
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

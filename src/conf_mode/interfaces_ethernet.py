@@ -35,6 +35,7 @@ from vyos.configverify import verify_vlan_config
 from vyos.configverify import verify_vrf
 from vyos.configverify import verify_bond_bridge_member
 from vyos.configverify import verify_eapol
+from vyos.configverify import verify_authentication
 from vyos.ethtool import Ethtool
 from vyos.netlink import coalesce
 from vyos.frrender import FRRender
@@ -386,6 +387,7 @@ def verify(ethernet):
     ifname = ethernet['ifname']
     verify_interface_exists(ethernet, ifname, state_required=True)
     verify_eapol(ethernet)
+    verify_authentication(ethernet)
     verify_mirror_redirect(ethernet)
     # No need to check speed and duplex keys as both have default values
     ethtool = Ethtool(ifname)

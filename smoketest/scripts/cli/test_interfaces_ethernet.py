@@ -15,6 +15,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import os
+import re
 import unittest
 
 from glob import glob
@@ -25,6 +26,10 @@ from socket import AF_INET6
 from netifaces import ifaddresses # pylint: disable = no-name-in-module
 
 from base_interfaces_test import BasicInterfaceTest
+from base_interfaces_test import server_ca_root_cert_data
+from base_interfaces_test import server_ca_intermediate_cert_data
+from base_interfaces_test import client_cert_data
+from base_interfaces_test import client_key_data
 from base_vyostest_shim import VyOSUnitTestSHIM
 
 from vyos.configsession import ConfigSessionError
@@ -38,6 +43,11 @@ from vyos.utils.network import is_ipv6_link_local
 from vyos.utils.process import cmd
 from vyos.utils.process import process_named_running
 from vyos.utils.process import popen
+
+def get_hostapd_value(interface, key):
+    tmp = read_file(f'/run/hostapd/{interface}.conf')
+    tmp = re.findall(r'\n?{}=(.*)'.format(key), tmp)
+    return tmp[0] if tmp else None
 
 class EthernetInterfaceTest(BasicInterfaceTest.TestCase):
     @classmethod
@@ -178,6 +188,134 @@ class EthernetInterfaceTest(BasicInterfaceTest.TestCase):
                 self.cli_commit()
             self.cli_set(self._base_path + [interface, 'speed', 'auto'])
             self.cli_commit()
+
+    def test_8021x_authenticator_radius(self):
+        # IEEE 802.1X port-based authenticator relaying EAP to an external
+        # RADIUS server. hostapd is spawned per ethernet interface via the
+        # hostapd-wired@ template unit.
+        radius_server = '192.0.2.10'
+        radius_key = 'VyOSpassword123'
+        radius_port = '1812'
+
+        for interface in self._interfaces:
+            path = self._base_path + [interface, 'authentication', 'radius',
+                                      'server', radius_server]
+            self.cli_set(path + ['key', radius_key])
+            self.cli_set(path + ['port', radius_port])
+
+        self.cli_commit()
+
+        for interface in self._interfaces:
+            self.assertEqual(get_hostapd_value(interface, 'driver'), 'wired')
+            self.assertEqual(get_hostapd_value(interface, 'ieee8021x'), '1')
+            self.assertEqual(get_hostapd_value(interface, 'use_pae_group_addr'), '1')
+            self.assertEqual(get_hostapd_value(interface, 'ctrl_interface'), '/run/hostapd')
+            self.assertEqual(get_hostapd_value(interface, 'auth_server_addr'), radius_server)
+            self.assertEqual(get_hostapd_value(interface, 'auth_server_port'), radius_port)
+            self.assertEqual(get_hostapd_value(interface, 'auth_server_shared_secret'), radius_key)
+
+            # per-interface authenticator daemon must be running
+            self.assertTrue(process_named_running('hostapd', cmdline=f'{interface}.conf'))
+
+        # Remove authenticator and ensure the daemon is stopped and the runtime
+        # configuration is cleaned up.
+        for interface in self._interfaces:
+            self.cli_delete(self._base_path + [interface, 'authentication'])
+        self.cli_commit()
+
+        for interface in self._interfaces:
+            self.assertFalse(process_named_running('hostapd', cmdline=f'{interface}.conf'))
+            self.assertFalse(os.path.exists(f'/run/hostapd/{interface}.conf'))
+
+    def test_8021x_authenticator_macsec_psk(self):
+        # MACsec key distribution (MKA key server) using a pre-shared CAK.
+        # gcm-aes-256 requires a 64 hex-digit CAK; encryption is enabled.
+        cak = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+        ckn = '4142434445464748'
+        priority = '10'
+
+        for interface in self._interfaces:
+            path = self._base_path + [interface, 'authentication', 'macsec']
+            self.cli_set(path + ['cipher', 'gcm-aes-256'])
+            self.cli_set(path + ['encrypt'])
+            self.cli_set(path + ['mka', 'priority', priority])
+            self.cli_set(path + ['mka', 'cak', cak])
+            self.cli_set(path + ['mka', 'ckn', ckn])
+
+        self.cli_commit()
+
+        for interface in self._interfaces:
+            self.assertEqual(get_hostapd_value(interface, 'driver'), 'macsec_linux')
+            self.assertEqual(get_hostapd_value(interface, 'eapol_version'), '3')
+            self.assertEqual(get_hostapd_value(interface, 'macsec_policy'), '1')
+            # encrypt enabled -> confidentiality (integ_only = 0)
+            self.assertEqual(get_hostapd_value(interface, 'macsec_integ_only'), '0')
+            # gcm-aes-256 -> cipher suite index 1
+            self.assertEqual(get_hostapd_value(interface, 'macsec_csindex'), '1')
+            self.assertEqual(get_hostapd_value(interface, 'mka_priority'), priority)
+            self.assertEqual(get_hostapd_value(interface, 'mka_cak'), cak)
+            self.assertEqual(get_hostapd_value(interface, 'mka_ckn'), ckn)
+
+        for interface in self._interfaces:
+            self.cli_delete(self._base_path + [interface, 'authentication'])
+        self.cli_commit()
+
+        for interface in self._interfaces:
+            self.assertFalse(os.path.exists(f'/run/hostapd/{interface}.conf'))
+
+    def test_8021x_authenticator_local_eap(self):
+        # Standalone local EAP-TLS authentication server (no external RADIUS).
+        ca_certs = {
+            'dot1x-server-ca-root': server_ca_root_cert_data,
+            'dot1x-server-ca-intermediate': server_ca_intermediate_cert_data,
+        }
+        cert_name = 'dot1x-server'
+
+        for name, data in ca_certs.items():
+            self.cli_set(['pki', 'ca', name, 'certificate', data.replace('\n', '')])
+
+        self.cli_set(['pki', 'certificate', cert_name, 'certificate', client_cert_data.replace('\n', '')])
+        self.cli_set(['pki', 'certificate', cert_name, 'private', 'key', client_key_data.replace('\n', '')])
+
+        for interface in self._interfaces:
+            path = self._base_path + [interface, 'authentication', 'eap-server']
+            self.cli_set(path + ['ca-certificate', 'dot1x-server-ca-intermediate'])
+            self.cli_set(path + ['certificate', cert_name])
+
+        self.cli_commit()
+
+        for interface in self._interfaces:
+            self.assertEqual(get_hostapd_value(interface, 'driver'), 'wired')
+            self.assertEqual(get_hostapd_value(interface, 'ieee8021x'), '1')
+            self.assertEqual(get_hostapd_value(interface, 'eap_server'), '1')
+            self.assertEqual(get_hostapd_value(interface, 'eap_user_file'),
+                             f'/run/hostapd/{interface}.eap_user')
+            self.assertEqual(get_hostapd_value(interface, 'ca_cert'),
+                             f'/run/hostapd/{interface}_ca.pem')
+            self.assertEqual(get_hostapd_value(interface, 'server_cert'),
+                             f'/run/hostapd/{interface}_cert.pem')
+            self.assertEqual(get_hostapd_value(interface, 'private_key'),
+                             f'/run/hostapd/{interface}_cert.key')
+
+            # runtime key material must have been materialised
+            self.assertTrue(os.path.exists(f'/run/hostapd/{interface}_ca.pem'))
+            self.assertTrue(os.path.exists(f'/run/hostapd/{interface}_cert.pem'))
+            self.assertTrue(os.path.exists(f'/run/hostapd/{interface}_cert.key'))
+            self.assertTrue(os.path.exists(f'/run/hostapd/{interface}.eap_user'))
+
+            self.assertTrue(process_named_running('hostapd', cmdline=f'{interface}.conf'))
+
+        for interface in self._interfaces:
+            self.cli_delete(self._base_path + [interface, 'authentication'])
+        self.cli_commit()
+
+        for interface in self._interfaces:
+            self.assertFalse(process_named_running('hostapd', cmdline=f'{interface}.conf'))
+            self.assertFalse(os.path.exists(f'/run/hostapd/{interface}.conf'))
+
+        for name in ca_certs:
+            self.cli_delete(['pki', 'ca', name])
+        self.cli_delete(['pki', 'certificate', cert_name])
 
     def test_ethtool_ring_buffer(self):
         for interface in self._interfaces:

@@ -295,6 +295,23 @@
               </tagNode>
             </children>
           </node>
+          <node name="dot1x">
+            <properties>
+              <help>Monitor last lines of IEEE 802.1X authenticator (hostapd) log</help>
+            </properties>
+            <command>journalctl --no-hostname --boot --follow --unit "hostapd-wired@*.service"</command>
+            <children>
+              <tagNode name="interface">
+                <properties>
+                  <help>Monitor 802.1X authenticator log on specific interface</help>
+                  <completionHelp>
+                    <path>interfaces ethernet</path>
+                  </completionHelp>
+                </properties>
+                <command>journalctl --no-hostname --boot --follow --unit "hostapd-wired@$5.service"</command>
+              </tagNode>
+            </children>
+          </node>
           <leafNode name="router-advert">
             <properties>
               <help>Monitor last lines of Router Advertisement Daemon log</help>

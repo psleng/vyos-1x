@@ -601,6 +601,68 @@ def verify_eapol(config: dict):
         for ca_cert in config['eapol']['ca_certificate']:
             verify_pki_ca_certificate(config, ca_cert)
 
+def verify_authentication(config: dict):
+    """
+    Common helper function used by interface implementations to validate the
+    IEEE 802.1X authenticator (hostapd) configuration.
+    """
+    if 'authentication' not in config:
+        return
+
+    if 'eapol' in config:
+        raise ConfigError('Cannot run the 802.1X supplicant (eapol) and '
+                          'authenticator (authentication) on the same interface!')
+
+    auth = config['authentication']
+    macsec = auth.get('macsec', {})
+    mka = macsec.get('mka', {})
+
+    have_radius = 'server' in auth.get('radius', {})
+    have_eap_server = 'eap_server' in auth
+    have_psk = 'cak' in mka
+
+    if not (have_radius or have_eap_server or have_psk):
+        raise ConfigError('802.1X authenticator requires a RADIUS server, a local '
+                          '"eap-server", or a MACsec pre-shared key ("macsec mka cak")!')
+
+    if have_radius:
+        for server, server_config in auth['radius']['server'].items():
+            if 'key' not in server_config:
+                raise ConfigError(f'RADIUS server "{server}" requires a shared secret "key"!')
+
+    if have_eap_server:
+        if 'certificate' not in auth['eap_server']:
+            raise ConfigError('Local "eap-server" requires a server "certificate"!')
+        cert_name = auth['eap_server']['certificate']
+        # With the TPM enabled the server key is TPM-sealed (not in the PKI
+        # store); otherwise a portable plaintext PKI key is used.
+        from vyos.tpm import tpm_enabled
+        if tpm_enabled():
+            from vyos.tpm_pki import get_path_str, validate_certificate_against_tpm_priv_key
+            if not validate_certificate_against_tpm_priv_key(
+                    get_path_str('certificate', 'pem', cert_name),
+                    get_path_str('certificate', 'key', cert_name)):
+                raise ConfigError(f'eap-server certificate "{cert_name}" does not '
+                                  'match a TPM-sealed private key!')
+        else:
+            verify_pki_certificate(config, cert_name, no_password_protected=True)
+        if 'ca_certificate' in auth['eap_server']:
+            for ca_cert in auth['eap_server']['ca_certificate']:
+                verify_pki_ca_certificate(config, ca_cert)
+
+    if macsec:
+        cipher = macsec.get('cipher', 'gcm-aes-128')
+        if have_psk:
+            if 'ckn' not in mka:
+                raise ConfigError('MACsec pre-shared key requires both "cak" and "ckn"!')
+            cak_len = len(mka['cak'])
+            if cipher == 'gcm-aes-128' and cak_len != 32:
+                raise ConfigError('gcm-aes-128 requires a 128-bit (32 hex-digit) CAK!')
+            if cipher == 'gcm-aes-256' and cak_len != 64:
+                raise ConfigError('gcm-aes-256 requires a 256-bit (64 hex-digit) CAK!')
+        elif 'ckn' in mka:
+            raise ConfigError('MACsec "ckn" requires a matching "cak"!')
+
 def has_frr_protocol_in_dict(config_dict: dict, protocol: str) -> bool:
     vrf = None
     if config_dict and 'vrf_context' in config_dict:
