@@ -66,19 +66,22 @@ async def generate_nft_rules(interface='wwan0'):
     failover = False
 
     commands = f''''''
+    # test lines for ip6 frame drops
+    "add rule inet {interface}_raw_{rule_num} output oifname {interface} ip6 daddr {{ ff00::/8, fe80::/10 }} accept"
+    "add rule inet {interface}_raw_{rule_num} prerouting ip6 daddr {{ ff00::/8, fe80::/10 }} accept"
     for rule_num in matching:
         basic_nft_commands = f'''
         add table inet {interface}_raw_{rule_num}
         add chain inet {interface}_raw_{rule_num} output {{ type filter hook output priority raw; policy accept; }}
         add rule inet {interface}_raw_{rule_num} output oifname {interface} queue num {rule_num}
         add chain inet {interface}_raw_{rule_num} prerouting {{ type filter hook prerouting priority raw; policy accept; }}
-        add rule inet {interface}_raw_{rule_num} prerouting queue num {rule_num}
         '''
         if config.get('rule', {}).get(rule_num, {}).get('failover', {}) is not None:
             failover = True
         inbound_interface = config.get('rule', {}).get(rule_num, {}).get('inbound_interface', {})
 
         if failover is False or inbound_interface == 'any':
+            "add rule inet {interface}_raw_{rule_num} prerouting iifname {physical_interfaces} queue num {rule_num}"
             physical_interfaces = f"{{ {', '.join(get_physical_interfaces())} }}"
             commands = f'''add rule inet {interface}_raw_{rule_num} prerouting iifname {physical_interfaces} fib daddr oifname "{interface}" queue num {rule_num}
             '''
