@@ -174,7 +174,12 @@ def mtr(
             args[name] = option['dflt']
 
     try:
-        ip = socket.gethostbyname(host)
+        # gethostbyname() resolves IPv4 (A) records only; fall back to an
+        # IPv6 (AAAA) lookup so hosts with only an AAAA record resolve too.
+        try:
+            ip = socket.gethostbyname(host)
+        except socket.gaierror:
+            ip = socket.getaddrinfo(host, None, socket.AF_INET6)[0][4][0]
     except UnicodeError:
         raise vyos.opmode.InternalError(f'Unknown host: {host}')
     except socket.gaierror:
