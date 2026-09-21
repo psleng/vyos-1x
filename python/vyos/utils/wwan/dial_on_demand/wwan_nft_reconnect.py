@@ -322,7 +322,6 @@ async def main(interface='wwan0', connect_timeout=30, loop=None, client=None):
         worker_task.cancel()
         await handler.cleanup_tasks()
         nfqueue.unbind()
-        loop.close()
 
 
 if __name__ == "__main__":
