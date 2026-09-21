@@ -521,7 +521,7 @@ interface then parks and ignores modem/SIM events until released.
 igos@igos:~$ change wwan wwan0 airplane-mode enable
 ```
 
-**Script:** `wwan_airplane.py enable --interface "$3"`
+**Script:** `wwan_airplane.py set_airplane_mode --interface "$3" --state=enable`
 
 > **Non-persistent by design.** Airplane mode is an operational action and is
 > **never written to the configuration** — a reboot always returns to normal
@@ -537,7 +537,7 @@ Power the modem RF back **on** and restart the connection from scratch.
 igos@igos:~$ change wwan wwan0 airplane-mode disable
 ```
 
-**Script:** `wwan_airplane.py disable --interface "$3"`
+**Script:** `wwan_airplane.py set_airplane_mode --interface "$3" --state=disable`
 
 > **Airplane mode vs `set … disable`:** airplane mode is a *runtime* radio
 > silence that keeps the interface configured; `set interfaces wwan <wwanN>
