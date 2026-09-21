@@ -548,6 +548,46 @@ igos@igos:~$ change wwan wwan0 airplane-mode disable
 
 ---
 
+## SIM PIN Commands
+
+Manage the PIN lock on the **active, registered** SIM. These act on the
+physical SIM, so they run in op-mode; the resulting state is written back to the
+running configuration for the active slot so the manager can auto-unlock the SIM
+on future boots.
+
+> **Active, registered SIM only.** A PIN-locked SIM only reaches the registered
+> state after the manager unlocked it with the configured PIN, so that PIN is
+> proven correct — change/remove therefore cannot burn the SIM's PIN-retry
+> counter (which would drive it to PUK-lock). Insert/enable only the SIM you
+> want to modify in the active slot before running these.
+
+### `change wwan <wwanN> sim pin new <PIN>`
+
+Enable a PIN lock or change the existing PIN (4–8 digits) on the active SIM, and
+persist it to `interfaces wwan <wwanN> sim slot <slot> pin`.
+
+```
+igos@igos:~$ change wwan wwan0 sim pin new '1234'
+```
+
+**Script:** `wwan_pin.py update_pin --interface="$3" --pin="$7"`
+
+> **Enabling a PIN is retry-guarded.** Creating a lock verifies the PIN against
+> the SIM, so the command refuses to proceed if it cannot read the retry
+> counter or only one attempt remains (recover via PUK first).
+
+### `change wwan <wwanN> sim pin remove`
+
+Disable the PIN lock on the active SIM and clear the stored PIN from config.
+
+```
+igos@igos:~$ change wwan wwan0 sim pin remove
+```
+
+**Script:** `wwan_pin.py delete_pin --interface="$3"`
+
+---
+
 ## SMS Commands
 
 ### `generate interfaces wwan <wwanN> sms number <phone> message <text>`
@@ -688,6 +728,9 @@ scripts use the `WWANClientSync` client library from
 | `delete_sms(message_id)` | integer | `{"status": "ok"}` | Delete specific SMS |
 | `delete_all_sms()` | — | `{"status": "ok"}` | Delete all SMS for active SIM |
 | `clear_data_usage(slot)` | integer | Status dict | Zero per-SIM data-usage counters for a slot |
+| `change_sim_pin(new_pin)` | string | `{"action": ..., "slot": N}` | Create or change the SIM PIN on the active, registered SIM |
+| `remove_sim_pin()` | — | `{"action": ..., "slot": N}` | Disable the SIM PIN lock on the active, registered SIM |
+| `SetAirplaneMode(enabled)` | boolean | string | Toggle airplane mode (RF off / RF on) on the interface |
 
 ### Control D-Bus Methods
 
