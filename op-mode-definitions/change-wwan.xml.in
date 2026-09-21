@@ -33,13 +33,13 @@
                         <properties>
                           <help>Set or change the SIM PIN (4 to 8 digits)</help>
                         </properties>
-                        <command>${vyos_op_scripts_dir}/wwan_pin.py change_pin --interface="$3" --pin="$7"</command>
+                        <command>${vyos_op_scripts_dir}/wwan_pin.py update_pin --interface="$3" --pin="$7"</command>
                       </tagNode>
                       <node name="remove">
                         <properties>
                           <help>Disable the SIM PIN lock</help>
                         </properties>
-                        <command>${vyos_op_scripts_dir}/wwan_pin.py remove_pin --interface="$3"</command>
+                        <command>${vyos_op_scripts_dir}/wwan_pin.py delete_pin --interface="$3"</command>
                       </node>
                     </children>
                   </node>
@@ -54,13 +54,13 @@
                     <properties>
                       <help>Disconnect and power the modem RF off</help>
                     </properties>
-                    <command>${vyos_op_scripts_dir}/wwan_airplane.py enable --interface="$3"</command>
+                    <command>${vyos_op_scripts_dir}/wwan_airplane.py set_airplane_mode --interface="$3" --state=enable</command>
                   </node>
                   <node name="disable">
                     <properties>
                       <help>Power the modem RF back on and reconnect</help>
                     </properties>
-                    <command>${vyos_op_scripts_dir}/wwan_airplane.py disable --interface="$3"</command>
+                    <command>${vyos_op_scripts_dir}/wwan_airplane.py set_airplane_mode --interface="$3" --state=disable</command>
                   </node>
                 </children>
               </node>

@@ -78,7 +78,7 @@ snmp_change_type = {
     'change': 3
 }
 snmp_event_source = 1
-snmp_trap_mib = 'VYATTA-TRAP-MIB'
+snmp_trap_mib = 'IGOS-TRAP-MIB'
 snmp_trap_name = 'mgmtEventTrap'
 
 def geoip_sets(firewall):

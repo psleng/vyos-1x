@@ -19,7 +19,7 @@
 
 from argparse import ArgumentParser, Namespace
 from pathlib import Path
-from shutil import copy, disk_usage, rmtree
+from shutil import copy, copytree, disk_usage, rmtree
 from sys import exit
 from typing import Optional, Literal, TypeAlias, get_args
 
@@ -226,6 +226,15 @@ def set_factory_image(image_name: Optional[str] = None,
             if source_artifact.is_file():
                 copy(source_artifact.as_posix(),
                      (staging_dir / artifact).as_posix())
+        # Per-image DTBs: the GRUB menuentry loads
+        # /boot/default-firmware/dtb/${prod_id}-${model}.dtb (has_dtb), so the
+        # factory image needs its own dtb/ tree or it will not boot on platforms
+        # that ship model DTBs (e.g. am64x).
+        source_dtb: Path = source_dir / 'dtb'
+        if source_dtb.is_dir():
+            copytree(source_dtb.as_posix(),
+                     (staging_dir / 'dtb').as_posix(),
+                     dirs_exist_ok=True, symlinks=True)
         # Swap into place: drop the old factory image, promote the staged copy.
         if factory_dir.exists():
             rmtree(factory_dir)

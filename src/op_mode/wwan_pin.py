@@ -88,8 +88,12 @@ def _delete_from_config(path: str):
 
 # ── Public op-mode entry points ─────────────────────────────────────────
 
-def change_pin(raw: bool, interface: str, pin: str):
+def update_pin(interface: str, pin: str):
     """Create or change the SIM PIN on the active, registered SIM.
+
+    vyos.opmode.run() only registers functions whose names start with an
+    approved verb, so this "update"-verb entry point backs the
+    `... sim pin new <pin>` CLI node.
 
     CLI: change wwan <wwan0> sim pin new <pin>
     """
@@ -114,19 +118,21 @@ def change_pin(raw: bool, interface: str, pin: str):
             override_prompt=False,
         )
 
-    if raw:
-        return result
     if action == 'created':
-        return f'SIM PIN enabled on {interface} slot {slot}.'
-    if action == 'changed':
-        return f'SIM PIN changed on {interface} slot {slot}.'
-    if action == 'unchanged':
-        return f'SIM PIN on {interface} slot {slot} already matches — no change.'
-    return f'SIM PIN operation on {interface} slot {slot}: {action}.'
+        print(f'SIM PIN enabled on {interface} slot {slot}.')
+    elif action == 'changed':
+        print(f'SIM PIN changed on {interface} slot {slot}.')
+    elif action == 'unchanged':
+        print(f'SIM PIN on {interface} slot {slot} already matches — no change.')
+    else:
+        print(f'SIM PIN operation on {interface} slot {slot}: {action}.')
 
 
-def remove_pin(raw: bool, interface: str):
+def delete_pin(interface: str):
     """Disable the SIM PIN lock on the active, registered SIM.
+
+    vyos.opmode.run() only registers approved-verb function names, so this
+    "delete"-verb entry point backs the `... sim pin remove` CLI node.
 
     CLI: change wwan <wwan0> sim pin remove
     """
@@ -144,13 +150,12 @@ def remove_pin(raw: bool, interface: str):
     # Ensure the config no longer carries a PIN for the active slot.
     _delete_from_config(f"interfaces wwan {interface} sim slot {slot} pin")
 
-    if raw:
-        return result
     action = result.get('action', '')
     if action == 'already-disabled':
-        return (f'SIM PIN lock on {interface} slot {slot} was already disabled; '
-                'configuration cleared.')
-    return f'SIM PIN lock disabled on {interface} slot {slot}.'
+        print(f'SIM PIN lock on {interface} slot {slot} was already disabled; '
+              'configuration cleared.')
+    else:
+        print(f'SIM PIN lock disabled on {interface} slot {slot}.')
 
 
 if __name__ == '__main__':

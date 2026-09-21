@@ -23,15 +23,15 @@ using the net-snmp ``pass_persist`` protocol.
 
 Wire-up in /etc/snmp/snmpd.conf::
 
-    pass_persist .1.3.6.1.4.1.44641.1  /usr/bin/igos-wwan-snmp-agent
+    pass_persist .1.3.6.1.4.1.1966.30.1  /usr/bin/igos-wwan-snmp-agent
 
 Tables implemented (read-only):
 
-* igosWwanIfTable        (.1.3.6.1.4.1.44641.1.1.1.1)
-* igosWwanSimTable       (.1.3.6.1.4.1.44641.1.1.2.1)
-* igosWwanRadioTable     (.1.3.6.1.4.1.44641.1.1.3.1)
-* igosWwanBearerTable    (.1.3.6.1.4.1.44641.1.1.4.1)
-* igosWwanFailoverTable  (.1.3.6.1.4.1.44641.1.1.5.1)
+* igosWwanIfTable        (.1.3.6.1.4.1.1966.30.1.1.1.1)
+* igosWwanSimTable       (.1.3.6.1.4.1.1966.30.1.1.2.1)
+* igosWwanRadioTable     (.1.3.6.1.4.1.1966.30.1.1.3.1)
+* igosWwanBearerTable    (.1.3.6.1.4.1.1966.30.1.1.4.1)
+* igosWwanFailoverTable  (.1.3.6.1.4.1.1966.30.1.1.5.1)
 
 The PD table is reserved (not yet populated).
 """
@@ -51,7 +51,7 @@ logger = logging.getLogger('vyos.wwan.snmp_agent')
 
 
 # ── OID layout ──────────────────────────────────────────────────────────────
-ROOT = (1, 3, 6, 1, 4, 1, 44641, 1)            # igosWwanMIB
+ROOT = (1, 3, 6, 1, 4, 1, 1966, 30, 1)         # igosWwanMIB ({ igos 1 })
 OBJ  = ROOT + (1,)                              # igosWwanObjects
 
 IF_ENTRY       = OBJ + (1, 1, 1)                # .interface.ifTable.entry
@@ -76,9 +76,18 @@ T_OID       = 'OBJECTID'
 
 # ── Enum mappings (mirror IGOS-WWAN-MIB textual conventions) ───────────────
 FSM_STATE_MAP = {
+    # MIB IgosWwanFsmState canonical names.
     'unknown': 0, 'disabled': 1, 'initializing': 2, 'sim_ready': 3,
     'registering': 4, 'registered': 5, 'connecting': 6, 'connected': 7,
     'disconnecting': 8, 'failed': 9, 'retry_backoff': 10, 'hardware_reset': 11,
+    # Raw ModemState names the FSM publishes in get_status()['fsm_state'],
+    # bucketed onto the coarser MIB enum above (shared with snmp_traps).
+    'initial': 2, 'scanning': 2, 'modem_found': 2, 'waiting_for_config': 2,
+    'configuring': 2, 'waiting_for_sim': 2,
+    'registered_idle': 5, 'disconnected': 5,
+    'usage_monitoring': 7, 'usage_threshold': 7, 'usage_resetting': 7,
+    'sim_switching': 2, 'sim_disconnecting': 8, 'sim_disabling': 2,
+    'sim_enabling': 2, 'sim_reconfiguring': 2,
 }
 
 RAT_MAP = {
@@ -92,6 +101,27 @@ REG_STATE_MAP = {
     'home': 3, 'registered': 3, 'roaming': 4, 'denied': 5,
     'emergency': 6,
 }
+
+# ModemManager MM_MODEM_3GPP_REGISTRATION_STATE integer -> IgosWwanRegState.
+# get_status() publishes the raw MM integer, which the word-keyed REG_STATE_MAP
+# above cannot resolve on its own.
+MM_3GPP_REG_STATE_TO_MIB = {
+    0: REG_STATE_MAP['idle'],       # idle (not registered)
+    1: REG_STATE_MAP['home'],       # home
+    2: REG_STATE_MAP['searching'],  # searching
+    3: REG_STATE_MAP['denied'],     # denied
+    4: REG_STATE_MAP['unknown'],    # unknown
+    5: REG_STATE_MAP['roaming'],    # roaming
+    6: REG_STATE_MAP['home'],       # home (SMS only)
+    7: REG_STATE_MAP['roaming'],    # roaming (SMS only)
+    8: REG_STATE_MAP['emergency'],  # emergency only
+    9: REG_STATE_MAP['home'],       # home (CSFB not preferred)
+    10: REG_STATE_MAP['roaming'],   # roaming (CSFB not preferred)
+    11: REG_STATE_MAP['unknown'],   # attached RLOS
+}
+
+# MM registration states that count as roaming for igosWwanSimRoaming.
+MM_3GPP_ROAMING_STATES = {5, 7, 10}
 
 SIM_STATE_MAP = {
     'unknown': 0, 'absent': 1, 'pin-locked': 2, 'puk-locked': 3,
@@ -147,6 +177,28 @@ def _enum(value: Any, mapping: Dict[str, int], default: int = 0) -> int:
         return default
     key = str(value).strip().lower().replace(' ', '-')
     return mapping.get(key, mapping.get(key.replace('-', '_'), default))
+
+
+def _resolve_reg_state(value: Any) -> Tuple[int, bool]:
+    """Map registration_state to (IgosWwanRegState, is_roaming).
+
+    get_status() publishes registration_state as the raw ModemManager 3GPP
+    integer; a word form ('home'/'roaming') is accepted as a fallback.
+    """
+    if value is None or value == '':
+        return REG_STATE_MAP['unknown'], False
+    mm_int: Optional[int] = None
+    if isinstance(value, int) and not isinstance(value, bool):
+        mm_int = value
+    else:
+        text = str(value).strip()
+        if text.isdigit():
+            mm_int = int(text)
+    if mm_int is not None:
+        return (MM_3GPP_REG_STATE_TO_MIB.get(mm_int, REG_STATE_MAP['unknown']),
+                mm_int in MM_3GPP_ROAMING_STATES)
+    mib = _enum(value, REG_STATE_MAP, 0)
+    return mib, mib == REG_STATE_MAP['roaming']
 
 
 def _int(value: Any, default: int = 0) -> int:
@@ -295,8 +347,8 @@ def _build_sim_rows(if_index: int, st: Dict[str, Any]) -> Iterable[Tuple[Tuple[i
             opname = _str(st.get('operator_name')) or _str(st.get(f'sim_slot_{slot}_operator'))
             opcode = _str(st.get('operator_code')) or _str(st.get(f'sim_slot_{slot}_mcc_mnc'))
             apn = _str(st.get('connected_apn'))
-            reg_state = _enum(st.get('registration_state'), REG_STATE_MAP, 0)
-            roaming = _bool_truthvalue(reg_state == REG_STATE_MAP['roaming'])
+            reg_state, is_roaming = _resolve_reg_state(st.get('registration_state'))
+            roaming = _bool_truthvalue(is_roaming)
         else:
             iccid = _str(st.get(f'sim_slot_{slot}_iccid'))
             imsi  = _str(st.get(f'sim_slot_{slot}_imsi'))
@@ -416,7 +468,14 @@ def _build_bearer_row(if_index: int, st: Dict[str, Any]) -> Iterable[Tuple[Tuple
     yield base + (8, if_index),  T_STRING,    _str(st.get('ipv6_gateway'))
     yield base + (9, if_index),  T_STRING,    (dns_list[0] if len(dns_list) > 0 else '')
     yield base + (10, if_index), T_STRING,    (dns_list[1] if len(dns_list) > 1 else '')
-    yield base + (11, if_index), T_STRING,    _now_ts_to_dateandtime(st.get('last_connect_time'))
+    # FSM publishes session duration (seconds since connect), not an absolute
+    # connect timestamp -- derive the connect wall-clock from it.
+    connect_ts = st.get('last_connect_time')
+    if not connect_ts:
+        dur = _int(st.get('session_duration_seconds'), 0)
+        if connected and dur > 0:
+            connect_ts = time.time() - dur
+    yield base + (11, if_index), T_STRING,    _now_ts_to_dateandtime(connect_ts)
     yield base + (12, if_index), T_TIMETICKS, str(_int(st.get('session_duration_seconds'), 0) * 100)
     yield base + (13, if_index), T_COUNTER64, str(_int(st.get('session_rx_bytes'), 0))
     yield base + (14, if_index), T_COUNTER64, str(_int(st.get('session_tx_bytes'), 0))

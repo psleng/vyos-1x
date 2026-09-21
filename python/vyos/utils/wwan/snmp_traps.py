@@ -78,7 +78,7 @@ from vyos.utils.wwan.snmp_agent import (  # noqa: E402
 
 
 # igosWwanMIB notifications — { igosWwanNotifications 0 }
-NOTIF_BASE = '.1.3.6.1.4.1.44641.1.2.0'
+NOTIF_BASE = '.1.3.6.1.4.1.1966.30.1.2.0'
 
 # igosWwanEventSlot — accessible-for-notify scalar { igosWwanNotifications 1 }.
 # Carried as instance .0 in data-limit notifications.
