@@ -53,7 +53,6 @@ from vyos.utils.process import is_systemd_service_active
 from vyos.utils.process import is_systemd_service_running
 from vyos import ConfigError
 from vyos import airbag
-from vyos import tpm
 
 airbag.enable()
 
@@ -419,20 +418,9 @@ def verify(pki):
                 if not is_valid_ca_certificate(ca_conf['certificate']):
                     raise ConfigError(f'Invalid certificate on CA certificate "{name}"')
 
-            if 'private' in ca_conf and ('key' in ca_conf['private'] or 'tpm' in ca_conf['private']):
+            if 'private' in ca_conf and 'key' in ca_conf['private']:
                 private = ca_conf['private']
                 protected = 'password_protected' in private
-
-                if 'tpm_key' in ca_conf['private']:
-                    save_file = ca_conf['private']['tpm_key']
-                    # We will save all tpm sealed private keys in /config/auth/
-                    save_dir = "/config/auth/"
-                    if not os.path.exists(save_dir + save_file):
-                        raise ConfigError('CA certificate private tpm-key file cannot be located')
-
-                    reread_key = tpm.read_tpm_key_file(save_file)
-                    ca_conf['private']['key'] = reread_key
-                    del ca_conf['private']['tpm_key']
 
                 if not is_valid_private_key(private['key'], protected):
                     raise ConfigError(f'Invalid private key on CA certificate "{name}"')
@@ -452,20 +440,9 @@ def verify(pki):
                 if not is_valid_certificate(cert_conf['certificate']):
                     raise ConfigError(f'Invalid certificate on certificate "{name}"')
 
-            if 'private' in cert_conf and ('key' in cert_conf['private'] or 'tpm_key' in cert_conf['private']):
+            if 'private' in cert_conf and 'key' in cert_conf['private']:
                 private = cert_conf['private']
                 protected = 'password_protected' in private
-
-                if 'tpm_key' in cert_conf['private']:
-                    save_file = cert_conf['private']['tpm_key']
-                    # We will save all tpm sealed private keys in /config/auth/
-                    save_dir = "/config/auth/"
-                    if not os.path.exists(save_dir + save_file):
-                        raise ConfigError('Certificate private tpm-key .pub/.priv files cannot be located')
-
-                    reread_key = tpm.read_tpm_key_file(save_file)
-                    cert_conf['private']['key'] = reread_key
-                    del cert_conf['private']['tpm_key']
 
                 if not is_valid_private_key(private['key'], protected):
                     raise ConfigError(f'Invalid private key on certificate "{name}"')
