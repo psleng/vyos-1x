@@ -264,6 +264,10 @@ systemctl enable vyos-config-cloud-init.service
 # Enable Podman API
 systemctl enable podman.service
 
+# Start the WWAN SMS command daemon automatically when configured.  The unit's
+# ConditionPathExists prevents it from running on images without SMS config.
+systemctl enable sms-command.service
+
 # Disable the system-wide dnsmasq instance — VyOS spawns scoped dnsmasq
 # instances per-feature (DNS forwarding, DHCP server, WWAN ip-passthrough)
 # with --bind-interfaces.  The default Debian unit binds to *:67 and would
