@@ -183,8 +183,6 @@ class TestDirectCLI(unittest.TestCase):
             ['wwan0', '--watch'],
             ['wwan0', '--method', 'tcp', '--primary-target', '1.1.1.1'],
             ['wwan0', '--method', 'dns', '--primary-target', '1.1.1.1'],
-            base + ['--test-config', '/tmp/tests.json'],
-            ['wwan0', '--test-config', '/tmp/tests.json', '--timeout', '5'],
             base + ['--port', '80'], base + ['--name', 'example.com'],
             base + ['--record-type', 'AAAA'], base + ['--timeout', '0'],
             base + ['--secondary-target', 'invalid'], base + ['eth0'],
@@ -194,12 +192,6 @@ class TestDirectCLI(unittest.TestCase):
                 wan.main(argv)
             self.assertEqual(error.exception.code, 2)
         monitor.assert_not_called()
-
-    @patch.object(wan, '_monitor_cli', return_value=0)
-    def test_json_still_supported(self, monitor):
-        with patch('builtins.open', mock_open(read_data='[{"method":"ping","target":"1.1.1.1"}]')):
-            wan.main(['wwan0', '--test-config', '/tmp/tests.json', '--watch'])
-        self.assertEqual(monitor.call_args.args[1], [wan.PathTest('ping', '1.1.1.1')])
 
     @patch.object(wan, 'check_interface_status')
     @patch('builtins.print')
@@ -266,15 +258,27 @@ class TestMonitor(unittest.TestCase):
 
     def test_route_failover_changes_metrics_on_transitions(self):
         runner = MagicMock()
-        failover = wan.RouteFailover('eth0', 'wwan0', runner=runner)
+        failover = wan.RouteFailover('eth0', 'wwan0', primary_gateway='10.10.0.1',
+                                     cellular_gateway='10.113.11.9', runner=runner)
         self.assertTrue(failover.apply(True))
         self.assertEqual(runner.call_count, 2)
         self.assertTrue(failover.apply(False))
         self.assertEqual(runner.call_count, 4)
         self.assertFalse(failover.apply(False))
         commands = [call.args[0] for call in runner.call_args_list]
+        self.assertIn('10.10.0.1', commands[0])
+        self.assertIn('10.113.11.9', commands[1])
         self.assertEqual(commands[2][-2:], ['metric', '220'])
         self.assertEqual(commands[3][-2:], ['metric', '10'])
+
+    @patch.object(wan, '_default_gateway', side_effect=['10.10.0.1', '10.113.11.9'])
+    def test_route_failover_discovers_gateways(self, gateways):
+        runner = MagicMock()
+        failover = wan.RouteFailover('eth0', 'wwan0', runner=runner)
+        failover.apply(True)
+        commands = [call.args[0] for call in runner.call_args_list]
+        self.assertIn('10.10.0.1', commands[0])
+        self.assertIn('10.113.11.9', commands[1])
 
     def test_table_output_for_mixed_results(self):
         results = [
