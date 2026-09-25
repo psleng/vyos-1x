@@ -14,7 +14,6 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import base64
 import ipaddress
 import os
 import re
@@ -334,8 +333,7 @@ def install_wireguard_key(interface, private_key, public_key, tpm_enabled=None):
         install_into_config(
             conf, [f"interfaces wireguard {interface} private-key-tpm '{private_key}'"]
         )
-        print(f"Sealed private-key .pub file created: '{private_key_path}{private_key}.pub'")
-        print(f"Sealed private-key .priv file created: '{private_key_path}{private_key}.priv'")
+        print(f"File created: '{private_key_path}{private_key}'")
     else:
         install_into_config(
             conf, [f"interfaces wireguard {interface} private-key '{private_key}'"]
@@ -914,7 +912,8 @@ def generate_wireguard_key(interface=None, install=False, tpm_file=None):
             print('Error: tpm does not exist!  Cannot use tpm commands!')
             return
         else:
-            tpm.write_tpm_key_file(base64.b64decode(private_key), tpm_file)
+            # Default write location in function is /config/auth/; in this case use subdirectory wireguard
+            tpm.write_tpm_key_file(private_key.encode(), "wireguard/" + tpm_file)
             private_key = tpm_file
 
     if interface and install:

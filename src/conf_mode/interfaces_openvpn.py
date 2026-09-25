@@ -66,6 +66,7 @@ from vyos.utils.network import interface_exists
 
 from vyos import ConfigError
 from vyos import airbag
+from vyos import tpm
 airbag.enable()
 
 user = 'openvpn'
@@ -235,7 +236,7 @@ def verify_pki(openvpn):
                 raise ConfigError(f'Missing "tls certificate" on openvpn interface {interface}')
 
         if 'certificate' in tls:
-            if tls['certificate'] not in pki['certificate']:
+            if tls['certificate'] not in pki['certificate'] and not tpm.tpm_enabled():
                 raise ConfigError(f'Invalid certificate on openvpn interface {interface}')
 
             if dict_search_args(pki, 'certificate', tls['certificate'], 'private', 'password_protected') is not None:
@@ -672,19 +673,58 @@ def generate_pki_files(openvpn):
 
         if 'certificate' in tls:
             cert_name = tls['certificate']
-            pki_cert = pki['certificate'][cert_name]
+            if tpm.tpm_enabled():
+                # Need to set a variable to let openvpn files know that tpm is being used
+                openvpn['tpm_required'] = True
+                full_dir_name = ''
+                if os.path.exists(f"/config/auth/tpm/cert/{cert_name}"):
+                    full_dir_name =  f"/config/auth/tpm/cert/{cert_name}"
+                else:
+                    raise Exception("Could not find tpm certificate in /config/auth/tpm/cert/; may create with 'generate tpm' command")
 
-            if 'certificate' in pki_cert:
-                cert_path = os.path.join(cfg_dir, f'{interface}_cert.pem')
-                write_file(cert_path, wrap_certificate(pki_cert['certificate']),
-                           user=user, group=group, mode=0o600)
-
-            if 'private' in pki_cert and 'key' in pki_cert['private']:
-                key_path = os.path.join(cfg_dir, f'{interface}_cert.key')
-                write_file(key_path, wrap_private_key(pki_cert['private']['key']),
-                           user=user, group=group, mode=0o600)
+                tpm_cert_path = os.path.join(full_dir_name, f'{cert_name}.pem')
+                tpm_key_path = os.path.join(full_dir_name, f'{cert_name}.key')
+                if os.path.exists(tpm_cert_path):
+                    with open(tpm_cert_path, 'r') as f:
+                        cert_data = f.read()
+                    write_file(
+                        os.path.join(cfg_dir, f'{interface}_cert.pem'),
+                        cert_data,
+                        user=user,
+                        group=group,
+                        mode=0o600
+                    )
+                else:
+                    raise Exception(f"Could not find openvpn .pem file containing details to use from {tpm_cert_path}; this can be generated via 'generate tpm' command")
+                if os.path.exists(tpm_key_path):
+                    with open(tpm_key_path, 'r') as f:
+                        key_data = f.read()
+                    write_file(
+                        os.path.join(cfg_dir, f'{interface}_cert.key'),
+                        key_data,
+                        user=user,
+                        group=group,
+                        mode=0o600
+                    )
+                else:
+                    raise Exception(f"Could not find openvpn .key file containing details to use from {tpm_key_path}; this can be generated via 'generate tpm' command")
 
                 openvpn['tls']['private_key'] = True
+
+            else:
+                pki_cert = pki['certificate'][cert_name]
+
+                if 'certificate' in pki_cert:
+                    cert_path = os.path.join(cfg_dir, f'{interface}_cert.pem')
+                    write_file(cert_path, wrap_certificate(pki_cert['certificate']),
+                            user=user, group=group, mode=0o600)
+
+                if 'private' in pki_cert and 'key' in pki_cert['private']:
+                    key_path = os.path.join(cfg_dir, f'{interface}_cert.key')
+                    write_file(key_path, wrap_private_key(pki_cert['private']['key']),
+                            user=user, group=group, mode=0o600)
+
+                    openvpn['tls']['private_key'] = True
 
         if 'dh_params' in tls:
             dh_name = tls['dh_params']
