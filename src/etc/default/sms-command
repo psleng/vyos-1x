@@ -1,0 +1,12 @@
+# WWAN SMS command service configuration
+#
+# v1 supports only:
+#   123456 REBOOT
+#
+# Security: configure an authorized number and six-digit PIN per interface.
+
+IGOS_SMS_COMMAND_INTERFACES=wwan0
+IGOS_SMS_COMMAND_AUTHORIZED_NUMBERS='{}'
+IGOS_SMS_COMMAND_POLL_INTERVAL=5
+IGOS_SMS_COMMAND_RESPONSE_ENABLED=true
+IGOS_SMS_COMMAND_LOG_LEVEL=INFO

@@ -1549,6 +1549,42 @@
               </leafNode>
             </children>
           </node>
+          <!-- ── SMS command processing ─────────────────────────── -->
+          <node name="sms-command" owner="${vyos_conf_scripts_dir}/service_sms-command.py">
+            <properties>
+              <help>SMS command processing for this WWAN interface</help>
+              <priority>902</priority>
+            </properties>
+            <children>
+              <tagNode name="authorized-number">
+                <properties>
+                  <help>Authorized source phone number</help>
+                  <completionHelp>
+                    <list>+15551234567</list>
+                  </completionHelp>
+                  <valueHelp>
+                    <format>+15551234567</format>
+                    <description>Allowed source phone number in E.164 format</description>
+                  </valueHelp>
+                  <constraint>
+                    <regex>\+?[0-9]{6,20}</regex>
+                  </constraint>
+                  <constraintErrorMessage>Allowed number must be a phone number (6-20 digits, optional leading +)</constraintErrorMessage>
+                </properties>
+                <children>
+                  <leafNode name="pin">
+                    <properties>
+                      <help>Six-digit PIN required before the SMS command</help>
+                      <constraint>
+                        <regex>[0-9]{6}</regex>
+                      </constraint>
+                      <constraintErrorMessage>PIN must contain exactly six digits</constraintErrorMessage>
+                    </properties>
+                  </leafNode>
+                </children>
+              </tagNode>
+            </children>
+          </node>
           <!-- ── Logging ─────────────────────────────────────────── -->
           <node name="logging">
             <properties>

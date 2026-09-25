@@ -201,6 +201,10 @@ interfaces
         ├── network-scan
         │     └── timeout <seconds>                       #   default: 180  (scans can take 2+ min; range 10-300)
         │
+        ├── sms-command
+        │     └── authorized-number <phone-number>
+        │           └── pin <6 digits>                    # example: 123456
+        │
         ├── timeouts
         │     ├── connection <seconds>                    #   default: 120
         │     ├── registration <seconds>                  #   default: 180
@@ -1345,6 +1349,41 @@ set interfaces wwan wwan0 failed-retry max-interval 7200
 set interfaces wwan wwan0 failed-retry escalation-threshold 3
 ```
 
+### SMS Commands
+
+Configure each authorized sender on the WWAN interface that receives its SMS
+messages. The phone number accepts 6–20 digits with an optional leading `+`.
+Every authorized number requires a six-digit PIN:
+
+```
+set interfaces wwan wwan0 sms-command authorized-number +11234567890 pin 123456
+commit
+save
+```
+
+The PIN must be included in the same `set` command. VyOS does not prompt for a
+missing leaf value, and commit rejects an authorized-number node without a PIN.
+Leading zeros in the PIN are preserved.
+
+Messages from an authorized number support these commands:
+
+| SMS message | PIN required | Result |
+|---|---|---|
+| `123456 REBOOT` | Yes | Requests a system reboot. `REBOOT` is case-sensitive. |
+| `SHOW SYSTEM INFO` | No | Returns hostname, version, system time, timezone, and uptime. |
+| `SHOW WAN IP ADDRESS` | No | Returns a compact list of current IPv4 and IPv6 interface addresses. |
+| `PING <host-or-ip>` | No | Runs five ICMP echo requests and returns the ping output, including packet-loss statistics; returns `FAILED` if the test cannot produce output. |
+| `CELL CONNECT` | No | Connects the mobile data bearer on the receiving WWAN interface when `connection-mode` is `connect-on-demand` or `dial-on-demand`; rejected in `always-on` mode. |
+| `CELL DISCONNECT` | No | Disconnects the mobile data bearer on the receiving WWAN interface when `connection-mode` is `connect-on-demand` or `dial-on-demand`; rejected in `always-on` mode. |
+
+The sender must be authorized for every command. A bare `REBOOT` message is
+rejected. A PIN must be provided for each authorized phone number. Syslog
+records the sender, recognized command, UTC timestamp, receiving interface,
+message ID, and result. The result may include command output, but PINs and
+incoming SMS message bodies are not logged. Commands received more than 60
+seconds after their message timestamp are rejected as `EXPIRED` and are not
+executed.
+
 ### Carrier / Network Scan
 
 > **If unconfigured:** Network-mode auto (all technologies), network scanning disabled, scan timeout 180 s.
@@ -1642,6 +1681,7 @@ set interfaces wwan wwan0 logging sink 'both'
 | `failed-retry intervals` | `failed_retry_intervals` | `30,60,120,300,600,1800,3600` |
 | `failed-retry max-interval` | `failed_retry_max_interval` | `7200` |
 | `failed-retry escalation-threshold` | `failed_retry_escalation_threshold` | `3` |
+| `sms-command authorized-number NUMBER pin PIN` | *(SMS command service)* | not configured |
 | `network-mode` | `network_mode` | `auto` |
 | `network-time` | `network_time_enabled` | `disabled` (opt-in) |
 | `network-time update-interval` | `network_time_update_interval` | `3600` |

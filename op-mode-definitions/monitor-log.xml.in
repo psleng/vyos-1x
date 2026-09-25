@@ -307,6 +307,12 @@
             </properties>
             <command>journalctl --no-hostname --boot --follow --unit snmpd.service</command>
           </leafNode>
+          <leafNode name="sms-command">
+            <properties>
+              <help>Monitor WWAN SMS command service log</help>
+            </properties>
+            <command>journalctl --no-hostname --boot --follow --unit sms-command.service</command>
+          </leafNode>
           <node name="ssh">
             <properties>
               <help>Monitor last lines of Secure Shell log</help>
