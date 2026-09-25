@@ -73,6 +73,7 @@ def get_config(config=None):
     else:
         conf = Config()
     base = ['service', 'ssh']
+    serial_base = ['service', 'serial']
     if not conf.exists(base):
         return None
     ssh = conf.get_config_dict(base, key_mangling=('-', '_'),
@@ -87,7 +88,8 @@ def get_config(config=None):
     ssh = conf.merge_defaults(ssh, recursive=True)
 
     # Set dependency to restart serial ports running ssh server when ssh config changes
-    set_dependents('serial', conf)
+    if conf.exists(serial_base):
+        set_dependents('serial', conf)
 
     # Ignore default XML values if config doesn't exists
     # Delete key from dict
@@ -203,6 +205,9 @@ def generate(ssh):
 
 
 def apply(ssh):
+    # get config to check service serial node existence
+    conf = Config()
+    serial_base = ['service', 'serial']
     systemd_service_sshguard = 'sshguard.service'
     if not ssh:
         # SSH access is removed in the commit
@@ -242,7 +247,8 @@ def apply(ssh):
         call(f'systemctl {systemd_action} ssh@{vrf}.service')
 
     # Call dependents (e.g., serial ports running ssh server)
-    call_dependents()
+    if conf.exists(serial_base):
+        call_dependents()
     return None
 
 
