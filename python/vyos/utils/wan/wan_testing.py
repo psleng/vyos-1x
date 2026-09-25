@@ -10,6 +10,7 @@ import secrets
 import socket
 import struct
 import subprocess
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -39,6 +40,18 @@ def _read_ip(arguments, timeout):
     ):
         raise ValueError('Expected a list of iproute2 objects')
     return records
+
+
+def _default_gateway(interface, timeout=2.0):
+    """Return the gateway from the active IPv4 default route for an interface."""
+    routes = _read_ip(['-4', 'route', 'show', 'default', 'dev', interface], timeout)
+    for route in routes:
+        if route.get('gateway'):
+            return route['gateway']
+        for nexthop in route.get('nexthops', []):
+            if nexthop.get('gateway'):
+                return nexthop['gateway']
+    return None
 
 
 def _usable_address(address, family):
@@ -224,8 +237,7 @@ def check_tcp(interface, target, port, *, timeout=15.0):
                        reason in ('connected', 'refused'), reason)
 
 
-_DNS_TYPES = {'A': 1, 'NS': 2, 'CNAME': 5, 'SOA': 6, 'PTR': 12,
-              'MX': 15, 'TXT': 16, 'AAAA': 28, 'SRV': 33, 'CAA': 257}
+_DNS_TYPES = {'A': 1, 'AAAA': 28}
 _DNS_RCODES = {0: 'response', 1: 'formerr', 2: 'servfail', 3: 'nxdomain',
                4: 'notimp', 5: 'refused'}
 
@@ -244,12 +256,9 @@ def _dns_question(name, record_type, query_id):
         raise TypeError('DNS record type must be a string')
     record_type = record_type.upper()
     try:
-        query_type = (_DNS_TYPES[record_type] if not record_type.isdecimal()
-                      else int(record_type))
+        query_type = _DNS_TYPES[record_type]
     except (KeyError, ValueError) as error:
         raise ValueError('Unsupported DNS record type') from error
-    if not 1 <= query_type <= 65535:
-        raise ValueError('Invalid DNS record type')
     encoded_name = b''.join(bytes([len(label)]) + label for label in labels) + b'\0'
     header = struct.pack('!HHHHHH', query_id, 0x0100, 1, 0, 0, 0)
     return header + encoded_name + struct.pack('!HH', query_type, 1), query_type
@@ -483,7 +492,8 @@ class RouteFailover:
     runtime only and are not written to the VyOS configuration.
     """
 
-    def __init__(self, primary, cellular, *, primary_metric=10,
+    def __init__(self, primary, cellular, *, primary_gateway=None,
+                 cellular_gateway=None, primary_metric=10,
                  cellular_metric=220, runner=None):
         for name in (primary, cellular):
             if (not isinstance(name, str) or not name or name.startswith('-')
@@ -496,16 +506,31 @@ class RouteFailover:
                 raise ValueError('Route metrics must be non-negative integers')
         self.primary = primary
         self.cellular = cellular
+        self.primary_gateway = primary_gateway
+        self.cellular_gateway = cellular_gateway
         self.primary_metric = primary_metric
         self.cellular_metric = cellular_metric
         self.runner = runner or subprocess.run
         self.active = None
 
-    def _set_metric(self, interface, metric):
-        self.runner(
-            ['ip', 'route', 'change', 'default', 'dev', interface,
-             'metric', str(metric)], check=True, capture_output=True,
-            text=True)
+    def _set_metric(self, interface, gateway, metric):
+        if gateway is None:
+            gateway = _default_gateway(interface)
+        command = ['ip', 'route', 'change', 'default']
+        if gateway:
+            command += ['via', gateway]
+        command += ['dev', interface]
+        if gateway:
+            command += ['onlink']
+        command += ['metric', str(metric)]
+        try:
+            self.runner(command, check=True, capture_output=True, text=True)
+        except (OSError, subprocess.SubprocessError) as error:
+            detail = getattr(error, 'stderr', None) or str(error)
+            raise RuntimeError(
+                f'Unable to set default route for {interface} to metric {metric}'
+                f' (gateway {gateway or "none"}): {detail.strip()}'
+            ) from error
 
     def apply(self, primary_up):
         """Apply a route preference only when the preferred WAN changes."""
@@ -513,11 +538,11 @@ class RouteFailover:
         if desired == self.active:
             return False
         if primary_up:
-            self._set_metric(self.primary, self.primary_metric)
-            self._set_metric(self.cellular, self.cellular_metric)
+            self._set_metric(self.primary, self.primary_gateway, self.primary_metric)
+            self._set_metric(self.cellular, self.cellular_gateway, self.cellular_metric)
         else:
-            self._set_metric(self.primary, self.cellular_metric)
-            self._set_metric(self.cellular, self.primary_metric)
+            self._set_metric(self.primary, self.primary_gateway, self.cellular_metric)
+            self._set_metric(self.cellular, self.cellular_gateway, self.primary_metric)
         self.active = desired
         return True
 
@@ -532,15 +557,14 @@ def main(argv=None):
                         help='Physical or virtual interface names; omit for automatic discovery')
     parser.add_argument('--family', type=int, choices=(4, 6), default=4)
     parser.add_argument('--table', default='main', help='Routing table name or ID')
-    source = parser.add_mutually_exclusive_group()
-    source.add_argument('--test-config', help='JSON file containing a list of PathTest objects')
-    source.add_argument('--method', choices=('interface-status', 'ping', 'tcp', 'dns', 'http', 'https'),
+    parser.add_argument('--method', choices=('interface-status', 'ping', 'tcp', 'dns', 'http', 'https'),
                         help='Test type for direct target options')
     parser.add_argument('--primary-target', help='Target IP, DNS server IP, or HTTP/HTTPS URL')
     parser.add_argument('--secondary-target', help='Optional second target, tested concurrently')
     parser.add_argument('--port', type=int, help='TCP port (required) or DNS port (default: 53)')
     parser.add_argument('--name', help='Name to resolve for DNS tests')
-    parser.add_argument('--record-type', help='DNS record type (default: A)')
+    parser.add_argument('--record-type', choices=('A', 'AAAA'),
+                        help='DNS record type: A or AAAA (default: A)')
     parser.add_argument('--timeout', type=float, help='Timeout per direct test in seconds (default: 15)')
     parser.add_argument('--watch', action='store_true', help='Repeat path tests until interrupted')
     parser.add_argument('--interval', type=int, choices=range(10, 61), default=10,
@@ -550,13 +574,17 @@ def main(argv=None):
     parser.add_argument('--recovery-threshold', type=int, default=2)
     parser.add_argument('--failover-interface',
                         help='Cellular interface for opt-in default-route failover')
+    parser.add_argument('--primary-gateway',
+                        help='Primary WAN IPv4 gateway used for route failover')
+    parser.add_argument('--cellular-gateway',
+                        help='Cellular WAN IPv4 gateway used for route failover')
     parser.add_argument('--primary-route-metric', type=int, default=10)
     parser.add_argument('--cellular-route-metric', type=int, default=220)
     args = parser.parse_args(argv)
     direct_options = (args.primary_target, args.secondary_target, args.port,
                       args.name, args.record_type, args.timeout)
-    if not args.method and not args.test_config:
-        parser.error('--method or --test-config is required')
+    if not args.method:
+        parser.error('--method is required')
     if args.method == 'interface-status':
         if any(value is not None for value in direct_options):
             parser.error('interface-status cannot be combined with probe options')
@@ -564,42 +592,37 @@ def main(argv=None):
             parser.error('interface-status cannot be used with --watch')
         args.method = None
     if not args.method and any(value is not None for value in direct_options):
-        parser.error('Direct target and probe options require --method and cannot be used with --test-config')
-    if args.watch and not (args.test_config or args.method):
-        parser.error('--watch requires --method or --test-config')
-    if args.test_config or args.method:
+        parser.error('Direct target and probe options require --method')
+    if args.watch and not args.method:
+        parser.error('--watch requires --method')
+    if args.method:
         if len(args.interfaces) != 1:
             parser.error('Path tests require exactly one explicit interface')
         try:
-            if args.test_config:
-                with open(args.test_config) as config_file:
-                    config = json.load(config_file)
-                if not isinstance(config, list) or not 1 <= len(config) <= 32:
-                    raise ValueError('Configure between 1 and 32 path tests')
-                tests = [PathTest(**item) for item in config]
-            else:
-                if not args.primary_target:
-                    raise ValueError('--method requires --primary-target')
-                if args.port is not None and args.method not in ('tcp', 'dns'):
-                    raise ValueError('--port is only supported for TCP and DNS')
-                if args.method == 'tcp' and args.port is None:
-                    raise ValueError('TCP tests require --port')
-                if args.method == 'dns' and not args.name:
-                    raise ValueError('DNS tests require --name')
-                if args.method != 'dns' and (args.name is not None or args.record_type is not None):
-                    raise ValueError('--name and --record-type are only supported for DNS')
-                targets = [args.primary_target]
-                if args.secondary_target is not None:
-                    targets.append(args.secondary_target)
-                tests = [PathTest(args.method, target, port=args.port, name=args.name,
-                                  timeout=15.0 if args.timeout is None else args.timeout,
-                                  record_type='A' if args.record_type is None else args.record_type)
-                         for target in targets]
+            if not args.primary_target:
+                raise ValueError('--method requires --primary-target')
+            if args.port is not None and args.method not in ('tcp', 'dns'):
+                raise ValueError('--port is only supported for TCP and DNS')
+            if args.method == 'tcp' and args.port is None:
+                raise ValueError('TCP tests require --port')
+            if args.method == 'dns' and not args.name:
+                raise ValueError('DNS tests require --name')
+            if args.method != 'dns' and (args.name is not None or args.record_type is not None):
+                raise ValueError('--name and --record-type are only supported for DNS')
+            targets = [args.primary_target]
+            if args.secondary_target is not None:
+                targets.append(args.secondary_target)
+            tests = [PathTest(args.method, target, port=args.port, name=args.name,
+                              timeout=15.0 if args.timeout is None else args.timeout,
+                              record_type='A' if args.record_type is None else args.record_type)
+                     for target in targets]
             monitor = PathMonitor(args.policy, args.failure_threshold,
                                   args.recovery_threshold)
             if args.failover_interface and not args.watch:
                 parser.error('--failover-interface requires --watch')
             failover = (RouteFailover(args.interfaces[0], args.failover_interface,
+                                       primary_gateway=args.primary_gateway,
+                                       cellular_gateway=args.cellular_gateway,
                                        primary_metric=args.primary_route_metric,
                                        cellular_metric=args.cellular_route_metric)
                         if args.failover_interface else None)
@@ -683,6 +706,9 @@ def _monitor_cli(args, tests, monitor, failover=None):
                 return int(not passed)
             # Never overlap rounds when a probe takes longer than the interval.
             time.sleep(max(0, args.interval - (time.monotonic() - started)))
+    except RuntimeError as error:
+        print(f'Failover route update failed: {error}', file=sys.stderr)
+        return 1
     except KeyboardInterrupt:
         return 130
 
