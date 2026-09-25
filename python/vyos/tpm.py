@@ -156,8 +156,47 @@ def write_tpm_key_file(key, save_file):
 
 from vyos.utils.process import cmd
 
-tpm_enabled_path = "/etc/vyos/tpm.enabled"
+tpm_mountpoint = "/run/tpm-state"
+tpm_partition = "/dev/mmcblk0p3"
+tpm_enabled_path = f"{tpm_mountpoint}/boot/.tpm.enabled"
 tpm_dev_path = "/sys/class/tpm/tpm0"
+
+def mount_tpm_state():
+    """
+    Mount the persistent TPM state partition.
+    """
+
+    os.makedirs(tpm_mountpoint, exist_ok=True)
+
+    if not os.path.ismount(tpm_mountpoint):
+        code, output = rc_cmd(
+            f'mount {tpm_partition} {tpm_mountpoint}'
+        )
+
+        if code != 0:
+            raise Exception(
+                f'mount_tpm_state: Failed to mount '
+                f'{tpm_partition}: {output}'
+            )
+
+
+def unmount_tpm_state():
+    """
+    Unmount the persistent TPM state partition.
+    """
+
+    if os.path.ismount(tpm_mountpoint):
+        rc_cmd('sync')
+
+        code, output = rc_cmd(
+            f'umount {tpm_mountpoint}'
+        )
+
+        if code != 0:
+            raise Exception(
+                f'unmount_tpm_state: Failed to unmount '
+                f'{tpm_mountpoint}: {output}'
+            )
 
 def tpm_exist():
     """
@@ -176,14 +215,14 @@ def tpm_enabled():
     """
      Args:
         none
-
     Returns:
         True if tpm support enabled by user, False otherwise.
-
-    Note:
-        For now, it returns True/False based on file /etc/vyos/tpm.enabled existing or not.
     """
-    return os.path.exists(tpm_enabled_path)
+    try:
+        mount_tpm_state()
+        return os.path.exists(tpm_enabled_path)
+    finally:
+        unmount_tpm_state()
 
 def tpm_allowed():
     """
@@ -198,29 +237,37 @@ def tpm_allowed():
     """
     return tpm_enabled() and tpm_exist()
 
-
 def tpm_enable():
     """
      Args:
         none
-
     Returns:
         none
-
-    Note:
-        For now, it touches/creates /etc/vyos/tpm.enabled.
     """
-    cmd(f'sudo touch {tpm_enabled_path}')
+
+    try:
+        mount_tpm_state()
+
+        Path(tpm_enabled_path).parent.mkdir(
+            parents=True,
+            exist_ok=True
+        )
+
+        cmd(f'touch {tpm_enabled_path}')
+
+    finally:
+        unmount_tpm_state()
 
 def tpm_disable():
     """
      Args:
         none
-
     Returns:
         none
-
-    Note:
-        For now, it removes /etc/vyos/tpm.enabled.
     """
-    cmd(f'sudo rm -f {tpm_enabled_path}')
+
+    try:
+        mount_tpm_state()
+        cmd(f'rm -f {tpm_enabled_path}')
+    finally:
+        unmount_tpm_state()
