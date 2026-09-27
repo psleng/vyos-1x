@@ -64,6 +64,9 @@ def _resolve_hw_serial_port(port):
 
 
 def _apply_serial_protocol(port, protocol, termination=None, slew_rate=None):
+    # No managed serial hardware on this flavor (empty pinmap) -> nothing to program.
+    if not hw.list_serial_ports():
+        return
     port_name = _resolve_hw_serial_port(port)
     term = None if termination is None else str(termination).lower() in (
         'on', 'true', '1', 'enable', 'enabled'
