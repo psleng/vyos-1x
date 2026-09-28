@@ -1,0 +1,479 @@
+IGOS-SERIAL-MIB DEFINITIONS ::= BEGIN
+
+-- ============================================================================
+-- IGOS-SERIAL-MIB
+--
+-- Serial interface management MIB for VyOS.
+--
+--
+-- Enterprise OID: igos = { enterprises 1966 30 }  (Perle PEN 1966, iGOS arc 30)
+--                 this module (igosSerialMIB) = { igos 3 } = .1.3.6.1.4.1.1966.30.3
+-- ============================================================================
+
+    IMPORTS
+        MODULE-IDENTITY, OBJECT-TYPE, NOTIFICATION-TYPE,
+        Integer32, Unsigned32, Counter64, TimeTicks, Counter32
+            FROM SNMPv2-SMI
+        TEXTUAL-CONVENTION, DisplayString, TruthValue, DateAndTime,
+        MacAddress
+            FROM SNMPv2-TC
+        MODULE-COMPLIANCE, OBJECT-GROUP, NOTIFICATION-GROUP
+            FROM SNMPv2-CONF
+        InterfaceIndex, ifIndex
+            FROM IF-MIB
+        InetAddress, InetAddressType, InetAddressPrefixLength
+            FROM INET-ADDRESS-MIB
+        igos
+            FROM IGOS-SMI
+    ;
+
+
+
+    igosSerialMIB MODULE-IDENTITY
+        LAST-UPDATED "202609160000Z"
+        ORGANIZATION "IGOS"
+        CONTACT-INFO
+            "IGOS - https://igos.io"
+        DESCRIPTION
+            "MIB for the VyOS enhanced Serial interface
+             management subsystem."
+        REVISION     "202609180000Z"
+        DESCRIPTION
+            "Initial Version"
+        ::= { igos 3 }
+
+
+    -- ----------------------------------------------------------------
+    -- Top-level structure
+    -- ----------------------------------------------------------------
+    igosSerialObjects        OBJECT IDENTIFIER ::= { igosSerialMIB 1 }
+    igosSerialNotifications  OBJECT IDENTIFIER ::= { igosSerialMIB 2 }
+    igosSerialConformance    OBJECT IDENTIFIER ::= { igosSerialMIB 3 }
+
+
+
+    -- ----------------------------------------------------------------
+    -- Textual conventions
+    -- ----------------------------------------------------------------
+    PortNumber ::= TEXTUAL-CONVENTION
+    DISPLAY-HINT      "d"
+    STATUS            current
+    DESCRIPTION
+            "Serial Port/Line number. Valid values are 1 to maximum port number the
+             IGOS Device"
+    SYNTAX Integer32 (1..49)
+
+    OnOffValueIolan ::= TEXTUAL-CONVENTION
+      STATUS        current
+      DESCRIPTION
+              "Represents an ON or OFF value."
+      SYNTAX        INTEGER { off(1), on(2) }
+
+  portTable OBJECT-TYPE
+      SYNTAX      SEQUENCE OF PortEntry
+      MAX-ACCESS  not-accessible
+      STATUS      current
+      DESCRIPTION
+              "The port configuration table."
+      ::= { igosSerialObjects 1 }
+
+  portEntry OBJECT-TYPE
+      SYNTAX      PortEntry
+      MAX-ACCESS  not-accessible
+      STATUS      current
+      DESCRIPTION
+              "An entry in the port configuration table, each relating to a serial port."
+      INDEX   { portIndex }
+      ::= { portTable 1 }
+
+  PortEntry ::=
+      SEQUENCE {
+          portIndex                 PortNumber,
+          portTxBytes           Counter32,
+          portRxBytes           Counter32,
+          portFrameErrs         Counter32,
+          portParityErrs        Counter32,
+          portBreaks            Counter32,
+          portOverruns          Counter32,
+          portBufOverruns       Counter32,
+          portRTS               OnOffValueIolan,
+          portCTS               OnOffValueIolan,
+          portDTR               OnOffValueIolan,
+          portDSR               OnOffValueIolan,
+          portCD                OnOffValueIolan
+        }
+    portIndex OBJECT-TYPE
+      SYNTAX      PortNumber
+      MAX-ACCESS  not-accessible
+      STATUS      current
+      DESCRIPTION
+              "Port Index"
+      ::= { portEntry 1 }
+
+    portTxBytes OBJECT-TYPE
+      SYNTAX      Counter32
+      MAX-ACCESS  read-only
+      STATUS      current
+      DESCRIPTION
+              "portTxBytes"
+      ::= { portEntry 2}
+
+  portRxBytes OBJECT-TYPE
+      SYNTAX      Counter32
+      MAX-ACCESS  read-only
+      STATUS      current
+      DESCRIPTION
+              "portRxBytes"
+      ::= { portEntry 3}
+
+  portFrameErrs OBJECT-TYPE
+      SYNTAX      Counter32
+      MAX-ACCESS  read-only
+      STATUS      current
+      DESCRIPTION
+              "portFrameErrs"
+      ::= { portEntry 4}
+
+  portParityErrs OBJECT-TYPE
+      SYNTAX      Counter32
+      MAX-ACCESS  read-only
+      STATUS      current
+      DESCRIPTION
+              "portParityErrs"
+      ::= { portEntry 5}
+
+  portBreaks OBJECT-TYPE
+      SYNTAX      Counter32
+      MAX-ACCESS  read-only
+      STATUS      current
+      DESCRIPTION
+              "portBreaks"
+      ::= { portEntry 6}
+
+  portOverruns OBJECT-TYPE
+      SYNTAX      Counter32
+      MAX-ACCESS  read-only
+      STATUS      current
+      DESCRIPTION
+              "portOverruns"
+      ::= { portEntry 7}
+
+  portBufOverruns OBJECT-TYPE
+      SYNTAX      Counter32
+      MAX-ACCESS  read-only
+      STATUS      current
+      DESCRIPTION
+              "portBufOverruns"
+      ::= { portEntry 8}
+
+  portRTS OBJECT-TYPE
+      SYNTAX      OnOffValueIolan
+      MAX-ACCESS  read-only
+      STATUS      current
+      DESCRIPTION
+              "portRTS"
+      ::= { portEntry 9}
+
+  portCTS OBJECT-TYPE
+      SYNTAX      OnOffValueIolan
+      MAX-ACCESS  read-only
+      STATUS      current
+      DESCRIPTION
+              "portCTS"
+      ::= { portEntry 10}
+
+  portDTR OBJECT-TYPE
+      SYNTAX      OnOffValueIolan
+      MAX-ACCESS  read-only
+      STATUS      current
+      DESCRIPTION
+              "portDTR"
+      ::= { portEntry 11}
+
+  portDSR OBJECT-TYPE
+      SYNTAX      OnOffValueIolan
+      MAX-ACCESS  read-only
+      STATUS      current
+      DESCRIPTION
+              "portDSR"
+      ::= { portEntry 12}
+
+  portCD OBJECT-TYPE
+      SYNTAX      OnOffValueIolan
+      MAX-ACCESS  read-only
+      STATUS      current
+      DESCRIPTION
+              "portCD"
+      ::= { portEntry 13}
+
+cmTable OBJECT-TYPE
+      SYNTAX      SEQUENCE OF cmEntry
+      MAX-ACCESS  not-accessible
+      STATUS      current
+      DESCRIPTION
+              "Serial Ports configured for console management."
+      ::= { igosSerialObjects 2 }
+
+  cmEntry OBJECT-TYPE
+      SYNTAX      cmEntry
+      MAX-ACCESS  not-accessible
+      STATUS      current
+      DESCRIPTION
+              "An entry in the Console Management table."
+      INDEX   { cmIndex }
+      ::= { cmTable 1 }
+
+  cmEntry ::=
+      SEQUENCE {
+          cmIndex               Counter32,
+          cmDevice          DisplayString,
+          cmDescription     DisplayString,
+          cmService         INTEGER,
+          cmPort            Counter32
+        }
+cmIndex OBJECT-TYPE
+      SYNTAX      Counter32
+      MAX-ACCESS  not-accessible
+      STATUS      current
+      DESCRIPTION
+              "CM Index"
+      ::= { cmEntry 1 }
+
+ cmDevice OBJECT-TYPE
+      SYNTAX      DisplayString
+      MAX-ACCESS  read-only
+      STATUS      current
+      DESCRIPTION
+              "Device Name"
+      ::= { cmEntry 2 }
+
+cmDescription OBJECT-TYPE
+      SYNTAX      DisplayString
+      MAX-ACCESS  read-only
+      STATUS      current
+      DESCRIPTION
+              "Port Description"
+      ::= { cmEntry 3 }
+
+cmService OBJECT-TYPE
+        SYNTAX      INTEGER {
+            Telnet(1),
+            SSH(2)
+        }
+        MAX-ACCESS read-only
+        STATUS      current
+        DESCRIPTION
+            "Protocol"
+        ::= { cmEntry 4 }
+
+cmPort OBJECT-TYPE
+      SYNTAX      Counter32
+      MAX-ACCESS  read-only
+      STATUS      current
+      DESCRIPTION
+              "TCP Port Listening for Connection"
+      ::= { cmEntry 5 }
+
+serialUserTable OBJECT-TYPE
+      SYNTAX      SEQUENCE OF serialUserEntry
+      MAX-ACCESS  not-accessible
+      STATUS      current
+      DESCRIPTION
+              "Users logged into serial ports."
+      ::= { igosSerialObjects 3 }
+
+  serialUserEntry OBJECT-TYPE
+      SYNTAX      serialUserEntry
+      MAX-ACCESS  not-accessible
+      STATUS      current
+      DESCRIPTION
+              "An entry in the Serial User table."
+      INDEX   { serialUserIndex }
+      ::= { serialUserTable 1 }
+
+  serialUserEntry ::=
+      SEQUENCE {
+          serialUserIndex               Counter32,
+          serialUserDevice          DisplayString,
+          serialUserName                DisplayString,
+          serialDateTime                DisplayString
+        }
+serialUserIndex OBJECT-TYPE
+      SYNTAX      Counter32
+      MAX-ACCESS  not-accessible
+      STATUS      current
+      DESCRIPTION
+              "serialUser Index"
+      ::= { serialUserEntry 1 }
+
+ serialUserDevice OBJECT-TYPE
+      SYNTAX      DisplayString
+      MAX-ACCESS  read-only
+      STATUS      current
+      DESCRIPTION
+              "Device Name User is logged into"
+      ::= { serialUserEntry 2 }
+
+serialUserName OBJECT-TYPE
+      SYNTAX      DisplayString
+      MAX-ACCESS  read-only
+      STATUS      current
+      DESCRIPTION
+              "Login name"
+      ::= { serialUserEntry 3 }
+
+serialDateTime OBJECT-TYPE
+      SYNTAX      DisplayString
+      MAX-ACCESS  read-only
+      STATUS      current
+      DESCRIPTION
+              "Date/TIme of Login"
+      ::= { serialUserEntry 4 }
+
+
+
+igosSerialTrapVars	OBJECT IDENTIFIER  ::= { igosSerialObjects 4 }
+
+    igosSerialPortNumber OBJECT-TYPE
+      SYNTAX      PortNumber
+      MAX-ACCESS  not-accessible
+      STATUS      current
+      DESCRIPTION
+              "serialUser Index"
+      ::= { igosSerialTrapVars 1 }
+
+    igosSerialAccessMethod OBJECT-TYPE
+        SYNTAX      INTEGER {
+            Console(1),
+            Telnet(2),
+            SSH(3),
+            Tcp(4)
+        }
+        MAX-ACCESS accessible-for-notify
+        STATUS      current
+        DESCRIPTION
+            "Defines the management protocol used to access the serial port"
+        ::= { igosSerialTrapVars 2 }
+
+    igosSerialRemoteIpAddress OBJECT-TYPE
+        SYNTAX		DisplayString
+        MAX-ACCESS accessible-for-notify
+        STATUS      current
+        DESCRIPTION
+            "Defines the remote IP address accessing the serial port"
+        ::= { igosSerialTrapVars 3 }
+
+    igosSerialLoginUsername OBJECT-TYPE
+        SYNTAX		DisplayString
+        MAX-ACCESS accessible-for-notify
+        STATUS      current
+        DESCRIPTION
+            "Defines the name of the user attempting to access the serial port"
+        ::= { igosSerialTrapVars 4 }
+
+
+-- MIB notification definitions
+--
+
+igosSerialNotificationPrefix  OBJECT IDENTIFIER ::= { igosSerialNotifications 0 }
+
+    igosSerialLoginAuthFail	NOTIFICATION-TYPE
+        OBJECTS	{ igosSerialPortNumber, igosLoginAccessMethod,
+                  igosLoginRemoteIpAddress, igosLoginUsername }
+        STATUS	current
+        DESCRIPTION
+            "Trap being sent indicates that a user failed authentication via Telnet, SSH ,TCP or login
+             on a serial port."
+        ::= { igosSerialNotificationPrefix 1 }
+
+
+    igosSerialLoginAuthSuccess	NOTIFICATION-TYPE
+        OBJECTS	{ igosSerialPortNumber, igosLoginAccessMethod,
+                  igosLoginRemoteIpAddress, igosLoginUsername }
+        STATUS	current
+        DESCRIPTION
+            "Trap being sent indicates that a user authenticated successfully via Telnet, SSH, TCP
+             or login on a serial port. "
+        ::= { igosSerialNotificationPrefix 2 }
+
+    igosSerialDSRDrop	NOTIFICATION-TYPE
+        OBJECTS	{ igosSerialPortNumber}
+        STATUS	current
+        DESCRIPTION
+            "Trap being sent indicates that DSR has dropped on Serial Port"
+        ::= { igosSerialNotificationPrefix 3 }
+
+
+--
+-- MIB Conformance
+--
+
+
+igosSerialCompliances OBJECT IDENTIFIER ::= { igosSerialConformance 1 }
+igosSerialMIBGroups      OBJECT IDENTIFIER ::= { igosSerialConformance 2 }
+
+--
+-- MIB compliance statements
+--
+igosSerialCompliance MODULE-COMPLIANCE
+        STATUS  current
+        DESCRIPTION
+                "The compliance statement for entities which implement
+                the Igos Serial MIB."
+        MODULE  -- this module
+                MANDATORY-GROUPS { igosSerialMIBGroup,
+                                   igosSerialNotificationsGroup
+                                 }
+        ::= { igosSerialCompliances 1 }
+
+--
+-- MIB Group statements
+--
+igosSerialMIBGroup OBJECT-GROUP
+        OBJECTS {
+            portIndex,
+          portTxBytes,
+          portRxBytes,
+          portFrameErrs,
+          portParityErrs,
+          portBreaks,
+          portOverruns,
+          portBufOverruns,
+          portRTS,
+          portCTS,
+          portDTR,
+          portDSR,
+          portCD,
+          cmIndex,
+          cmDevice,
+          cmDescription,
+          cmService,
+          cmPort,
+          serialUserIndex,
+          serialUserDevice,
+          serialUserName,
+          serialDateTime,
+          igosSerialAccessMethod,
+          igosSerialRemoteIpAddress,
+          igosSerialLoginUsername
+        }
+        STATUS  current
+        DESCRIPTION
+                "A collection of objects providing informartion
+                 to IGOS serial ports."
+        ::= { igosSerialMIBGroups 1 }
+
+igosSerialNotificationsGroup NOTIFICATION-GROUP
+        NOTIFICATIONS {
+            igosSerialLoginAuthFail,
+            igosSerialLoginAuthSuccess,
+            igosSerialDSRDrop
+        }
+        STATUS   current
+        DESCRIPTION
+           "A collection of notifications for logins on a IGOS device."
+        ::= { igosSerialMIBGroups 2 }
+
+
+
+END
