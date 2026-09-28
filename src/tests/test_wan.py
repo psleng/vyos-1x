@@ -11,7 +11,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, mock_open, patch
+from unittest.mock import MagicMock, patch
 
 repository_dir = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location(
