@@ -47,14 +47,17 @@ sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 
 
 ```sh
 sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 \
-  --method ping --primary-target 1.1.1.1
+  --method ping \
+  --primary-target 1.1.1.1
 ```
 
 ## TCP
 
 ```sh
 sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 \
-  --method tcp --primary-target 1.1.1.1 --port 443
+  --method tcp \
+  --primary-target 1.1.1.1 \
+  --port 443
 ```
 
 ## DNS
@@ -63,30 +66,36 @@ IPv4 (`A`) query:
 
 ```sh
 sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 \
-  --method dns --primary-target 1.1.1.1 \
-  --name example.com --record-type A
+  --method dns \
+  --primary-target 1.1.1.1 \
+  --name example.com \
+  --record-type A
 ```
 
 IPv6 (`AAAA`) query:
 
 ```sh
 sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 \
-  --method dns --primary-target 2606:4700:4700::1111 \
-  --name example.com --record-type AAAA
+  --method dns \
+  --primary-target 2606:4700:4700::1111 \
+  --name example.com \
+  --record-type AAAA
 ```
 
 ## HTTP
 
 ```sh
 sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 \
-  --method http --primary-target http://example.com/
+  --method http \
+  --primary-target http://example.com/
 ```
 
 ## HTTPS
 
 ```sh
 sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 \
-  --method https --primary-target https://example.com/
+  --method https \
+  --primary-target https://example.com/
 ```
 
 ## Continuous monitoring
@@ -96,15 +105,23 @@ Use `--watch` to repeat a test. Two targets can be tested concurrently with
 
 ```sh
 sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 \
-  --method ping --primary-target 1.1.1.1 --secondary-target 8.8.8.8 \
-  --watch --interval 10 --timeout 15 --policy any \
-  --failure-threshold 3 --recovery-threshold 2
+  --method ping \
+  --primary-target 1.1.1.1 \
+  --secondary-target 8.8.8.8 \
+  --watch \
+  --interval 10 \
+  --timeout 15 \
+  --policy any \
+  --failure-threshold 3 \
+  --recovery-threshold 2
 ```
 
 `--port` is required for TCP and defaults to 53 for DNS. DNS requires `--name`;
 `--record-type` defaults to A. HTTP/HTTPS ports are specified in the URL.
 `--timeout` defaults to 15 seconds. DNS uses only the Python standard library,
-so it needs no additional package. Omit `--watch` to run a single round.
+so it needs no additional package. Add `--watch` to enable repeated monitoring;
+`--failure-threshold` and `--recovery-threshold` then control DOWN and UP
+transitions. Omit `--watch` to run a single round.
 
 Omit `--watch` for one round of active tests; the exit code is 0 if the aggregate round passes,
 1 if it fails, and 2 for invalid configuration. Watch mode prints one result
@@ -113,8 +130,9 @@ table per round; Ctrl-C exits with code 130.
 The `any` policy passes a round if at least one target passes; `all` requires
 every test to pass. Local interface readiness is also required. Three consecutive
 failed rounds mark the WAN DOWN; two consecutive successful rounds mark it UP.
-An opposite result resets the consecutive counter. Initial state is UNKNOWN
-until one threshold is reached. Thus, a failed target alongside a passing target
+An opposite result resets the consecutive counter. The displayed state reflects
+the current round immediately, while thresholds govern state transitions and
+route failover. Thus, a failed target alongside a passing target
 does not mark an established UP interface DOWN under `any`.
 
 Intervals are configurable from 10 through 60 seconds; each probe defaults to a
@@ -129,15 +147,127 @@ Multiple targets prevent one unreachable destination from falsely declaring the
 WAN down. With `--policy any`, one successful target is enough for the round to
 pass. With `--policy all`, every target must pass.
 
-Example with two ping targets and a 10-second interval:
+Example with two targets and a 10-second interval:
+
+PING
 
 ```sh
-sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py <primary-wan> \
+sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 \
   --method ping \
   --primary-target 1.1.1.1 \
   --secondary-target 8.8.8.8 \
-  --watch --interval 10 --policy any \
-  --failure-threshold 3 --recovery-threshold 2
+  --watch \
+  --interval 10 \
+  --policy any \
+  --failure-threshold 3 \
+  --recovery-threshold 2
+
+sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 \
+  --method ping \
+  --primary-target 2606:4700:4700::1111 \
+  --watch \
+  --interval 10 \
+  --policy any \
+  --failure-threshold 3 \
+  --recovery-threshold 2
+```
+
+DNS:
+
+```sh
+sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 \
+  --method dns \
+  --primary-target 1.1.1.1 \
+  --name example.com \
+  --record-type A \
+  --watch \
+  --interval 10 \
+  --policy any \
+  --failure-threshold 3 \
+  --recovery-threshold 2
+
+sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 \
+  --method dns \
+  --primary-target 1.1.1.1 \
+  --secondary-target 8.8.8.8 \
+  --name example.com \
+  --record-type A \
+  --watch \
+  --interval 10 \
+  --policy any \
+  --failure-threshold 3 \
+  --recovery-threshold 2
+```
+
+TCP:
+
+```sh
+sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 \
+  --method tcp \
+  --primary-target 1.1.1.1 \
+  --port 443 \
+  --watch \
+  --interval 10 \
+  --policy any \
+  --failure-threshold 3 \
+  --recovery-threshold 2
+
+sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 \
+  --method tcp \
+  --primary-target 1.1.1.1 \
+  --secondary-target 8.8.8.8 \
+  --port 443 \
+  --watch \
+  --interval 10 \
+  --policy any \
+  --failure-threshold 3 \
+  --recovery-threshold 2
+````
+
+HTTP:
+
+```sh
+sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 \
+  --method http \
+  --primary-target http://example.com/ \
+  --watch \
+  --interval 10 \
+  --policy any \
+  --failure-threshold 3 \
+  --recovery-threshold 2
+
+sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 \
+  --method http \
+  --primary-target http://example.com/ \
+  --secondary-target http://example.org/ \
+  --watch \
+  --interval 10 \
+  --policy any \
+  --failure-threshold 3 \
+  --recovery-threshold 2
+```
+
+HTTPS:
+
+```sh
+sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 \
+  --method https \
+  --primary-target https://example.com/ \
+  --watch \
+  --interval 10 \
+  --policy any \
+  --failure-threshold 3 \
+  --recovery-threshold 2
+
+sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 \
+  --method https \
+  --primary-target https://example.com/ \
+  --secondary-target https://example.org/ \
+  --watch \
+  --interval 10 \
+  --policy any \
+  --failure-threshold 3 \
+  --recovery-threshold 2
 ```
 
 The `any` policy behaves as follows:
@@ -158,25 +288,30 @@ After three consecutive failed rounds, the primary WAN is considered DOWN. To
 change the runtime route preference to cellular, add the cellular interface:
 
 ```sh
-sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py <primary-wan> \
-  --method ping --primary-target 1.1.1.1 --secondary-target 8.8.8.8 \
-  --watch --interval 10 --policy any \
-  --failure-threshold 3 --recovery-threshold 2 \
+sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py eth0 \
+  --method ping \
+  --primary-target 1.1.1.1 \
+  --secondary-target 8.8.8.8 \
+  --watch \
+  --interval 10 \
+  --policy any \
+  --failure-threshold 3 \
+  --recovery-threshold 2 \
   --failover-interface wwan0
 ```
 
 When failover is enabled, the primary route uses metric `10` and the cellular
-route uses metric `220` while the primary is healthy. Gateways are discovered
-from the active default route for each interface. Explicit `--primary-gateway`
-and `--cellular-gateway` options can override discovery. After three failed rounds,
+route uses metric `220` while the primary is healthy. After three failed rounds,
 the metrics are reversed. After two successful recovery rounds, the primary
 route is preferred again. These are runtime route changes and are not saved to
 the VyOS configuration.
 
 DNS port defaults to 53; `record_type` defaults to A and can be AAAA. Any valid
 DNS response, including NXDOMAIN, SERVFAIL, or REFUSED, proves query connectivity.
-TCP refusal counts as success because this checks path reachability, not whether
-the application is accepting connections. HTTP status errors count as responses;
+TCP refusal is reported as `tcp_connection_refused` and counts as success because
+this checks path reachability, not whether the application is accepting
+connections. A successful DNS exchange is reported as `dns_response_received`;
+DNS response codes are retained in the reason for diagnostics. HTTP status errors count as responses;
 there is currently no expected-status or response-body matching option.
 
 The Python API exposes `check_interface_status`, `check_ping`, `check_tcp`,
@@ -190,11 +325,15 @@ demoted after the failure threshold and restored after the recovery threshold:
 
 ```sh
 sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py eth0 \
-  --method ping --primary-target 1.1.1.1 --watch \
-  --failover-interface wwan0 --failure-threshold 3 --recovery-threshold 2
+  --method ping \
+  --primary-target 1.1.1.1 \
+  --watch \
+  --failover-interface wwan0 \
+  --failure-threshold 3 \
+  --recovery-threshold 2
 ```
 
-This changes the active kernel routes with `ip route change`; it is not
+This changes or creates the active kernel routes with `ip route replace`; it is not
 persistent across reboot or interface reconfiguration.
 
 HTTP implementation reference: [curl options](https://curl.se/docs/manpage.html).

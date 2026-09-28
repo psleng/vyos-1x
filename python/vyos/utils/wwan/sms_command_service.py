@@ -24,7 +24,7 @@ Environment variables:
 - IGOS_SMS_COMMAND_INTERFACES: comma-separated list, e.g. "wwan0,wwan1"
   (default: "wwan0")
 - IGOS_SMS_COMMAND_AUTHORIZED_NUMBERS: JSON mapping of interface names to
-  sender-number/PIN mappings (required)
+  sender-number/password mappings (required)
 - IGOS_SMS_COMMAND_POLL_INTERVAL: polling interval in seconds (default: 0.5)
 - IGOS_SMS_COMMAND_RESPONSE_ENABLED: 1/true/yes to send
     ACCEPTED/REJECTED SMS responses (default: true)
@@ -49,6 +49,7 @@ import signal
 import socket
 import subprocess
 import time
+from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from logging.handlers import SysLogHandler
@@ -61,12 +62,14 @@ logger = logging.getLogger('vyos.wwan.sms_command_service')
 
 SMS_COMMAND_MAX_AGE = 60.0
 
-REBOOT_COMMAND_RE = re.compile(r'\s*([0-9]{6})\s+REBOOT\s*')
+REBOOT_COMMAND_RE = re.compile(r'\s*(\S+)\s+REBOOT\s*')
 SHOW_SYSTEM_INFO_COMMAND_RE = re.compile(r'\s*SHOW\s+SYSTEM\s+INFO\s*')
 PING_COMMAND_RE = re.compile(r'\s*PING\s+(\S+)\s*')
 SHOW_WAN_IP_ADDRESS_COMMAND_RE = re.compile(r'\s*SHOW\s+WAN\s+IP\s+ADDRESS\s*')
 SHOW_CELL_STATUS_COMMAND_RE = re.compile(r'\s*SHOW\s+CELL\s+STATUS\s*')
 CELL_CONNECT_DISCONNECT_COMMAND_RE = re.compile(r'\s*CELL\s+(CONNECT|DISCONNECT)\s*')
+SHOW_WAN_FAILOVER_STATUS_COMMAND_RE = re.compile(r'\s*SHOW\s+WAN\s+FAILOVER\s+STATUS\s*')
+WAN_FAILOVER_STATUS_FILE = Path('/run/wwan/wan-failover-status.json')
 
 
 def _as_bool(value: str | None, default: bool = False) -> bool:
@@ -118,11 +121,15 @@ class ServiceConfig:
             numbers = authorized_numbers.get(interface)
             if not isinstance(numbers, dict) or not numbers:
                 raise ValueError(f'Authorized numbers are required for {interface}')
-            for number, pin in numbers.items():
+            for number, password in numbers.items():
                 if (not re.fullmatch(r'\+?[0-9]{6,20}', number)
-                        or not isinstance(pin, str)
-                        or not re.fullmatch(r'[0-9]{6}', pin)):
-                    raise ValueError(f'Invalid authorized-number or PIN for {interface}')
+                        or not isinstance(password, str)
+                        or len(password) < 9
+                        or not re.fullmatch(r'\S+', password)
+                        or not re.search(r'[A-Z]', password)
+                        or not re.search(r'[0-9]', password)
+                        or not re.search(r'[^A-Za-z0-9]', password)):
+                    raise ValueError(f'Invalid authorized-number or password for {interface}')
 
         poll_interval = float(os.environ.get('IGOS_SMS_COMMAND_POLL_INTERVAL', '0.5'))
         response_enabled = _as_bool(
@@ -208,41 +215,45 @@ class SmsCommandService:
         return info[:160]
 
     @staticmethod
-    def _interface_addresses() -> str:
-        """Return interface addresses as plain, one-address-per-line text."""
+    def _interface_addresses(interface: str) -> str:
+        """Return live addresses for interfaces carrying default routes."""
+        interfaces = {interface}
         try:
-            output = subprocess.check_output(
-                ['/usr/libexec/vyos/op_mode/interfaces.py', 'show'],
+            routes = json.loads(subprocess.check_output(
+                ['/usr/bin/ip', '-j', 'route', 'show', 'table', 'main', 'default'],
                 text=True, timeout=5,
-            )
-        except (OSError, subprocess.SubprocessError) as err:
-            logger.warning('Failed to query interface addresses via op-mode: %s', err)
+            ))
+            for route in routes:
+                if route.get('dev'):
+                    interfaces.add(route['dev'])
+                for nexthop in route.get('nexthops', []):
+                    if nexthop.get('dev'):
+                        interfaces.add(nexthop['dev'])
+        except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+            logger.warning('Failed to discover WAN interfaces from default routes')
+
+        addresses = {}
+        for current_interface in sorted(interfaces):
             try:
                 output = subprocess.check_output(
-                    ['/usr/bin/ip', '-o', 'address', 'show'],
+                    ['/usr/bin/ip', '-o', 'address', 'show', 'dev', current_interface],
                     text=True, timeout=5,
                 )
-            except (OSError, subprocess.SubprocessError) as fallback_err:
-                logger.warning('Failed to query interface addresses via ip: %s', fallback_err)
-                return 'Interface addresses unavailable'
-        addresses = {}
-        current_interface = None
-        address_re = re.compile(r'(?<![\w:])(?:\d{1,3}(?:\.\d{1,3}){3}|[0-9a-fA-F:]+)/(?:\d{1,3})')
-        for line in output.splitlines():
-            ip_output_match = re.match(r'^\d+:\s+(\S+)\s+(?:inet6?|link)\s+', line)
-            if ip_output_match:
-                current_interface = ip_output_match.group(1)
-            match = re.match(r'^\s*(\S+)\s+', line)
-            if match and not line.startswith((' ', '\t')) and not ip_output_match:
-                current_interface = match.group(1).rstrip(':')
-            if current_interface:
-                values = address_re.findall(line)
-                if values:
-                    addresses.setdefault(current_interface, []).extend(values)
+            except (OSError, subprocess.SubprocessError):
+                addresses[current_interface] = ['unavailable']
+                continue
+            values_for_interface = []
+            address_re = re.compile(
+                r'(?<![\w:])(?:\d{1,3}(?:\.\d{1,3}){3}|[0-9a-fA-F:]+)/(?:\d{1,3})'
+            )
+            for line in output.splitlines():
+                values_for_interface.extend(address_re.findall(line))
+            addresses[current_interface] = values_for_interface or ['unavailable']
+
         lines = []
         for interface, values in addresses.items():
             lines.extend(f'{interface}: {address}' for address in values)
-        return '\n'.join(lines) if lines else 'No interface addresses'
+        return '\n'.join(lines) if lines else 'No WAN interface addresses'
 
     @staticmethod
     def _ping_host(host: str) -> str:
@@ -262,8 +273,8 @@ class SmsCommandService:
         audit(response.replace('\n', ' | '))
         self._send_response(if_num, number, response)
 
-    def _handle_interface_addresses(self, if_num, number, audit):
-        response = self._interface_addresses()
+    def _handle_interface_addresses(self, if_name, if_num, number, audit):
+        response = self._interface_addresses(if_name)
         audit(response)
         self._send_response(if_num, number, response)
 
@@ -279,6 +290,27 @@ class SmsCommandService:
         except (OSError, subprocess.SubprocessError):
             response = 'FAILED'
         audit(response)
+        self._send_response(if_num, number, response)
+
+    def _handle_wan_failover_status(self, if_num, number, audit):
+        try:
+            status = json.loads(WAN_FAILOVER_STATUS_FILE.read_text())
+            pid = int(status.get('pid', 0))
+            if not status.get('enabled') or not pid:
+                response = 'Failover: DISABLED'
+            else:
+                try:
+                    os.kill(pid, 0)
+                except OSError:
+                    response = 'Failover: NOT RUNNING'
+                else:
+                    response = (f"Failover: ENABLED\n"
+                                f"Primary interface: {status.get('primary_interface', 'unknown')}\n"
+                                f"Primary state: {status.get('primary_state') or 'UNKNOWN'}\n"
+                                f"Active interface: {status.get('active_interface') or 'UNKNOWN'}")
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            response = 'Failover: NOT RUNNING'
+        audit(response.replace('\n', ' | '))
         self._send_response(if_num, number, response)
 
     def _handle_ping(self, if_num, number, host, audit):
@@ -380,8 +412,10 @@ class SmsCommandService:
         text = str(msg.get('text', ''))
         match = REBOOT_COMMAND_RE.fullmatch(text)
         # Show the received message for audit purposes, while masking the
-        # leading PIN (including malformed PIN attempts).
-        command = re.sub(r'^(\s*)[0-9]+(?=\s+)', r'\1[PIN]', text).strip()
+        # leading password used by REBOOT.
+        command = (re.sub(r'^(\s*)\S+(?=\s+REBOOT\s*$)',
+                          r'\1[PASSWORD]', text, flags=re.IGNORECASE)
+                   .strip())
         if not command:
             command = '[EMPTY]'
 
@@ -395,11 +429,10 @@ class SmsCommandService:
 
         if self._message_expired(msg.get('timestamp')):
             audit('EXPIRED')
-            self._send_response(if_num, number, 'EXPIRED')
             return
 
-        expected_pin = self.cfg.authorized_numbers.get(if_name, {}).get(number)
-        if expected_pin is None:
+        expected_password = self.cfg.authorized_numbers.get(if_name, {}).get(number)
+        if expected_password is None:
             audit('UNAUTHORIZED')
             self._send_response(if_num, number, 'UNAUTHORIZED')
             return
@@ -409,7 +442,11 @@ class SmsCommandService:
             return
 
         if SHOW_WAN_IP_ADDRESS_COMMAND_RE.fullmatch(text):
-            self._handle_interface_addresses(if_num, number, audit)
+            self._handle_interface_addresses(if_name, if_num, number, audit)
+            return
+
+        if SHOW_WAN_FAILOVER_STATUS_COMMAND_RE.fullmatch(text):
+            self._handle_wan_failover_status(if_num, number, audit)
             return
 
         if SHOW_CELL_STATUS_COMMAND_RE.fullmatch(text):
@@ -428,15 +465,12 @@ class SmsCommandService:
 
         if not match:
             tokens = text.split()
-            # Any numeric first token is a PIN attempt, regardless of command
-            # casing or spelling; malformed attempts receive UNAUTHORIZED.
-            malformed_pin = len(tokens) >= 2 and tokens[0].isdigit()
-            result = 'UNAUTHORIZED' if malformed_pin else 'INVALID'
+            result = 'INVALID'
             audit(result)
-            self._send_response(if_num, number, 'UNAUTHORIZED' if malformed_pin else 'INVALID')
+            self._send_response(if_num, number, 'INVALID')
             return
 
-        if not hmac.compare_digest(match.group(1), expected_pin):
+        if not hmac.compare_digest(match.group(1), expected_password):
             audit('UNAUTHORIZED')
             self._send_response(if_num, number, 'UNAUTHORIZED')
             return

@@ -203,7 +203,7 @@ interfaces
         │
         ├── sms-command
         │     └── authorized-number <phone-number>
-        │           └── pin <6 digits>                    # example: 123456
+        │           └── password <single token>           # example: SecureSms!42
         │
         ├── timeouts
         │     ├── connection <seconds>                    #   default: 120
@@ -1353,36 +1353,46 @@ set interfaces wwan wwan0 failed-retry escalation-threshold 3
 
 Configure each authorized sender on the WWAN interface that receives its SMS
 messages. The phone number accepts 6–20 digits with an optional leading `+`.
-Every authorized number requires a six-digit PIN:
+Every authorized number requires a single-token password meeting the administrator
+password requirements: at least 9 characters, including an uppercase letter, a
+digit, and a special character:
 
 ```
-set interfaces wwan wwan0 sms-command authorized-number +11234567890 pin 123456
+set interfaces wwan wwan0 sms-command authorized-number +11234567890 password 'SecureSms!42'
 commit
 save
 ```
 
-The PIN must be included in the same `set` command. VyOS does not prompt for a
-missing leaf value, and commit rejects an authorized-number node without a PIN.
-Leading zeros in the PIN are preserved.
+The password must be included in the same `set` command. VyOS does not prompt
+for a missing leaf value, and commit rejects an authorized-number node without
+a password. The password is required before `REBOOT`; other commands remain
+available to authorized senders without including the password. The password
+is treated as a secret and is masked in configuration display.
 
 Messages from an authorized number support these commands:
 
-| SMS message | PIN required | Result |
+| SMS message | Password required | Result |
 |---|---|---|
-| `123456 REBOOT` | Yes | Requests a system reboot. `REBOOT` is case-sensitive. |
+| `<password> REBOOT` | Yes | Requests a system reboot. `REBOOT` is case-sensitive. |
 | `SHOW SYSTEM INFO` | No | Returns hostname, version, system time, timezone, and uptime. |
-| `SHOW WAN IP ADDRESS` | No | Returns a compact list of current IPv4 and IPv6 interface addresses. |
+| `SHOW WAN IP ADDRESS` | No | Returns live IPv4 and IPv6 addresses for interfaces carrying a default WAN route, including dynamic Ethernet or cellular addresses. |
+| `SHOW WAN FAILOVER STATUS` | No | Reports whether the runtime WAN failover monitor is enabled and, when running, the primary state and active interface. |
 | `PING <host-or-ip>` | No | Runs five ICMP echo requests and returns the ping output, including packet-loss statistics; returns `FAILED` if the test cannot produce output. |
 | `CELL CONNECT` | No | Connects the mobile data bearer on the receiving WWAN interface when `connection-mode` is `connect-on-demand` or `dial-on-demand`; rejected in `always-on` mode. |
 | `CELL DISCONNECT` | No | Disconnects the mobile data bearer on the receiving WWAN interface when `connection-mode` is `connect-on-demand` or `dial-on-demand`; rejected in `always-on` mode. |
+
+`SHOW WAN IP ADDRESS` discovers WAN interfaces from the current default routes,
+so it can report both dynamic Ethernet and cellular addresses. The receiving
+WWAN interface is included even when it temporarily has no default route. An
+interface without an address is reported as unavailable.
 
 The sender must be authorized for every command. A bare `REBOOT` message is
 rejected. A PIN must be provided for each authorized phone number. Syslog
 records the sender, recognized command, UTC timestamp, receiving interface,
 message ID, and result. The result may include command output, but PINs and
 incoming SMS message bodies are not logged. Commands received more than 60
-seconds after their message timestamp are rejected as `EXPIRED` and are not
-executed.
+seconds after their message timestamp are logged as `EXPIRED`, silently
+discarded, and are not executed.
 
 ### Carrier / Network Scan
 
@@ -1681,7 +1691,7 @@ set interfaces wwan wwan0 logging sink 'both'
 | `failed-retry intervals` | `failed_retry_intervals` | `30,60,120,300,600,1800,3600` |
 | `failed-retry max-interval` | `failed_retry_max_interval` | `7200` |
 | `failed-retry escalation-threshold` | `failed_retry_escalation_threshold` | `3` |
-| `sms-command authorized-number NUMBER pin PIN` | *(SMS command service)* | not configured |
+| `sms-command authorized-number NUMBER password PASSWORD` | *(SMS command service)* | not configured |
 | `network-mode` | `network_mode` | `auto` |
 | `network-time` | `network_time_enabled` | `disabled` (opt-in) |
 | `network-time update-interval` | `network_time_update_interval` | `3600` |

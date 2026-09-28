@@ -79,8 +79,10 @@ class TestProbes(unittest.TestCase):
     @patch.object(wan, '_bound_socket')
     def test_dns_any_valid_response_passes(self, bound, random):
         sock = bound.return_value.__enter__.return_value
-        for rcode, reason in ((0, 'response'), (2, 'servfail'),
-                              (3, 'nxdomain'), (5, 'refused')):
+        for rcode, reason in ((0, 'dns_response_received'),
+                              (2, 'dns_server_failure'),
+                              (3, 'dns_name_not_found'),
+                              (5, 'dns_query_refused')):
             sock.recv.return_value = dns_reply(rcode=rcode)
             result = wan.check_dns('eth0', '1.1.1.1', 'example.com')
             self.assertEqual((result.passed, result.reason), (True, reason))
@@ -282,7 +284,7 @@ class TestMonitor(unittest.TestCase):
 
     def test_table_output_for_mixed_results(self):
         results = [
-            wan.ProbeResult('wwan0', 'ping', '1.1.1.1', True, 'echo_reply'),
+            wan.ProbeResult('wwan0', 'ping', '1.1.1.1', True, 'icmp_reply_received'),
             wan.ProbeResult('wwan0', 'https', 'https://example.com/', False,
                             'request_failed'),
         ]
@@ -297,7 +299,7 @@ class TestMonitor(unittest.TestCase):
         self.assertIn('PING', lines[2])
         self.assertIn('1.1.1.1', lines[2])
         self.assertIn('PASS', lines[2])
-        self.assertIn('echo_reply', lines[2])
+        self.assertIn('icmp_reply_received', lines[2])
         self.assertIn('HTTPS', lines[3])
         self.assertIn('FAIL', lines[3])
         self.assertIn('request_failed', lines[3])

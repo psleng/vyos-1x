@@ -70,13 +70,30 @@ def get_config(config=None):
         enabled_interfaces.append(ifname)
         authorized_numbers[ifname] = {}
         for number in allowed:
-            pin = conf.return_value(sms_base + ['authorized-number', number, 'pin'])
+            password = conf.return_value(sms_base + ['authorized-number', number, 'password'])
             if not re.fullmatch(r'\+?[0-9]{6,20}', number):
                 errors.append(f'Invalid authorized number for {ifname}')
-            if not isinstance(pin, str) or not re.fullmatch(r'[0-9]{6}', pin):
-                errors.append(f'A six-digit PIN is required for {ifname} authorized-number {number}')
+            password_errors = []
+            if not isinstance(password, str) or not password:
+                password_errors.append('a password is required')
+            else:
+                if len(password) < 9:
+                    password_errors.append('at least 9 characters')
+                if not re.fullmatch(r'\S+', password):
+                    password_errors.append('no spaces')
+                if not re.search(r'[A-Z]', password):
+                    password_errors.append('at least one uppercase letter')
+                if not re.search(r'[0-9]', password):
+                    password_errors.append('at least one digit')
+                if not re.search(r'[^A-Za-z0-9]', password):
+                    password_errors.append('at least one special character')
+            if password_errors:
+                errors.append(
+                    f'Invalid SMS password for {ifname} authorized-number {number}: '
+                    + ', '.join(password_errors)
+                )
                 continue
-            authorized_numbers[ifname][number] = pin
+            authorized_numbers[ifname][number] = password
 
     enabled_interfaces = sorted(enabled_interfaces, key=_wwan_sort_key)
     return {

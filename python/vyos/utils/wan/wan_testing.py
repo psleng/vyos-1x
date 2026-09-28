@@ -6,6 +6,8 @@
 import errno
 import json
 import math
+import os
+from pathlib import Path
 import secrets
 import socket
 import struct
@@ -16,6 +18,9 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from ipaddress import ip_address
 from urllib.parse import urlsplit
+
+
+FAILOVER_STATUS_FILE = Path('/run/wwan/wan-failover-status.json')
 
 
 @dataclass(frozen=True)
@@ -210,12 +215,12 @@ def check_ping(interface, target, *, timeout=15.0):
              '-c', '1', '-W', str(timeout), str(address)],
             capture_output=True, text=True, timeout=timeout, check=False,
         )
-        reason = {0: 'echo_reply', 1: 'no_reply'}.get(completed.returncode, 'check_error')
+        reason = {0: 'icmp_reply_received', 1: 'no_reply'}.get(completed.returncode, 'check_error')
     except subprocess.TimeoutExpired:
         reason = 'timeout'
     except (OSError, subprocess.SubprocessError):
         reason = 'check_error'
-    return ProbeResult(interface, 'ping', str(target), reason == 'echo_reply', reason)
+    return ProbeResult(interface, 'ping', str(target), reason == 'icmp_reply_received', reason)
 
 
 def check_tcp(interface, target, port, *, timeout=15.0):
@@ -226,7 +231,7 @@ def check_tcp(interface, target, port, *, timeout=15.0):
     try:
         with _bound_socket(interface, target, socket.SOCK_STREAM, timeout) as sock:
             code = sock.connect_ex((target, port))
-        reason = {0: 'connected', errno.ECONNREFUSED: 'refused',
+        reason = {0: 'tcp_connection_established', errno.ECONNREFUSED: 'tcp_connection_refused',
                   errno.ETIMEDOUT: 'timeout', errno.EAGAIN: 'timeout'}.get(
                       code, 'connect_failed')
     except TimeoutError:
@@ -234,12 +239,13 @@ def check_tcp(interface, target, port, *, timeout=15.0):
     except (OSError, AttributeError):
         reason = 'check_error'
     return ProbeResult(interface, 'tcp', f'{target}:{port}',
-                       reason in ('connected', 'refused'), reason)
+                       reason in ('tcp_connection_established', 'tcp_connection_refused'), reason)
 
 
 _DNS_TYPES = {'A': 1, 'AAAA': 28}
-_DNS_RCODES = {0: 'response', 1: 'formerr', 2: 'servfail', 3: 'nxdomain',
-               4: 'notimp', 5: 'refused'}
+_DNS_RCODES = {0: 'dns_response_received', 1: 'dns_form_error',
+               2: 'dns_server_failure', 3: 'dns_name_not_found',
+               4: 'dns_not_implemented', 5: 'dns_query_refused'}
 
 
 def _dns_question(name, record_type, query_id):
@@ -512,11 +518,35 @@ class RouteFailover:
         self.cellular_metric = cellular_metric
         self.runner = runner or subprocess.run
         self.active = None
+        self._write_status()
+
+    def _write_status(self, *, primary_state=None):
+        """Publish failover state for operational consumers."""
+        try:
+            FAILOVER_STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            document = {
+                'enabled': True,
+                'monitor_running': True,
+                'primary_interface': self.primary,
+                'failover_interface': self.cellular,
+                'primary_state': primary_state,
+                'active_interface': self.active,
+                'pid': os.getpid(),
+                'updated': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+            }
+            temporary = FAILOVER_STATUS_FILE.with_suffix('.tmp')
+            temporary.write_text(json.dumps(document) + '\n')
+            temporary.replace(FAILOVER_STATUS_FILE)
+        except OSError:
+            # Route monitoring must continue even if status publication fails.
+            pass
 
     def _set_metric(self, interface, gateway, metric):
         if gateway is None:
             gateway = _default_gateway(interface)
-        command = ['ip', 'route', 'change', 'default']
+        # ``replace`` handles both cases: an existing default route and a
+        # route that was suppressed by another route manager.
+        command = ['ip', 'route', 'replace', 'default']
         if gateway:
             command += ['via', gateway]
         command += ['dev', interface]
@@ -544,6 +574,7 @@ class RouteFailover:
             self._set_metric(self.primary, self.primary_gateway, self.cellular_metric)
             self._set_metric(self.cellular, self.cellular_gateway, self.primary_metric)
         self.active = desired
+        self._write_status(primary_state='UP' if primary_up else 'DOWN')
         return True
 
 
@@ -695,12 +726,23 @@ def _monitor_cli(args, tests, monitor, failover=None):
                 results = [ProbeResult(interface, test.method, test.target,
                                        False, status.reason) for test in tests]
             up = monitor.update(results, interface_ready=status.passed)
+            route_changed = False
             if failover is not None and up is not None:
-                failover.apply(up)
-            state = 'UNKNOWN' if up is None else ('UP' if up else 'DOWN')
+                route_changed = failover.apply(up)
+            round_passed = status.passed and (any if args.policy == 'any' else all)(
+                result.passed for result in results)
+            # Display the current round immediately; thresholds still govern
+            # monitor state transitions and route failover.
+            state = 'UP' if round_passed else 'DOWN'
+            if failover is not None:
+                failover._write_status(primary_state=state)
             print(_format_path_test_table(
                 interface, state, args.policy, monitor.failures,
                 monitor.successes, results), flush=True)
+            if route_changed:
+                print(f'{time.strftime("%Y-%m-%d %H:%M:%S")} '
+                      f'ROUTE ACTIVE interface={failover.active} '
+                      f'primary_state={state}', flush=True)
             if not args.watch:
                 passed = (any if args.policy == 'any' else all)(r.passed for r in results)
                 return int(not passed)
