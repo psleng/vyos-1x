@@ -14,10 +14,12 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import grp
+import json
 import os
+import pwd
 import socket
 import sys
-import json
 
 from time import sleep
 
@@ -33,6 +35,10 @@ from vyos.defaults import api_config_state
 from vyos.pki import wrap_certificate
 from vyos.pki import wrap_private_key
 from vyos.pki import wrap_dh_parameters
+from vyos.tpm import tpm_enabled
+from vyos.tpm import tpm_exist
+from vyos.tpm_pki import get_path_str
+from vyos.tpm_pki import validate_certificate_against_tpm_priv_key
 from vyos.template import render
 from vyos.utils.dict import dict_search
 from vyos.utils.process import call
@@ -48,6 +54,7 @@ airbag.enable()
 config_file = '/etc/nginx/sites-enabled/default'
 systemd_override = r'/run/systemd/system/nginx.service.d/override.conf'
 cert_dir = '/run/nginx/certs'
+openssl_tpm_config = '/run/nginx/openssl-tpm.cnf'
 
 user = 'www-data'
 group = 'www-data'
@@ -97,8 +104,31 @@ def verify(https):
     if https is None:
         return None
 
-    if dict_search('certificates.certificate', https) != None:
-        verify_pki_certificate(https, https['certificates']['certificate'])
+    cert_name = dict_search('certificates.certificate', https)
+    if cert_name is not None:
+        if tpm_exist() and tpm_enabled():
+
+            try:
+                nginx_user = pwd.getpwnam(user)
+                tss_group = grp.getgrnam('tss')
+            except KeyError as error:
+                raise ConfigError(
+                    'Nginx TPM access requires the www-data user and tss group!'
+                ) from error
+            if tss_group.gr_gid not in os.getgrouplist(user, nginx_user.pw_gid):
+                raise ConfigError(
+                    'Add www-data to the tss group to use a TPM certificate with nginx!'
+                )
+
+            cert_path = get_path_str('cert', 'pem', cert_name)
+            key_path = get_path_str('cert', 'key', cert_name)
+            if not os.path.isfile(cert_path) or not os.path.isfile(key_path):
+                raise ConfigError(f'TPM certificate "{cert_name}" or its key is missing!')
+            if not validate_certificate_against_tpm_priv_key(cert_path, key_path):
+                raise ConfigError(f'TPM certificate "{cert_name}" does not match its key!')
+            https['tpm_required'] = True
+        else:
+            verify_pki_certificate(https, cert_name)
 
         tmp = dict_search('certificates.ca_certificate', https)
         if tmp != None:
@@ -172,7 +202,12 @@ def verify(https):
 
 def generate(https):
     if https is None:
-        for file in [systemd_service_api, config_file, systemd_override]:
+        for file in [
+            systemd_service_api,
+            config_file,
+            systemd_override,
+            openssl_tpm_config,
+        ]:
             if os.path.exists(file):
                 os.unlink(file)
         return None
@@ -188,12 +223,16 @@ def generate(https):
     # get certificate data
     if 'certificates' in https and 'certificate' in https['certificates']:
         cert_name = https['certificates']['certificate']
-        pki_cert = https['pki']['certificate'][cert_name]
-
         cert_path = os.path.join(cert_dir, f'{cert_name}_cert.pem')
         key_path = os.path.join(cert_dir, f'{cert_name}_key.pem')
-
-        server_cert = str(wrap_certificate(pki_cert['certificate']))
+        if https.get('tpm_required'):
+            tpm_cert_path = get_path_str('cert', 'pem', cert_name)
+            key_path = get_path_str('cert', 'key', cert_name)
+            with open(tpm_cert_path, encoding='utf-8') as cert_file:
+                server_cert = cert_file.read()
+        else:
+            pki_cert = https['pki']['certificate'][cert_name]
+            server_cert = str(wrap_certificate(pki_cert['certificate']))
 
         # Append CA certificate if specified to form a full chain
         if 'ca_certificate' in https['certificates']:
@@ -203,13 +242,14 @@ def generate(https):
             )
 
         write_file(cert_path, server_cert, user=user, group=group, mode=0o644)
-        write_file(
-            key_path,
-            wrap_private_key(pki_cert['private']['key']),
-            user=user,
-            group=group,
-            mode=0o600,
-        )
+        if not https.get('tpm_required'):
+            write_file(
+                key_path,
+                wrap_private_key(pki_cert['private']['key']),
+                user=user,
+                group=group,
+                mode=0o600,
+            )
 
         tmp_path = {'cert_path': cert_path, 'key_path': key_path}
 
@@ -228,6 +268,12 @@ def generate(https):
                 tmp_path.update({'dh_file': dh_path})
 
         https['certificates'].update(tmp_path)
+
+    if https.get('tpm_required'):
+        # OpenSSL to load TPM provider
+        render(openssl_tpm_config, 'https/openssl-tpm.cnf.j2', https)
+    elif os.path.exists(openssl_tpm_config):
+        os.unlink(openssl_tpm_config)
 
     render(config_file, 'https/nginx.default.j2', https)
     render(systemd_override, 'https/override.conf.j2', https)

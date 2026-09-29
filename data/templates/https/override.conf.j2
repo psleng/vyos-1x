@@ -13,3 +13,8 @@ ExecReload={{ vrf_command }}/usr/sbin/nginx -g 'daemon on; master_process on;' -
 Restart=always
 RestartPreventExitStatus=
 RestartSec=10
+{% if tpm_required is vyos_defined %}
+Environment=OPENSSL_CONF=/run/nginx/openssl-tpm.cnf
+SupplementaryGroups=tss
+DeviceAllow=/dev/tpmrm0 rw
+{% endif %}
