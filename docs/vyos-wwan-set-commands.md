@@ -29,7 +29,7 @@ interfaces
   └── wwan <wwanN>
         ├── description <text>                            # max 255 characters
         ├── disable                                       # valueless — full teardown (delete-style, purges history); interface recreated when removed
-        ├── mtu <68-1500>                                # fallback MTU if carrier does not provide one (default: 1420); also ceiling
+        ├── mtu <68-1500>                                # fallback MTU — used only when carrier provides none and no per-SIM mtu set (default: 1420)
         ├── vrf <name>                                    # VRF instance name
         ├── connection-mode <always-on|connect-on-demand|dial-on-demand>
         ├── network-mode <auto|lte|5g|5g-only|3g|2g>      # modem-level RAT selection
@@ -288,8 +288,8 @@ automatically using a 4-priority APN discovery chain:
 | **PDP type** | per-SIM only, default `ipv4v6` | Dual-stack bearer per slot unless overridden |
 | **Roaming** | per-SIM only, default `enabled` | Roaming is permitted by default so aggregator/MVNO SIMs (e.g. roaming-style Rogers-on-Bell) work out of the box. Use `disable-roaming` per slot to forbid visited networks. |
 | **Network mode** | `auto` | Modem selects best available RAT (5G→LTE→3G→2G) |
-| **MTU** | `1420` (fallback) | Carrier-negotiated bearer MTU is used when available; 1420 is used only if the carrier does not provide one; also acts as a ceiling; per-SIM `mtu` overrides when active |
-| **Per-SIM MTU** | `0` (use interface mtu) | Optional per-SIM override; when the SIM is active, this value is used instead |
+| **MTU** | `1420` (fallback) | Carrier-negotiated bearer MTU is used as-is when available; the interface `mtu` is a fallback used only when the carrier provides none and no per-SIM override is set — it is not a ceiling on the carrier value; a per-SIM `mtu` (if set) caps the effective MTU to the lesser of it and the carrier MTU |
+| **Per-SIM MTU** | `0` (use interface mtu) | Optional per-SIM override; when the SIM is active the effective MTU is the lesser of this value and the carrier MTU (or this value if the carrier provides none) |
 | **SIM PIN** | per-SIM only | If a PIN is configured, the FSM always sends it automatically when the SIM is locked |
 | **SIM failover** | per-SIM, `enabled` | Automatic switch to backup SIM on failure; use `disable` to turn off |
 | **SIM failback** | `enabled` | After sim-failover fires, automatic return to primary SIM; use `disable` to turn off |
@@ -397,7 +397,7 @@ set interfaces wwan wwan0 network-mode 'auto'
 # Re-sync every hour (default); raise for less chatter, lower for tighter time:
 # set interfaces wwan wwan0 network-time update-interval 3600
 
-# MTU — fallback if carrier does not provide one; also ceiling (per-SIM mtu overrides when that SIM is active)
+# MTU — fallback only when the carrier provides none and no per-SIM mtu is set; a per-SIM mtu, if set, caps the effective MTU to the lesser of it and the carrier MTU
 set interfaces wwan wwan0 mtu 1420
 ```
 

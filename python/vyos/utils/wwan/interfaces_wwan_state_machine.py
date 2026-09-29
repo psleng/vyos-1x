@@ -14182,11 +14182,16 @@ class ModemStateMachine:
             sim_mtu = sim_config.get('mtu', 0)
 
             if sim_mtu and sim_mtu > 0:
-                status['mtu_effective'] = str(sim_mtu)
-                status['mtu_source'] = 'per-sim'
+                # Mirror the runtime cap so the reported value matches what is applied.
+                if network_mtu:
+                    status['mtu_effective'] = str(min(sim_mtu, int(network_mtu)))
+                    status['mtu_source'] = 'per-sim' if sim_mtu <= int(network_mtu) else 'per-sim-capped'
+                else:
+                    status['mtu_effective'] = str(sim_mtu)
+                    status['mtu_source'] = 'per-sim'
             elif network_mtu:
-                status['mtu_effective'] = str(min(int(network_mtu), interface_mtu))
-                status['mtu_source'] = 'network' if int(network_mtu) <= interface_mtu else 'network-capped'
+                status['mtu_effective'] = str(int(network_mtu))
+                status['mtu_source'] = 'network'
             else:
                 status['mtu_effective'] = str(interface_mtu)
                 status['mtu_source'] = 'interface'
@@ -19756,11 +19761,17 @@ class ModemStateMachine:
                     sim_mtu = sim_config.get('mtu', 0)
 
                 if sim_mtu and sim_mtu > 0:
-                    effective_mtu = str(sim_mtu)
-                    mtu_source = 'per-sim'
+                    # Cap per-SIM MTU at the network MTU; a larger value would black-hole traffic.
+                    if ipv4_mtu:
+                        effective_mtu = str(min(sim_mtu, int(ipv4_mtu)))
+                        mtu_source = 'per-sim' if sim_mtu <= int(ipv4_mtu) else 'per-sim-capped'
+                    else:
+                        effective_mtu = str(sim_mtu)
+                        mtu_source = 'per-sim'
                 elif ipv4_mtu:
-                    effective_mtu = str(min(int(ipv4_mtu), interface_mtu))
-                    mtu_source = 'network' if int(ipv4_mtu) <= interface_mtu else 'network-capped'
+                    # Carrier MTU as-is; interface mtu is a fallback, not a ceiling.
+                    effective_mtu = str(int(ipv4_mtu))
+                    mtu_source = 'network'
                 else:
                     effective_mtu = str(interface_mtu)
                     mtu_source = 'interface'
@@ -19857,11 +19868,16 @@ class ModemStateMachine:
                         sim_mtu = sim_config.get('mtu', 0)
 
                     if sim_mtu and sim_mtu > 0:
-                        effective_mtu = str(sim_mtu)
-                        mtu_source = 'per-sim'
+                        # Cap per-SIM MTU at the network MTU (see IPv4 path).
+                        if ipv6_mtu:
+                            effective_mtu = str(min(sim_mtu, int(ipv6_mtu)))
+                            mtu_source = 'per-sim' if sim_mtu <= int(ipv6_mtu) else 'per-sim-capped'
+                        else:
+                            effective_mtu = str(sim_mtu)
+                            mtu_source = 'per-sim'
                     elif ipv6_mtu:
-                        effective_mtu = str(min(int(ipv6_mtu), interface_mtu))
-                        mtu_source = 'network' if int(ipv6_mtu) <= interface_mtu else 'network-capped'
+                        effective_mtu = str(int(ipv6_mtu))
+                        mtu_source = 'network'
                     else:
                         effective_mtu = str(interface_mtu)
                         mtu_source = 'interface'
