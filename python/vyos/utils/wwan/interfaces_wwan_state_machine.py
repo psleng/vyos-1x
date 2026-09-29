@@ -12066,6 +12066,15 @@ class ModemStateMachine:
                           DEFAULT_DATA_CONFIG['data_limit_billing_date'])),
         }
 
+    @staticmethod
+    def _stat_int(value) -> int:
+        # Bearer-Stats a{sv} values arrive as dbus-next Variants, not ints.
+        v = value.value if hasattr(value, 'value') else value
+        try:
+            return int(v or 0)
+        except (TypeError, ValueError):
+            return 0
+
     async def monitor_data_usage(self):
         """Monitor data usage limits per-SIM with failover support.
 
@@ -12119,8 +12128,8 @@ class ModemStateMachine:
                         stats_variant = await props.call_get(BEARER_INTERFACE, "Stats")
                         if stats_variant and stats_variant.value:
                             stats = stats_variant.value
-                            rx_bytes = stats.get('rx-bytes', 0)
-                            tx_bytes = stats.get('tx-bytes', 0)
+                            rx_bytes = self._stat_int(stats.get('rx-bytes', 0))
+                            tx_bytes = self._stat_int(stats.get('tx-bytes', 0))
                             raw_session_bytes = rx_bytes + tx_bytes
                             active_slot = self._current_usage_slot()
 
@@ -12483,7 +12492,8 @@ class ModemStateMachine:
                 stats_variant = await props.call_get(BEARER_INTERFACE, "Stats")
                 if stats_variant and stats_variant.value:
                     stats = stats_variant.value
-                    session_bytes = stats.get('rx-bytes', 0) + stats.get('tx-bytes', 0)
+                    session_bytes = (self._stat_int(stats.get('rx-bytes', 0))
+                                     + self._stat_int(stats.get('tx-bytes', 0)))
             except Exception as e:
                 logger.debug(f"Could not read live bearer stats to flush usage: {e}",
                             extra={'interface_number': self.interface_number})
