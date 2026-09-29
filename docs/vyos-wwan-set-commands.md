@@ -90,8 +90,8 @@ interfaces
         │     ├── interface <name>                        # designated LAN port (required)
         │     ├── mac <xx:xx:xx:xx:xx:xx>                 # optional — pin to a specific downstream MAC (default: first-MAC-wins)
         │     ├── lease-time <30-600>                     # DHCP lease seconds (default: 60)
-        │     ├── passthrough-management-address <ipv4/prefix>        # FSM-provisioned mgmt v4 (default: 192.168.200.1/24; Policy B: skipped if 'interfaces ethernet <if> address' is set)
-        │     ├── passthrough-management-address-ipv6 <ipv6/prefix>   # FSM-provisioned mgmt v6 (default: fd00:6c61:6e30::1/64; same Policy B)
+        │     ├── passthrough-management-address <ipv4/prefix>        # FSM-provisioned mgmt v4 (default: 192.168.200.1/32; Policy B: skipped if 'interfaces ethernet <if> address' is set)
+        │     ├── passthrough-management-address-ipv6 <ipv6/prefix>   # FSM-provisioned mgmt v6 (default: fd00:6c61:6e30::1/128; same Policy B)
         │     ├── dns-server <ipv4|ipv6> (multi)          # override DNS advertised to downstream (precedence: user > carrier > 8.8.8.8/1.1.1.1)
         │     ├── disable-mss-clamp                       # valueless — turn off TCP MSS clamp-to-PMTU on WWAN egress (on by default)
       │     ├── legacy-dhcpv4-compat                    # valueless — legacy mode: same-subnet v4 router/netmask, disable DHCP option 121
@@ -846,8 +846,8 @@ set interfaces wwan wwan0 dhcpv6-options pd 0 interface eth0 sla-id '0'
 >    match `iif wwanN` and continues to use the local table.
 > 5. **Management address** — because the carrier IP is leased away, the
 >    LAN interface still needs an address for SSH/HTTPS to the router.
->    The FSM auto-provisions `192.168.200.1/24` (v4) and
->    `fd00:6c61:6e30::1/64` (v6) by default.  These are configurable.
+>    The FSM auto-provisions `192.168.200.1/32` (v4) and
+>    `fd00:6c61:6e30::1/128` (v6) by default.  These are configurable.
 > 6. **Persistent source-address whitelist** — mirrors the PD ip6tables
 >    egress filter.  A per-FSM chain on FORWARD drops any traffic
 >    arriving on the LAN interface whose source is not the current
@@ -954,8 +954,8 @@ set interfaces wwan wwan0 ip-passthrough lease-time '60'
 # Optional: override the auto-provisioned management addresses
 #   (only takes effect if 'interfaces ethernet <if> address' is unset —
 #    Policy B: explicit user config always wins)
-set interfaces wwan wwan0 ip-passthrough passthrough-management-address '192.168.200.1/24'
-set interfaces wwan wwan0 ip-passthrough passthrough-management-address-ipv6 'fd00:6c61:6e30::1/64'
+set interfaces wwan wwan0 ip-passthrough passthrough-management-address '192.168.200.1/32'
+set interfaces wwan wwan0 ip-passthrough passthrough-management-address-ipv6 'fd00:6c61:6e30::1/128'
 
 # Optional: override DNS advertised to the downstream device (multi-value).
 #   Precedence: user override > carrier-supplied DNS > 8.8.8.8/1.1.1.1 fallback.
