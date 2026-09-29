@@ -3,11 +3,11 @@
   <properties>
     <help>Certificate in PKI configuration</help>
     <completionHelp>
-      <path>pki certificate</path>
+      <list>pki-certificate-name tpm-certificate-name</list>
     </completionHelp>
     <valueHelp>
       <format>txt</format>
-      <description>Name of certificate in PKI configuration</description>
+      <description>Name of certificate in PKI configuration or tpm sealed in /config/auth/tpm/cert/</description>
     </valueHelp>
   </properties>
 </leafNode>
