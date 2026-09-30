@@ -31,12 +31,10 @@ show
                     ├── sms                                 # list all SMS messages
                     │     ├── <id>                          # read specific SMS message (preferred)
                     │     └── message <id>                  # read specific SMS message
-                    └── event-log                           # network event log (journalctl)
-                          ├── route                         # route events only
-                          ├── link                          # link events only
-                          ├── addr                          # address events only
-                          ├── neigh                         # neighbor table events only
-                          └── rule                          # PBR rule events only
+                    └── event-log                           # WWAN alert/event history (AlertBus)
+                          ├── limit <1-500>                 # max recent events (default 100)
+                          ├── severity {info|warning|critical}
+                          └── category {connectivity|sim|usage}
 
 connect
   └── interface <wwanN>                                    # bring up WWAN bearer
@@ -443,25 +441,30 @@ igos@igos:~$ show interfaces wwan wwan0 sms message 3
 
 ### `show interfaces wwan <wwanN> event-log`
 
-Show network event log entries for the specified WWAN interface (link, address,
-route, neighbor, and PBR rule events from journalctl).
+Show recent WWAN alert/event history for the specified interface from the FSM
+AlertBus (connectivity, SIM, and data-usage events — this is the modem service's
+own event stream, not the kernel/journalctl network-event log).  Newest entries
+first; defaults to the last 100.
 
 ```
 igos@igos:~$ show interfaces wwan wwan0 event-log
+igos@igos:~$ show interfaces wwan wwan0 event-log limit 50
+igos@igos:~$ show interfaces wwan wwan0 event-log severity critical
+igos@igos:~$ show interfaces wwan wwan0 event-log category connectivity
 ```
 
 **Sub-commands:**
 
 | Command | Description |
 |---|---|
-| `event-log` | All event types for the interface |
-| `event-log route` | Route change events only |
-| `event-log link` | Link state events only |
-| `event-log addr` | Address add/remove events only |
-| `event-log neigh` | Neighbor table events only |
-| `event-log rule` | PBR rule change events only |
+| `event-log` | All recent events (newest first, default limit 100) |
+| `event-log limit <1-500>` | Retrieve up to N recent events |
+| `event-log severity {info\|warning\|critical}` | Filter by severity |
+| `event-log category {connectivity\|sim\|usage}` | Filter by category |
 
-**Source:** `journalctl --no-hostname --boot --unit vyos-network-event-logger.service`
+**Script:** `show_wwan.py show_event_log --interface="$4"` (AlertBus recent-alert history via `WWANClientSync.get_recent_alerts()`)
+
+**JSON mode:** `show interfaces wwan wwan0 event-log --raw`
 
 ---
 
@@ -857,8 +860,9 @@ an HTTPS POST body, use `syslog-identifier igos-wwan-alertbus-json` and parse
 | `show interfaces wwan wwan0 monitor-alerts` | Collect live alerts during monitor window |
 | `show interfaces wwan wwan0 sms` | List all SMS messages |
 | `show interfaces wwan wwan0 sms message 3` | Read SMS message #3 |
-| `show interfaces wwan wwan0 event-log` | Network event log for wwan0 |
-| `show interfaces wwan wwan0 event-log link` | Link-state events only |
+| `show interfaces wwan wwan0 event-log` | WWAN event log for wwan0 (last 100 events) |
+| `show interfaces wwan wwan0 event-log limit 50` | Last 50 WWAN events |
+| `show interfaces wwan wwan0 event-log category connectivity` | Connectivity events only |
 | `connect interface wwan0` | Bring up WWAN bearer |
 | `disconnect interface wwan0` | Tear down WWAN bearer |
 | `generate interfaces wwan wwan0 sms number '+15551234567' message 'hello'` | Send an SMS |

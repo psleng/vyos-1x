@@ -22,6 +22,7 @@ import sys
 import ast
 import shutil
 import textwrap
+import typing
 
 import vyos.opmode
 
@@ -574,14 +575,19 @@ def show_detail(raw: bool, interface: str):
 
 def show_wait_failover(raw: bool,
                        interface: str,
-                       timeout: int = 120,
-                       poll_interval: int = 1,
+                       timeout: typing.Optional[int] = 120,
+                       poll_interval: typing.Optional[int] = 1,
                        include_existing: bool = False):
     """Wait for next failover alert for an interface and print it.
 
     This consumes WWANClientSync.wait_for_failover_alert() directly so
     operators can do a quick interactive wait in op-mode.
     """
+    # vyos.opmode passes None for omitted optional args, not the default
+    if timeout is None:
+        timeout = 120
+    if poll_interval is None:
+        poll_interval = 1
     try:
         timeout = int(timeout)
     except (TypeError, ValueError):
@@ -624,10 +630,13 @@ def show_wait_failover(raw: bool,
 
 def show_monitor_alerts(raw: bool,
                         interface: str,
-                        timeout: int = 30,
-                        severity: str = '',
-                        category: str = ''):
+                        timeout: typing.Optional[int] = 30,
+                        severity: typing.Optional[str] = '',
+                        category: typing.Optional[str] = ''):
     """Collect and display WWAN alerts for a fixed monitoring window."""
+    # vyos.opmode passes None for omitted optional args, not the default
+    if timeout is None:
+        timeout = 30
     try:
         timeout = int(timeout)
     except (TypeError, ValueError):
@@ -690,10 +699,13 @@ def show_monitor_alerts(raw: bool,
 
 def show_event_log(raw: bool,
                    interface: str,
-                   limit: int = 100,
-                   severity: str = '',
-                   category: str = ''):
+                   limit: typing.Optional[int] = 100,
+                   severity: typing.Optional[str] = '',
+                   category: typing.Optional[str] = ''):
     """Show recent WWAN alert/event history from AlertBus."""
+    # vyos.opmode passes None for omitted optional args, not the default
+    if limit is None:
+        limit = 100
     try:
         limit = int(limit)
     except (TypeError, ValueError):
@@ -759,7 +771,7 @@ def show_event_log(raw: bool,
     return '\n'.join(line for line in lines if line)
 
 
-def clear_data_usage(raw: bool, interface: str, slot: int = None):
+def clear_data_usage(raw: bool, interface: str, slot: typing.Optional[int] = None):
     """Zero the data-usage counters for a specific SIM slot.
 
     CLI: clear interfaces wwan <wwanN> data-usage slot <N>

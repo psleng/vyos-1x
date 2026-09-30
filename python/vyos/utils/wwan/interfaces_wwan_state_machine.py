@@ -140,6 +140,12 @@ LED_FAST_RATS = frozenset({'LTE', 'LTE-A', '5G NR', 'NR5G', '5G'})
 # Highest LED level a slow (2G/3G) RAT may display (4 = cyan / "fair").
 LED_SLOW_RAT_MAX_LEVEL = 4
 
+# Software-driven STAT-LED blink half-period (seconds).  When the modem is
+# registered but has no data connection the STAT LED slow-blinks the signal
+# colour (vs solid when connected).  There is no hardware PWM/blink, so a task
+# toggles the GPIO at this cadence; kept deliberately slow to minimise churn.
+LED_BLINK_INTERVAL_SECONDS = 1.0
+
 # ── Signal strength averaging for LED indicator ──────────────────────────────
 class SignalStrengthTracker:
     """Tracks rolling-window average of signal strength with change detection.
@@ -403,6 +409,12 @@ class ModemStateMachine:
         self._scan_stall_timeout = 120.0
         self._periodic_sim_check_task = None
         self._signal_poll_task = None
+        # STAT-LED mode: 'off' | 'blink' (registered, no data connection) |
+        # 'solid' (connected).  _led_level caches the last RAT-capped signal
+        # level so the blink loop and the solid path show the same colour.
+        self._led_blink_task = None
+        self._led_mode = 'off'
+        self._led_level = 0
         self.usage_monitor_task = None
         # Egress-filter / MSS-clamp state also referenced during teardown
         self._ipv6_egress_filter_active = False
@@ -3395,16 +3407,25 @@ class ModemStateMachine:
                         "duplicate request",
                         extra={'interface_number': self.interface_number})
 
-            # Policy: clear LED (OFF) in no-connection states so stale bars
-            # from previous bearer sessions are not shown.
-            if new_state in [
-                ModemState.WAITING_FOR_SIM.value,
+            # STAT-LED policy by state:
+            #   CONNECTED                     -> solid signal colour
+            #   registered but no data bearer -> slow blink of the signal
+            #                                    colour (the blink loop self-
+            #                                    darkens to OFF when there is no
+            #                                    usable signal)
+            #   no SIM                         -> OFF
+            # so a dark LED unambiguously means "no coverage", not "no data".
+            if new_state == ModemState.CONNECTED.value:
+                self._set_led_mode('solid', reason=f"fsm_state:{new_state}")
+            elif new_state in (
+                ModemState.CONNECTING.value,
+                ModemState.REGISTERED_IDLE.value,
                 ModemState.DISCONNECTED.value,
                 ModemState.FAILED.value,
-            ]:
-                self._safe_create_task(
-                    self._clear_signal_led(reason=f"fsm_state:{new_state}")
-                )
+            ):
+                self._set_led_mode('blink', reason=f"fsm_state:{new_state}")
+            elif new_state == ModemState.WAITING_FOR_SIM.value:
+                self._set_led_mode('off', reason=f"fsm_state:{new_state}")
 
             # Reaching CONNECTED cancels any stale bearer-disconnect debounce
             # timer left over from a previous cycle.  In a fast dial-on-demand
@@ -12066,6 +12087,15 @@ class ModemStateMachine:
                           DEFAULT_DATA_CONFIG['data_limit_billing_date'])),
         }
 
+    @staticmethod
+    def _stat_int(value) -> int:
+        # Bearer-Stats a{sv} values arrive as dbus-next Variants, not ints.
+        v = value.value if hasattr(value, 'value') else value
+        try:
+            return int(v or 0)
+        except (TypeError, ValueError):
+            return 0
+
     async def monitor_data_usage(self):
         """Monitor data usage limits per-SIM with failover support.
 
@@ -12119,8 +12149,8 @@ class ModemStateMachine:
                         stats_variant = await props.call_get(BEARER_INTERFACE, "Stats")
                         if stats_variant and stats_variant.value:
                             stats = stats_variant.value
-                            rx_bytes = stats.get('rx-bytes', 0)
-                            tx_bytes = stats.get('tx-bytes', 0)
+                            rx_bytes = self._stat_int(stats.get('rx-bytes', 0))
+                            tx_bytes = self._stat_int(stats.get('tx-bytes', 0))
                             raw_session_bytes = rx_bytes + tx_bytes
                             active_slot = self._current_usage_slot()
 
@@ -12483,7 +12513,8 @@ class ModemStateMachine:
                 stats_variant = await props.call_get(BEARER_INTERFACE, "Stats")
                 if stats_variant and stats_variant.value:
                     stats = stats_variant.value
-                    session_bytes = stats.get('rx-bytes', 0) + stats.get('tx-bytes', 0)
+                    session_bytes = (self._stat_int(stats.get('rx-bytes', 0))
+                                     + self._stat_int(stats.get('tx-bytes', 0)))
             except Exception as e:
                 logger.debug(f"Could not read live bearer stats to flush usage: {e}",
                             extra={'interface_number': self.interface_number})
@@ -13508,6 +13539,10 @@ class ModemStateMachine:
         display_name = (level_names[display_level]
                         if 0 <= display_level <= 7 else 'unknown')
 
+        # Cache the RAT-capped level so the blink loop and the solid path
+        # render the same colour.
+        self._led_level = display_level
+
         # Keep logging explicit for operational visibility.
         if display_level != level:
             logger.info(
@@ -13525,6 +13560,11 @@ class ModemStateMachine:
                 extra={'interface_number': self.interface_number,
                        'level': level, 'avg_dbm': avg_dbm, 'level_name': level_name}
             )
+
+        # In blink mode the blink loop owns the GPIO; only record the level
+        # above and let the loop toggle it.  Solid/connected drives it here.
+        if self._led_mode == 'blink':
+            return
 
         try:
             # Lazy import keeps FSM unit tests and non-hardware images tolerant.
@@ -13546,6 +13586,12 @@ class ModemStateMachine:
         doesn't display stale signal bars from a previous connected session.
         """
         modem_name = f"MODEM{self.interface_number}"
+        # Stop any in-flight blink so it can't relight the LED after we clear.
+        self._led_mode = 'off'
+        self._led_level = 0
+        if self._led_blink_task and not self._led_blink_task.done():
+            self._led_blink_task.cancel()
+            self._led_blink_task = None
         try:
             if self.signal_tracker:
                 self.signal_tracker.reset()
@@ -13564,6 +13610,93 @@ class ModemStateMachine:
                         extra={'interface_number': self.interface_number,
                                'modem_name': modem_name,
                                'reason': reason or 'unspecified'})
+
+    def _set_led_mode(self, mode: str, reason: str = "") -> None:
+        """Switch the STAT LED between 'off', 'blink' (registered / no data)
+        and 'solid' (connected).  Synchronous — safe to call from transition().
+
+        - 'blink': start the slow software blink loop (idempotent).
+        - 'solid': stop the blink loop and paint the last-known level now (the
+                   CONNECTED signal poll keeps it fresh thereafter).
+        - 'off':   stop the blink loop and clear the LED.
+        """
+        self._led_mode = mode
+        if mode == 'blink':
+            if not self._led_blink_task or self._led_blink_task.done():
+                self._led_blink_task = self._safe_create_task(
+                    self._signal_led_blink_loop(),
+                    name=f"led-blink-wwan{self.interface_number}",
+                )
+            return
+        # Not blinking any more: stop the loop.
+        if self._led_blink_task and not self._led_blink_task.done():
+            self._led_blink_task.cancel()
+            self._led_blink_task = None
+        if mode == 'off':
+            self._safe_create_task(
+                self._clear_signal_led(reason=reason or 'led_off'))
+        elif mode == 'solid':
+            self._safe_create_task(self._render_led_solid_now())
+
+    async def _render_led_solid_now(self) -> None:
+        """Drive the STAT LED to the cached signal level (solid), immediately.
+
+        Avoids a dark gap on connect between cancelling the blink loop and the
+        first CONNECTED signal-poll sample.
+        """
+        if self._led_mode != 'solid':
+            return
+        level = int(getattr(self, '_led_level', 0) or 0)
+        modem_name = f"MODEM{self.interface_number}"
+        try:
+            import vyos.hardware.api as hw_api
+            hw_api.modem_signal_level(level=level, modem=modem_name)
+        except Exception as e:
+            logger.debug("Solid LED render skipped (non-fatal): %s", e,
+                         extra={'interface_number': self.interface_number})
+
+    async def _signal_led_blink_loop(self) -> None:
+        """Slow-blink the signal colour while registered with no data bearer.
+
+        Samples signal each cycle and blinks the mapped colour; stays dark when
+        there is no usable signal, so a dark LED still means "no coverage", not
+        merely "no data".  There is no hardware blink, so this toggles the GPIO
+        at LED_BLINK_INTERVAL_SECONDS.  Cancelled by _set_led_mode / _clear_
+        signal_led on leaving blink; safe to cancel at any await point.
+        """
+        modem_name = f"MODEM{self.interface_number}"
+        try:
+            import vyos.hardware.api as hw_api
+        except Exception:
+            return  # no hardware LED on this image — nothing to blink
+        try:
+            while True:
+                # Refresh signal so the blink colour tracks live conditions
+                # (updates self._led_level via the tracker callback).
+                try:
+                    _pct, dbm, detail = await self._get_detailed_signal_quality()
+                    if self.signal_tracker is not None and dbm is not None:
+                        await self.signal_tracker.update(dbm, detail or {})
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    pass
+                level = int(getattr(self, '_led_level', 0) or 0)
+                # ON phase — show the colour only when there is usable signal.
+                try:
+                    hw_api.modem_signal_level(
+                        level=level if level > 0 else 0, modem=modem_name)
+                except Exception:
+                    pass
+                await asyncio.sleep(LED_BLINK_INTERVAL_SECONDS)
+                # OFF phase.
+                try:
+                    hw_api.modem_signal_level(level=0, modem=modem_name)
+                except Exception:
+                    pass
+                await asyncio.sleep(LED_BLINK_INTERVAL_SECONDS)
+        except asyncio.CancelledError:
+            raise
 
     def get_sim_status_summary(self):
         """Get quick SIM status summary"""
@@ -14182,11 +14315,16 @@ class ModemStateMachine:
             sim_mtu = sim_config.get('mtu', 0)
 
             if sim_mtu and sim_mtu > 0:
-                status['mtu_effective'] = str(sim_mtu)
-                status['mtu_source'] = 'per-sim'
+                # Mirror the runtime cap so the reported value matches what is applied.
+                if network_mtu:
+                    status['mtu_effective'] = str(min(sim_mtu, int(network_mtu)))
+                    status['mtu_source'] = 'per-sim' if sim_mtu <= int(network_mtu) else 'per-sim-capped'
+                else:
+                    status['mtu_effective'] = str(sim_mtu)
+                    status['mtu_source'] = 'per-sim'
             elif network_mtu:
-                status['mtu_effective'] = str(min(int(network_mtu), interface_mtu))
-                status['mtu_source'] = 'network' if int(network_mtu) <= interface_mtu else 'network-capped'
+                status['mtu_effective'] = str(int(network_mtu))
+                status['mtu_source'] = 'network'
             else:
                 status['mtu_effective'] = str(interface_mtu)
                 status['mtu_source'] = 'interface'
@@ -14682,6 +14820,7 @@ class ModemStateMachine:
         await self._cancel_and_join_task_attrs(
             ('usage_monitor_task', 'connectivity_monitor_task',
              'failback_task', '_initial_config_task', '_signal_poll_task',
+             '_led_blink_task',
              '_ip_monitoring_task', '_network_time_task',
              '_transient_watchdog_task', '_ondemand_disconnect_task',
              '_ondemand_connect_task', '_disconnection_recovery_task',
@@ -15386,6 +15525,7 @@ class ModemStateMachine:
         await self._cancel_and_join_task_attrs(
             ('usage_monitor_task', 'connectivity_monitor_task',
              'failback_task', '_initial_config_task', '_signal_poll_task',
+             '_led_blink_task',
              '_ip_monitoring_task', '_network_time_task',
              '_transient_watchdog_task', '_ondemand_disconnect_task',
              '_ondemand_connect_task', '_disconnection_recovery_task',
@@ -19756,11 +19896,17 @@ class ModemStateMachine:
                     sim_mtu = sim_config.get('mtu', 0)
 
                 if sim_mtu and sim_mtu > 0:
-                    effective_mtu = str(sim_mtu)
-                    mtu_source = 'per-sim'
+                    # Cap per-SIM MTU at the network MTU; a larger value would black-hole traffic.
+                    if ipv4_mtu:
+                        effective_mtu = str(min(sim_mtu, int(ipv4_mtu)))
+                        mtu_source = 'per-sim' if sim_mtu <= int(ipv4_mtu) else 'per-sim-capped'
+                    else:
+                        effective_mtu = str(sim_mtu)
+                        mtu_source = 'per-sim'
                 elif ipv4_mtu:
-                    effective_mtu = str(min(int(ipv4_mtu), interface_mtu))
-                    mtu_source = 'network' if int(ipv4_mtu) <= interface_mtu else 'network-capped'
+                    # Carrier MTU as-is; interface mtu is a fallback, not a ceiling.
+                    effective_mtu = str(int(ipv4_mtu))
+                    mtu_source = 'network'
                 else:
                     effective_mtu = str(interface_mtu)
                     mtu_source = 'interface'
@@ -19857,11 +20003,16 @@ class ModemStateMachine:
                         sim_mtu = sim_config.get('mtu', 0)
 
                     if sim_mtu and sim_mtu > 0:
-                        effective_mtu = str(sim_mtu)
-                        mtu_source = 'per-sim'
+                        # Cap per-SIM MTU at the network MTU (see IPv4 path).
+                        if ipv6_mtu:
+                            effective_mtu = str(min(sim_mtu, int(ipv6_mtu)))
+                            mtu_source = 'per-sim' if sim_mtu <= int(ipv6_mtu) else 'per-sim-capped'
+                        else:
+                            effective_mtu = str(sim_mtu)
+                            mtu_source = 'per-sim'
                     elif ipv6_mtu:
-                        effective_mtu = str(min(int(ipv6_mtu), interface_mtu))
-                        mtu_source = 'network' if int(ipv6_mtu) <= interface_mtu else 'network-capped'
+                        effective_mtu = str(int(ipv6_mtu))
+                        mtu_source = 'network'
                     else:
                         effective_mtu = str(interface_mtu)
                         mtu_source = 'interface'

@@ -80,30 +80,6 @@
                       </node>
                     </children>
                   </node>
-                  <node name="wait-failer-alert">
-                    <properties>
-                      <help>Compatibility alias: wait for next WWAN failover alert</help>
-                    </properties>
-                    <command>${vyos_op_scripts_dir}/show_wwan.py show_wait_failover --interface="$4"</command>
-                    <children>
-                      <node name="timeout">
-                        <properties>
-                          <help>Set wait timeout in seconds</help>
-                        </properties>
-                        <children>
-                          <tagNode name="seconds">
-                            <properties>
-                              <help>Timeout in seconds (1-600)</help>
-                              <constraint>
-                                <validator name="numeric" argument="--range 1-600"/>
-                              </constraint>
-                            </properties>
-                            <command>${vyos_op_scripts_dir}/show_wwan.py show_wait_failover --interface="$4" --timeout="$7"</command>
-                          </tagNode>
-                        </children>
-                      </node>
-                    </children>
-                  </node>
                   <node name="monitor-alerts">
                     <properties>
                       <help>Monitor WWAN alerts for a time window</help>
