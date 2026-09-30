@@ -53,7 +53,7 @@ class TestDictSearch(TestCase):
     def test_non_existing_keys_with_default_named(self):
         # TestDictSearch: Return a default value when querying for non-existent key (named arg)
         self.assertEqual(dict_search('non.existing.fancy.key', data, default='test'), 'test')
-		
+
     def test_string(self):
         # TestDictSearch: Return value when querying string
         self.assertEqual(dict_search('string', data), data['string'])
