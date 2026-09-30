@@ -221,20 +221,26 @@ class EthernetIf(Interface):
 
         # Get current speed and duplex settings:
         ifname = self.config['ifname']
+        want_auto = speed == 'auto' or duplex == 'auto'
         if self.ethtool.get_auto_negotiation():
-            if speed == 'auto' and duplex == 'auto':
+            if want_auto:
                 # bail out early as nothing is to change
                 return
-        else:
-            # XXX: read in current speed and duplex settings
-            # There are some "nice" NICs like AX88179 which do not support
-            # reading the speed thus we simply fallback to the supplied speed
-            # to not cause any change here and raise an exception.
-            cur_speed = read_file(f'/sys/class/net/{ifname}/speed', speed)
-            cur_duplex = read_file(f'/sys/class/net/{ifname}/duplex', duplex)
+        elif not want_auto:
+            # Currently in forced mode and a specific speed/duplex is
+            # requested: only skip if the *active* settings already match.
+            # A link-down interface returns no readable speed/duplex, so use
+            # an empty default - never the requested value - otherwise the
+            # read failure would look "already correct" and a forced->auto
+            # revert of a failed link would be skipped, leaving the port down
+            # until reboot.
+            cur_speed = read_file(f'/sys/class/net/{ifname}/speed', '')
+            cur_duplex = read_file(f'/sys/class/net/{ifname}/duplex', '')
             if (cur_speed == speed) and (cur_duplex == duplex):
                 # bail out early as nothing is to change
                 return
+        # A forced->auto transition intentionally falls through so that
+        # auto-negotiation is re-enabled below.
 
         cmd = f'ethtool --change {ifname}'
         try:

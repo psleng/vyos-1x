@@ -255,6 +255,14 @@ class Interface(Control):
             'validate': lambda link: assert_range(link, 0, 3),
             'location': '/proc/sys/net/ipv4/conf/{ifname}/link_filter',
         },
+        'ipv4_ignore_routes_linkdown': {
+            'validate': assert_boolean,
+            'location': '/proc/sys/net/ipv4/conf/{ifname}/ignore_routes_with_linkdown',
+        },
+        'ipv6_ignore_routes_linkdown': {
+            'validate': assert_boolean,
+            'location': '/proc/sys/net/ipv6/conf/{ifname}/ignore_routes_with_linkdown',
+        },
         'per_client_thread': {
             'validate': assert_boolean,
             'location': '/sys/class/net/{ifname}/threaded',
@@ -309,6 +317,12 @@ class Interface(Control):
         },
         'link_detect': {
             'location': '/proc/sys/net/ipv4/conf/{ifname}/link_filter',
+        },
+        'ipv4_ignore_routes_linkdown': {
+            'location': '/proc/sys/net/ipv4/conf/{ifname}/ignore_routes_with_linkdown',
+        },
+        'ipv6_ignore_routes_linkdown': {
+            'location': '/proc/sys/net/ipv6/conf/{ifname}/ignore_routes_with_linkdown',
         },
         'per_client_thread': {
             'validate': assert_boolean,
@@ -1084,6 +1098,20 @@ class Interface(Control):
         if tmp == link_filter:
             return None
         return self.set_interface('link_detect', link_filter)
+
+    def set_ignore_routes_with_linkdown(self, disable_detect):
+        """
+        Keep or drop this interface's routes from the FIB when the carrier is
+        lost. 'disable-link-detect' -> value 0 (keep routes, ignore link state);
+        otherwise value 1 (react to link loss). Only effective because the global
+        net.ipv{4,6}.conf.all.ignore_routes_with_linkdown is 0 - the kernel
+        evaluates the knob as (all || per-interface).
+        """
+        value = '0' if disable_detect else '1'
+        self.set_interface('ipv4_ignore_routes_linkdown', value)
+        # The IPv6 conf directory is absent when IPv6 is disabled on the link.
+        if os.path.exists(f'/proc/sys/net/ipv6/conf/{self.ifname}/ignore_routes_with_linkdown'):
+            self.set_interface('ipv6_ignore_routes_linkdown', value)
 
     def get_alias(self):
         """
@@ -1881,6 +1909,10 @@ class Interface(Control):
         # Ignore link state changes
         value = '2' if 'disable_link_detect' in config else '1'
         self.set_link_detect(value)
+
+        # Keep routes in the FIB across carrier loss when disable-link-detect is
+        # set (per-interface override of ignore_routes_with_linkdown).
+        self.set_ignore_routes_with_linkdown('disable_link_detect' in config)
 
         # Configure assigned interface IP addresses. No longer
         # configured addresses will be removed first

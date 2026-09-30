@@ -26,8 +26,13 @@ from vyos.configverify import verify_vrf
 from vyos.defaults import systemd_services
 from vyos.snmpv3_hashgen import plaintext_to_md5
 from vyos.snmpv3_hashgen import plaintext_to_sha1
+from vyos.snmpv3_hashgen import plaintext_to_sha224
+from vyos.snmpv3_hashgen import plaintext_to_sha256
+from vyos.snmpv3_hashgen import plaintext_to_sha384
+from vyos.snmpv3_hashgen import plaintext_to_sha512
 from vyos.snmpv3_hashgen import random
 from vyos.template import render
+from vyos.template import snmp_auth_name
 from vyos.utils.configfs import delete_cli_node
 from vyos.utils.configfs import add_cli_node
 from vyos.utils.dict import dict_search
@@ -52,6 +57,26 @@ systemd_service     = systemd_services['snmpd']
 # snmptrap argv (incl. v3 credentials) on tmpfs.
 WWAN_TRAP_ENV_FILE     = r'/etc/default/igos-wwan-snmp-traps'
 WWAN_TRAP_TARGETS_FILE = r'/run/igos-wwan-snmp-traps.targets.json'
+
+# SNMPv3 authentication protocol -> localization hash function + localized key
+# length (bytes); privacy protocol -> cipher key length (bytes).  Per RFC 3414
+# the privacy key is localized with the *authentication* hash, so a cipher can
+# only be keyed by an auth protocol whose digest is at least the cipher key
+# length; net-snmp then truncates (the same path sha/aes already use today).
+snmp_v3_auth_hash = {
+    'md5':    plaintext_to_md5,
+    'sha':    plaintext_to_sha1,
+    'sha224': plaintext_to_sha224,
+    'sha256': plaintext_to_sha256,
+    'sha384': plaintext_to_sha384,
+    'sha512': plaintext_to_sha512,
+}
+snmp_v3_auth_key_bytes = {
+    'md5': 16, 'sha': 20, 'sha224': 28, 'sha256': 32, 'sha384': 48, 'sha512': 64,
+}
+snmp_v3_priv_key_bytes = {
+    'des': 16, 'aes': 16, 'aes192': 24, 'aes256': 32,
+}
 
 def get_config(config=None):
     if config:
@@ -167,6 +192,15 @@ def verify(snmp):
             if 'plaintext_password' not in user_config['privacy'] and 'encrypted_password' not in user_config['privacy']:
                 raise ConfigError(f'Must specify privacy encrypted-password or plaintext-password for user "{user}"!')
 
+            auth_type = dict_search('auth.type', user_config) or 'md5'
+            priv_type = dict_search('privacy.type', user_config) or 'des'
+            if snmp_v3_auth_key_bytes[auth_type] < snmp_v3_priv_key_bytes[priv_type]:
+                raise ConfigError(
+                    f'SNMPv3 user "{user}": authentication protocol "{auth_type}" '
+                    f'does not derive enough key material for privacy protocol '
+                    f'"{priv_type}" - use an authentication protocol of equal or '
+                    f'greater strength (e.g. "sha256" with "aes256")!')
+
     if 'group' in snmp['v3']:
         for group, group_config in snmp['v3']['group'].items():
             if 'seclevel' not in group_config:
@@ -222,10 +256,7 @@ def generate(snmp):
         # we will hash it in the background and replace the CLI node!
         if 'user' in snmp['v3']:
             for user, user_config in snmp['v3']['user'].items():
-                if dict_search('auth.type', user_config)  == 'sha':
-                    hash = plaintext_to_sha1
-                else:
-                    hash = plaintext_to_md5
+                hash = snmp_v3_auth_hash[dict_search('auth.type', user_config) or 'md5']
 
                 if dict_search('auth.plaintext_password', user_config) is not None:
                     tmp = hash(dict_search('auth.plaintext_password', user_config),
@@ -370,7 +401,7 @@ def _wwan_trap_argv_targets(snmp):
             argv += ['-u', user]
         auth = cfg.get('auth') or {}
         if auth.get('plaintext_password') or auth.get('encrypted_password'):
-            argv += ['-a', (auth.get('type') or 'md5').upper()]
+            argv += ['-a', snmp_auth_name(auth.get('type') or 'md5')]
             if auth.get('plaintext_password'):
                 # Keep the passphrase off argv — emit it as a config directive.
                 conf_lines.append(f"defAuthPassphrase {auth['plaintext_password']}")
@@ -378,7 +409,7 @@ def _wwan_trap_argv_targets(snmp):
                 argv += ['-3m', auth['encrypted_password']]
             privacy = cfg.get('privacy') or {}
             if privacy.get('plaintext_password') or privacy.get('encrypted_password'):
-                argv += ['-x', (privacy.get('type') or 'des').upper()]
+                argv += ['-x', snmp_auth_name(privacy.get('type') or 'des')]
                 if privacy.get('plaintext_password'):
                     conf_lines.append(f"defPrivPassphrase {privacy['plaintext_password']}")
                 else:

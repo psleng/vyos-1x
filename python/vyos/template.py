@@ -579,17 +579,42 @@ def get_openvpn_data_ciphers_fallback(cipher):
 
 @register_filter('snmp_auth_oid')
 def snmp_auth_oid(type):
-    if type not in ['md5', 'sha', 'aes', 'des', 'none']:
-        raise ValueError()
-
     OIDs = {
         'md5' : '.1.3.6.1.6.3.10.1.1.2',
         'sha' : '.1.3.6.1.6.3.10.1.1.3',
-        'aes' : '.1.3.6.1.6.3.10.1.2.4',
+        'sha224' : '.1.3.6.1.6.3.10.1.1.4',
+        'sha256' : '.1.3.6.1.6.3.10.1.1.5',
+        'sha384' : '.1.3.6.1.6.3.10.1.1.6',
+        'sha512' : '.1.3.6.1.6.3.10.1.1.7',
         'des' : '.1.3.6.1.6.3.10.1.2.2',
+        'aes' : '.1.3.6.1.6.3.10.1.2.4',
+        'aes192' : '.1.3.6.1.4.1.14832.1.3',
+        'aes256' : '.1.3.6.1.4.1.14832.1.4',
         'none': '.1.3.6.1.6.3.10.1.2.1'
     }
+    if type not in OIDs:
+        raise ValueError()
     return OIDs[type]
+
+@register_filter('snmp_auth_name')
+def snmp_auth_name(type):
+    """Map the VyOS auth/privacy protocol token onto the protocol name string
+    expected on the net-snmp command line (snmptrap/trapsess ``-a``/``-x``)."""
+    names = {
+        'md5' : 'MD5',
+        'sha' : 'SHA',
+        'sha224' : 'SHA-224',
+        'sha256' : 'SHA-256',
+        'sha384' : 'SHA-384',
+        'sha512' : 'SHA-512',
+        'des' : 'DES',
+        'aes' : 'AES',
+        'aes192' : 'AES-192',
+        'aes256' : 'AES-256',
+    }
+    if type not in names:
+        raise ValueError()
+    return names[type]
 
 @register_filter('quoted_join')
 def quoted_join(input_list, join_str, quote='"'):

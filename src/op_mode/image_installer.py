@@ -158,14 +158,27 @@ DIR_ROOTFS_DST: str = f'{DIR_INSTALLATION}/root_dst'
 DIR_ISO_MOUNT: str = f'{DIR_INSTALLATION}/iso_src'
 DIR_DST_ROOT: str = f'{DIR_INSTALLATION}/disk_dst'
 DIR_KERNEL_SRC: str = '/boot'
-FILE_ROOTFS_SRC: str = '/usr/lib/live/mount/medium/live/filesystem.squashfs'
+# The raw filesystem.squashfs (and its sibling baked initrd / kernel signature)
+# lives on the real boot medium. On a normal live boot that medium is at
+# /usr/lib/live/mount/medium. Under dm-verity, live-boot is told
+# `root=/dev/mapper/verity-root`, so it mounts the VERITY DEVICE (the squashfs
+# *contents*) at /usr/lib/live/mount/medium; the medium actually carrying the
+# .squashfs file is mounted by the igos-verity-root initramfs hook at
+# /run/verity-medium (kept mounted -- the verity loop device is backed by that
+# file). Prefer that location when it holds the squashfs, else the live mount.
+DIR_LIVE_MEDIUM: str = (
+    '/run/verity-medium'
+    if Path('/run/verity-medium/live/filesystem.squashfs').exists()
+    else '/usr/lib/live/mount/medium'
+)
+FILE_ROOTFS_SRC: str = f'{DIR_LIVE_MEDIUM}/live/filesystem.squashfs'
 # dm-verity: sibling of FILE_ROOTFS_SRC on the live medium; carries the root
 # hash baked by 28-igos-dm-verity.binary (the squashfs-internal initrd does not).
-FILE_INITRD_SRC: str = '/usr/lib/live/mount/medium/live/initrd.img'
+FILE_INITRD_SRC: str = f'{DIR_LIVE_MEDIUM}/live/initrd.img'
 # secure-boot: detached signature of the kernel on the live medium (sibling of
 # the baked initrd), written by 29-igos-sign-boot.binary. Present only on signed
 # builds; the initrd signature is FILE_INITRD_SRC + '.sig'.
-FILE_KERNEL_SIG_SRC: str = '/usr/lib/live/mount/medium/live/vmlinuz.sig'
+FILE_KERNEL_SIG_SRC: str = f'{DIR_LIVE_MEDIUM}/live/vmlinuz.sig'
 ISO_DOWNLOAD_PATH: str = ''
 
 external_download_script: str = f'{base_dir}/simple-download.py'

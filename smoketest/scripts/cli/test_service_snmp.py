@@ -185,6 +185,54 @@ class TestSNMPService(VyOSUnitTestSHIM.TestCase):
         tmp = call(f'snmpwalk -v 3 -u {snmpv3_user} -a SHA -A {snmpv3_auth_pw} -x AES -X {snmpv3_priv_pw} -l authPriv 127.0.0.1', stdout=DEVNULL)
         self.assertEqual(tmp, 0)
 
+    def test_snmpv3_sha256_aes256(self):
+        # Check if SNMPv3 can be configured with SHA-256 authentication and
+        # AES-256 privacy, that the localized keys are stored, and the daemon
+        # accepts a matching authPriv request.
+        self.cli_set(base_path + ['v3', 'engineid', snmpv3_engine_id])
+        self.cli_set(base_path + ['v3', 'group', 'default', 'mode', 'ro'])
+        self.cli_set(base_path + ['v3', 'view', 'default', 'oid', '1'])
+        self.cli_set(base_path + ['v3', 'group', 'default', 'view', 'default'])
+
+        # create user
+        self.cli_set(base_path + ['v3', 'user', snmpv3_user, 'auth', 'plaintext-password', snmpv3_auth_pw])
+        self.cli_set(base_path + ['v3', 'user', snmpv3_user, 'auth', 'type', 'sha256'])
+        self.cli_set(base_path + ['v3', 'user', snmpv3_user, 'privacy', 'plaintext-password', snmpv3_priv_pw])
+        self.cli_set(base_path + ['v3', 'user', snmpv3_user, 'privacy', 'type', 'aes256'])
+        self.cli_set(base_path + ['v3', 'user', snmpv3_user, 'group', 'default'])
+
+        self.cli_commit()
+
+        # commit will alter the CLI values - check the stored localized keys
+        hashed_password = 'b5629301aa5d56cea994c40c361c7c063487ef144c3f2ca9188695f5e65c13a9'
+        tmp = self._session.show_config(base_path + ['v3', 'user', snmpv3_user, 'auth', 'encrypted-password']).split()[1]
+        self.assertEqual(tmp, hashed_password)
+
+        hashed_password = '65cda1e612484a4d9e1649617cbc2aadd98a7ac28a2ef28ba297ec1a6f39fb16'
+        tmp = self._session.show_config(base_path + ['v3', 'user', snmpv3_user, 'privacy', 'encrypted-password']).split()[1]
+        self.assertEqual(tmp, hashed_password)
+
+        # Try SNMPv3 connection
+        tmp = call(f'snmpwalk -v 3 -u {snmpv3_user} -a SHA-256 -A {snmpv3_auth_pw} -x AES-256 -X {snmpv3_priv_pw} -l authPriv 127.0.0.1', stdout=DEVNULL)
+        self.assertEqual(tmp, 0)
+
+    def test_snmpv3_auth_priv_strength(self):
+        # A privacy cipher can only be keyed by an authentication protocol whose
+        # digest is at least the cipher key length (net-snmp localizes the
+        # privacy key with the auth hash) - md5 + aes256 must be rejected.
+        self.cli_set(base_path + ['v3', 'engineid', snmpv3_engine_id])
+        self.cli_set(base_path + ['v3', 'group', 'default', 'mode', 'ro'])
+        self.cli_set(base_path + ['v3', 'view', 'default', 'oid', '1'])
+        self.cli_set(base_path + ['v3', 'group', 'default', 'view', 'default'])
+        self.cli_set(base_path + ['v3', 'user', snmpv3_user, 'group', 'default'])
+        self.cli_set(base_path + ['v3', 'user', snmpv3_user, 'auth', 'plaintext-password', snmpv3_auth_pw])
+        self.cli_set(base_path + ['v3', 'user', snmpv3_user, 'auth', 'type', 'md5'])
+        self.cli_set(base_path + ['v3', 'user', snmpv3_user, 'privacy', 'plaintext-password', snmpv3_priv_pw])
+        self.cli_set(base_path + ['v3', 'user', snmpv3_user, 'privacy', 'type', 'aes256'])
+
+        with self.assertRaises(ConfigSessionError):
+            self.cli_commit()
+
     def test_snmpv3_md5(self):
         # Check if SNMPv3 can be configured with MD5 authentication
         # and service runs

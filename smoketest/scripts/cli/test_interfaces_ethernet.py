@@ -168,6 +168,36 @@ class EthernetInterfaceTest(BasicInterfaceTest.TestCase):
         # manually, else tearDown() will have problem in commit()
         self.cli_delete(self._base_path + [unknonw_interface])
 
+    def test_link_detect(self):
+        # 'disable-link-detect' drives the per-interface
+        # ignore_routes_with_linkdown sysctl: 0 keeps routes in the FIB when the
+        # carrier drops, 1 withdraws them. The per-interface value is only
+        # honoured because the global 'all' is 0 (kernel uses all || per-if).
+        self.assertEqual(
+            read_file('/proc/sys/net/ipv4/conf/all/ignore_routes_with_linkdown'), '0')
+
+        # enable disable-link-detect -> keep routes on carrier loss (value 0)
+        for interface in self._interfaces:
+            self.cli_set(self._base_path + [interface, 'disable-link-detect'])
+        self.cli_commit()
+        for interface in self._interfaces:
+            v4 = f'/proc/sys/net/ipv4/conf/{interface}/ignore_routes_with_linkdown'
+            self.assertEqual(read_file(v4), '0')
+            v6 = f'/proc/sys/net/ipv6/conf/{interface}/ignore_routes_with_linkdown'
+            if os.path.exists(v6):
+                self.assertEqual(read_file(v6), '0')
+
+        # remove -> react to link loss again (value 1)
+        for interface in self._interfaces:
+            self.cli_delete(self._base_path + [interface, 'disable-link-detect'])
+        self.cli_commit()
+        for interface in self._interfaces:
+            v4 = f'/proc/sys/net/ipv4/conf/{interface}/ignore_routes_with_linkdown'
+            self.assertEqual(read_file(v4), '1')
+            v6 = f'/proc/sys/net/ipv6/conf/{interface}/ignore_routes_with_linkdown'
+            if os.path.exists(v6):
+                self.assertEqual(read_file(v6), '1')
+
     def test_speed_duplex_verify(self):
         for interface in self._interfaces:
             self.cli_set(self._base_path + [interface, 'speed', '1000'])

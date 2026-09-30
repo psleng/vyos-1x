@@ -10,9 +10,48 @@ Input:
   sys.argv[1] : udev devpath (use "%p" in the rule's IMPORT{program}=).
 """
 
-import glob
 import os
+import re
 import sys
+
+
+def _port_from_attr(ifname, attr):
+    """Trailing integer of /sys/class/net/<ifname>/<attr>
+    (e.g. phys_port_name 'p2' -> 2, dev_port '0' -> 0)."""
+    try:
+        val = open(f"/sys/class/net/{ifname}/{attr}").read().strip()
+    except OSError:
+        return None
+    m = re.search(r"(\d+)$", val)
+    return int(m.group(1)) if m else None
+
+
+def _read_port_id_sources():
+    """Attribute name(s) whose trailing integer locates a port, declared by the
+    pin map's ETH_PORT_ID_SOURCE and written to /usr/lib/igos/eth-port-id.source
+    at image-build time. Tried in order. Empty when the pin map declares none:
+    this helper carries no hardware assumptions of its own -- every board / SoC /
+    switch fact lives on the build side."""
+    try:
+        data = open("/usr/lib/igos/eth-port-id.source").read()
+    except OSError:
+        return []
+    return [s.strip() for s in data.replace(",", "\n").splitlines() if s.strip()]
+
+
+def _write_rescan_hint(ifname, name):
+    """Metadata drop so vyos-interface-rescan notices this interface. Content is
+    the MAC, used only as a hint -- never for naming."""
+    try:
+        mac = open(f"/sys/class/net/{ifname}/address").read().strip()
+    except OSError:
+        mac = ""
+    try:
+        os.makedirs("/run/udev/vyos", exist_ok=True)
+        with open(os.path.join("/run/udev/vyos", name), "w") as hf:
+            hf.write(mac)
+    except OSError:
+        pass
 
 
 def main():
@@ -28,72 +67,37 @@ def main():
     if not parent or not ifname:
         return 1
 
-    port = None
-
-    # ---------- 1. device-tree local-mac-address match -------------------
-    try:
-        mac = open(f"/sys/class/net/{ifname}/address").read().strip()
-    except OSError:
-        mac = ""
-
-    if mac:
-        mac_hex = mac.replace(":", "").lower()
-        ports_dir = f"/sys/class/net/{ifname}/device/of_node/ethernet-ports"
-        if os.path.isdir(ports_dir):
-            for p in sorted(glob.glob(os.path.join(ports_dir, "port@*"))):
-                if not os.path.isdir(p):
-                    continue
-                macfile = os.path.join(p, "local-mac-address")
-                if not os.path.isfile(macfile):
-                    continue
-                try:
-                    with open(macfile, "rb") as f:
-                        raw = f.read(6)
-                    p_hex = raw.hex()
-                except OSError:
-                    continue
-                if p_hex == mac_hex:
-                    hex_str = os.path.basename(p).split("port@", 1)[1]
-                    try:
-                        port = int(hex_str, 16)
-                    except ValueError:
-                        port = None
-                    break
-
-    # ---------- 2. fall back to kernel dev_port --------------------------
-    if port is None:
-        try:
-            val = open(f"/sys{devpath}/dev_port").read().strip()
-            port = int(val)
-        except (OSError, ValueError):
-            port = 0
-
-    key = f"{parent}#{port}"
-
+    # path -> name, generated from the pin map's ETH_INTERFACES at build time.
+    interfaces = {}
     try:
         with open("/usr/lib/igos/interfaces.conf") as f:
             for line in f:
                 line = line.strip()
                 if not line or line.startswith("#"):
                     continue
-                parts = line.split("=", 1)
-                if len(parts) != 2:
-                    continue
-                if parts[0] == key:
-                    target_name = parts[1]
-                    print(f'IGOS_ETH_PORT={key}')
-                    print(f'IGOS_IFNAME={target_name}')
-                    # Write rescan hint so vyos-interface-rescan sees this interface
-                    hint_dir = "/run/udev/vyos"
-                    os.makedirs(hint_dir, exist_ok=True)
-                    try:
-                        with open(os.path.join(hint_dir, target_name), "w") as hf:
-                            hf.write(mac if mac else "")
-                    except OSError:
-                        pass
-                    return 0
+                path, sep, name = line.partition("=")
+                if sep:
+                    interfaces[path.strip()] = name.strip()
     except OSError:
         return 1
+
+    # The pin map declares which sysfs attribute(s) locate a port
+    # (ETH_PORT_ID_SOURCE); try them in order and assign on the first whose
+    # <parent-devpath>#<port> is pinned above. All board / SoC / external-switch
+    # specifics stay on the build side; this helper keeps no hardware
+    # assumptions and never looks at MAC addresses.
+    for source in _read_port_id_sources():
+        port = _port_from_attr(ifname, source)
+        if port is None:
+            continue
+        key = f"{parent}#{port}"
+        name = interfaces.get(key)
+        if name is None:
+            continue
+        print(f"IGOS_ETH_PORT={key}")
+        print(f"IGOS_IFNAME={name}")
+        _write_rescan_hint(ifname, name)
+        return 0
 
     return 0
 

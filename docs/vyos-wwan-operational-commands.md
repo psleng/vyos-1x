@@ -521,7 +521,7 @@ interface then parks and ignores modem/SIM events until released.
 igos@igos:~$ change wwan wwan0 airplane-mode enable
 ```
 
-**Script:** `wwan_airplane.py enable --interface "$3"`
+**Script:** `wwan_airplane.py set_airplane_mode --interface "$3" --state=enable`
 
 > **Non-persistent by design.** Airplane mode is an operational action and is
 > **never written to the configuration** — a reboot always returns to normal
@@ -537,7 +537,7 @@ Power the modem RF back **on** and restart the connection from scratch.
 igos@igos:~$ change wwan wwan0 airplane-mode disable
 ```
 
-**Script:** `wwan_airplane.py disable --interface "$3"`
+**Script:** `wwan_airplane.py set_airplane_mode --interface "$3" --state=disable`
 
 > **Airplane mode vs `set … disable`:** airplane mode is a *runtime* radio
 > silence that keeps the interface configured; `set interfaces wwan <wwanN>
@@ -545,6 +545,46 @@ igos@igos:~$ change wwan wwan0 airplane-mode disable
 > recreates the interface when removed. Use airplane mode for transient RF-off
 > (transport, maintenance); use `disable` to keep the config but not run the
 > interface.
+
+---
+
+## SIM PIN Commands
+
+Manage the PIN lock on the **active, registered** SIM. These act on the
+physical SIM, so they run in op-mode; the resulting state is written back to the
+running configuration for the active slot so the manager can auto-unlock the SIM
+on future boots.
+
+> **Active, registered SIM only.** A PIN-locked SIM only reaches the registered
+> state after the manager unlocked it with the configured PIN, so that PIN is
+> proven correct — change/remove therefore cannot burn the SIM's PIN-retry
+> counter (which would drive it to PUK-lock). Insert/enable only the SIM you
+> want to modify in the active slot before running these.
+
+### `change wwan <wwanN> sim pin new <PIN>`
+
+Enable a PIN lock or change the existing PIN (4–8 digits) on the active SIM, and
+persist it to `interfaces wwan <wwanN> sim slot <slot> pin`.
+
+```
+igos@igos:~$ change wwan wwan0 sim pin new '1234'
+```
+
+**Script:** `wwan_pin.py update_pin --interface="$3" --pin="$7"`
+
+> **Enabling a PIN is retry-guarded.** Creating a lock verifies the PIN against
+> the SIM, so the command refuses to proceed if it cannot read the retry
+> counter or only one attempt remains (recover via PUK first).
+
+### `change wwan <wwanN> sim pin remove`
+
+Disable the PIN lock on the active SIM and clear the stored PIN from config.
+
+```
+igos@igos:~$ change wwan wwan0 sim pin remove
+```
+
+**Script:** `wwan_pin.py delete_pin --interface="$3"`
 
 ---
 
@@ -688,6 +728,9 @@ scripts use the `WWANClientSync` client library from
 | `delete_sms(message_id)` | integer | `{"status": "ok"}` | Delete specific SMS |
 | `delete_all_sms()` | — | `{"status": "ok"}` | Delete all SMS for active SIM |
 | `clear_data_usage(slot)` | integer | Status dict | Zero per-SIM data-usage counters for a slot |
+| `change_sim_pin(new_pin)` | string | `{"action": ..., "slot": N}` | Create or change the SIM PIN on the active, registered SIM |
+| `remove_sim_pin()` | — | `{"action": ..., "slot": N}` | Disable the SIM PIN lock on the active, registered SIM |
+| `SetAirplaneMode(enabled)` | boolean | string | Toggle airplane mode (RF off / RF on) on the interface |
 
 ### Control D-Bus Methods
 

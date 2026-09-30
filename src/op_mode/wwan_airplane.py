@@ -33,6 +33,7 @@ from scratch.
 """
 
 import sys
+from typing import Literal
 
 import vyos.opmode
 
@@ -73,30 +74,26 @@ def _set_airplane_mode(interface: str, enabled: bool) -> str:
 
 # ── Public op-mode entry points ─────────────────────────────────────────
 
-def enable(raw: bool, interface: str):
-    """Enter airplane mode: disconnect and power the modem RF off.
+def set_airplane_mode(interface: str, state: Literal['enable', 'disable']):
+    """Toggle airplane mode (RF off / RF on) on a WWAN interface.
 
-    CLI: change wwan <wwan0> airplane-mode enable
+    vyos.opmode.run() only registers functions whose names start with an
+    approved verb (show|clear|reset|restart|add|update|delete|generate|set|
+    renew|release|execute|import|mtr), so the enable/disable CLI nodes both
+    invoke this single "set"-verb entry point selected by --state.
+
+    CLI: change wwan <wwan0> airplane-mode <enable|disable>
     """
-    result = _set_airplane_mode(interface, True)
-    if raw:
-        return {'interface': interface, 'airplane_mode': True, 'result': result}
-    return (f'Airplane mode ENABLED on {interface} — bearer dropped and RF '
-            f'powered off.\n'
-            f'Not persistent: a reboot returns to normal operation. Run '
-            f'"change wwan {interface} airplane-mode disable" to reconnect.')
-
-
-def disable(raw: bool, interface: str):
-    """Exit airplane mode: power the modem RF back on and reconnect.
-
-    CLI: change wwan <wwan0> airplane-mode disable
-    """
-    result = _set_airplane_mode(interface, False)
-    if raw:
-        return {'interface': interface, 'airplane_mode': False, 'result': result}
-    return (f'Airplane mode DISABLED on {interface} — RF powered on, '
-            f'reconnecting from scratch.')
+    enabled = state == 'enable'
+    _set_airplane_mode(interface, enabled)
+    if enabled:
+        print(f'Airplane mode ENABLED on {interface} — bearer dropped and RF '
+              f'powered off.')
+        print('Not persistent: a reboot returns to normal operation. Run '
+              f'"change wwan {interface} airplane-mode disable" to reconnect.')
+    else:
+        print(f'Airplane mode DISABLED on {interface} — RF powered on, '
+              f'reconnecting from scratch.')
 
 
 if __name__ == '__main__':
