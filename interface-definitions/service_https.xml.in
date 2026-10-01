@@ -164,7 +164,18 @@
             </properties>
             <children>
               #include <include/pki/ca-certificate.xml.i>
-              #include <include/pki/certificate.xml.i>
+              <leafNode name="certificate">
+                <properties>
+                  <help>Certificate from TPM when enabled, otherwise PKI</help>
+                  <completionHelp>
+                    <script>${vyos_completion_dir}/list_https_certificates.py</script>
+                  </completionHelp>
+                  <valueHelp>
+                    <format>txt</format>
+                    <description>Certificate name in the selected store</description>
+                  </valueHelp>
+                </properties>
+              </leafNode>
               #include <include/pki/dh-params.xml.i>
             </children>
           </node>
