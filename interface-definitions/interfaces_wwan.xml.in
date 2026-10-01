@@ -1556,7 +1556,17 @@
               <priority>902</priority>
             </properties>
             <children>
-              <tagNode name="authorized-number">
+              <leafNode name="password">
+                <properties>
+                  <help>Shared password for SMS commands on this WWAN interface</help>
+                  <secret/>
+                  <constraint>
+                    <regex>\S+</regex>
+                  </constraint>
+                  <constraintErrorMessage>Password must be a single token of at least 9 characters with an uppercase letter, digit, and special character</constraintErrorMessage>
+                </properties>
+              </leafNode>
+              <leafNode name="authorized-number">
                 <properties>
                   <help>Authorized source phone number</help>
                   <completionHelp>
@@ -1569,21 +1579,10 @@
                   <constraint>
                     <regex>\+?[0-9]{6,20}</regex>
                   </constraint>
+                  <multi/>
                   <constraintErrorMessage>Allowed number must be a phone number (6-20 digits, optional leading +)</constraintErrorMessage>
                 </properties>
-                <children>
-                  <leafNode name="password">
-                    <properties>
-                      <help>Single-token password required before the REBOOT SMS command</help>
-                      <secret/>
-                      <constraint>
-                        <regex>\S+</regex>
-                      </constraint>
-                      <constraintErrorMessage>Password must be a single token of at least 9 characters with an uppercase letter, digit, and special character</constraintErrorMessage>
-                    </properties>
-                  </leafNode>
-                </children>
-              </tagNode>
+              </leafNode>
             </children>
           </node>
           <!-- ── Logging ─────────────────────────────────────────── -->

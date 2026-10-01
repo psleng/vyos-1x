@@ -49,7 +49,6 @@ import signal
 import socket
 import subprocess
 import time
-from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from logging.handlers import SysLogHandler
@@ -63,13 +62,12 @@ logger = logging.getLogger('vyos.wwan.sms_command_service')
 SMS_COMMAND_MAX_AGE = 60.0
 
 REBOOT_COMMAND_RE = re.compile(r'\s*(\S+)\s+REBOOT\s*')
+CELL_REBOOT_COMMAND_RE = re.compile(r'\s*(\S+)\s+CELL\s+REBOOT\s*')
 SHOW_SYSTEM_INFO_COMMAND_RE = re.compile(r'\s*SHOW\s+SYSTEM\s+INFO\s*')
 PING_COMMAND_RE = re.compile(r'\s*PING\s+(\S+)\s*')
-SHOW_WAN_IP_ADDRESS_COMMAND_RE = re.compile(r'\s*SHOW\s+WAN\s+IP\s+ADDRESS\s*')
+SHOW_WAN_STATUS_COMMAND_RE = re.compile(r'\s*SHOW\s+WAN\s+STATUS\s*')
 SHOW_CELL_STATUS_COMMAND_RE = re.compile(r'\s*SHOW\s+CELL\s+STATUS\s*')
 CELL_CONNECT_DISCONNECT_COMMAND_RE = re.compile(r'\s*CELL\s+(CONNECT|DISCONNECT)\s*')
-SHOW_WAN_FAILOVER_STATUS_COMMAND_RE = re.compile(r'\s*SHOW\s+WAN\s+FAILOVER\s+STATUS\s*')
-WAN_FAILOVER_STATUS_FILE = Path('/run/wwan/wan-failover-status.json')
 
 
 def _as_bool(value: str | None, default: bool = False) -> bool:
@@ -165,17 +163,21 @@ class SmsCommandService:
 
     def _execute_reboot(self) -> bool:
         try:
-            subprocess.run(
-                ['/usr/libexec/vyos/op_mode/powerctrl.py', '--yes', '--reboot'],
-                check=True,
+            result = subprocess.run(
+                ['/usr/bin/systemctl', 'reboot'],
+                check=False,
                 capture_output=True,
                 text=True,
                 timeout=10,
             )
-            return True
+            if result.returncode == 0:
+                return True
+            error = (result.stderr or result.stdout).strip()
+            logger.error('Failed to execute reboot (exit status %s): %s',
+                         result.returncode, error or 'no output')
         except (OSError, subprocess.SubprocessError) as err:
             logger.error('Failed to execute reboot: %s', err)
-            return False
+        return False
 
     @staticmethod
     def _system_info() -> str:
@@ -216,8 +218,9 @@ class SmsCommandService:
 
     @staticmethod
     def _interface_addresses(interface: str) -> str:
-        """Return live addresses for interfaces carrying default routes."""
+        """Return live WAN address, type, link, and failover status blocks."""
         interfaces = {interface}
+        route_metrics = {}
         try:
             routes = json.loads(subprocess.check_output(
                 ['/usr/bin/ip', '-j', 'route', 'show', 'table', 'main', 'default'],
@@ -226,13 +229,39 @@ class SmsCommandService:
             for route in routes:
                 if route.get('dev'):
                     interfaces.add(route['dev'])
+                    route_metrics[route['dev']] = route.get('metric', 0)
                 for nexthop in route.get('nexthops', []):
                     if nexthop.get('dev'):
                         interfaces.add(nexthop['dev'])
+                        route_metrics[nexthop['dev']] = nexthop.get('metric', 0)
         except (OSError, subprocess.SubprocessError, ValueError, TypeError):
             logger.warning('Failed to discover WAN interfaces from default routes')
 
-        addresses = {}
+        # Include addressed interfaces without a default route as well.  This
+        # lets SHOW WAN STATUS report an interface as Disable instead of
+        # silently omitting it when another WAN is active.
+        try:
+            addresses = json.loads(subprocess.check_output(
+                ['/usr/bin/ip', '-j', 'address', 'show'],
+                text=True, timeout=5,
+            ))
+            for link in addresses:
+                name = link.get('ifname')
+                if not name or name == 'lo' or name.startswith('pim'):
+                    continue
+                if any(addr.get('family') in ('inet', 'inet6')
+                       for addr in link.get('addr_info', [])):
+                    interfaces.add(name)
+        except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+            logger.warning('Failed to discover addressed interfaces')
+
+        ranked_interfaces = [name for name, _ in sorted(
+            route_metrics.items(), key=lambda item: (item[1], item[0]))
+        ]
+        route_rank = {name: position for position, name
+                      in enumerate(ranked_interfaces)}
+
+        records = []
         for current_interface in sorted(interfaces):
             try:
                 output = subprocess.check_output(
@@ -240,20 +269,68 @@ class SmsCommandService:
                     text=True, timeout=5,
                 )
             except (OSError, subprocess.SubprocessError):
-                addresses[current_interface] = ['unavailable']
-                continue
+                output = ''
             values_for_interface = []
             address_re = re.compile(
                 r'(?<![\w:])(?:\d{1,3}(?:\.\d{1,3}){3}|[0-9a-fA-F:]+)/(?:\d{1,3})'
             )
             for line in output.splitlines():
                 values_for_interface.extend(address_re.findall(line))
-            addresses[current_interface] = values_for_interface or ['unavailable']
+            try:
+                link = json.loads(subprocess.check_output(
+                    ['/usr/bin/ip', '-j', 'link', 'show', 'dev', current_interface],
+                    text=True, timeout=5))[0]
+                flags = link.get('flags', [])
+                status = str(link.get('operstate', 'UNKNOWN')).upper()
+                if 'UP' not in flags:
+                    status = 'DOWN'
+                elif 'LOWER_UP' in flags:
+                    status = 'UP'
+            except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+                status = 'UNKNOWN'
+            if current_interface.startswith('wwan'):
+                kind = 'Cellular'
+            elif current_interface.startswith(('wlan', 'wifi')):
+                kind = 'WLAN'
+            elif current_interface.startswith(('eth', 'enp', 'ens', 'eno')):
+                kind = 'Ethernet'
+            elif current_interface.startswith(('br', 'bond', 'ppp')):
+                kind = 'Virtual'
+            else:
+                kind = 'Other'
+            if current_interface in route_rank:
+                position = route_rank[current_interface] + 1
+                ordinal = {1: '1st', 2: '2nd', 3: '3rd'}.get(
+                    position, f'{position}th'
+                )
+                failover_status = (
+                    f'Active ({ordinal})' if position == 1
+                    else f'Standby ({ordinal})'
+                )
+            else:
+                failover_status = 'Disable'
+            records.append((current_interface, values_for_interface, kind,
+                            status, failover_status))
 
+        if not records:
+            return 'No WAN interface status'
+        records.sort(key=lambda record: (
+            route_rank.get(record[0], len(route_rank)), record[0]
+        ))
         lines = []
-        for interface, values in addresses.items():
-            lines.extend(f'{interface}: {address}' for address in values)
-        return '\n'.join(lines) if lines else 'No WAN interface addresses'
+        for name, values, kind, status, failover_status in records:
+            ipv4 = next((value for value in values if '.' in value), '-')
+            ipv6 = next((value for value in values if ':' in value), '-')
+            lines.extend((
+                f'WAN Interface: {name}',
+                f'IPv4 Address: {ipv4}',
+                f'IPv6 Address: {ipv6}',
+                f'Type: {kind}',
+                f'Status: {status}',
+                f'Failover: {failover_status}',
+                '',
+            ))
+        return '\n'.join(lines).rstrip()
 
     @staticmethod
     def _ping_host(host: str) -> str:
@@ -261,7 +338,7 @@ class SmsCommandService:
             result = subprocess.run(
                 ['/usr/bin/ping', '-c', '5',
                  '-i', '0.1', '-W', '5', host],
-                check=False, capture_output=True, text=True, timeout=10,
+                check=False, capture_output=True, text=True, timeout=30,
             )
             output = (result.stdout or result.stderr).strip()
             return '\n'.join(line.strip() for line in output.splitlines()) if output else 'FAILED, no output'
@@ -292,27 +369,6 @@ class SmsCommandService:
         audit(response)
         self._send_response(if_num, number, response)
 
-    def _handle_wan_failover_status(self, if_num, number, audit):
-        try:
-            status = json.loads(WAN_FAILOVER_STATUS_FILE.read_text())
-            pid = int(status.get('pid', 0))
-            if not status.get('enabled') or not pid:
-                response = 'Failover: DISABLED'
-            else:
-                try:
-                    os.kill(pid, 0)
-                except OSError:
-                    response = 'Failover: NOT RUNNING'
-                else:
-                    response = (f"Failover: ENABLED\n"
-                                f"Primary interface: {status.get('primary_interface', 'unknown')}\n"
-                                f"Primary state: {status.get('primary_state') or 'UNKNOWN'}\n"
-                                f"Active interface: {status.get('active_interface') or 'UNKNOWN'}")
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
-            response = 'Failover: NOT RUNNING'
-        audit(response.replace('\n', ' | '))
-        self._send_response(if_num, number, response)
-
     def _handle_ping(self, if_num, number, host, audit):
         response = f'PING {host}: {self._ping_host(host)}'
         audit(response)
@@ -320,11 +376,66 @@ class SmsCommandService:
 
     def _handle_reboot(self, if_num, number, audit):
         if self._execute_reboot():
-            audit('OK')
-            self._send_response(if_num, number, 'OK')
+            audit('SUCCESS')
+            self._send_response(if_num, number, 'SUCCESS')
         else:
-            audit('REBOOT FAILED')
-            self._send_response(if_num, number, 'REBOOT FAILED')
+            audit('FAILED')
+            self._send_response(if_num, number, 'FAILED')
+
+    def _handle_cell_reboot(self, if_num, number, audit):
+        """Issue the Telit module-reboot command to the receiving modem."""
+        try:
+            result = subprocess.run(
+                ['/usr/bin/mmcli', '--modem', str(if_num),
+                 '--command=AT#REBOOT'],
+                check=False, capture_output=True, text=True, timeout=10,
+            )
+            succeeded = result.returncode == 0
+            if not succeeded:
+                logger.error('AT#REBOOT failed for modem %s: %s',
+                             if_num, (result.stderr or result.stdout).strip())
+            else:
+                # AT#REBOOT drops the modem and causes it to re-enumerate.
+                # Wait for that lifecycle instead of guessing with a fixed
+                # delay, then use the manager's existing FSM path.
+                self._wait_for_modem_reenumeration(if_num)
+                self.client.reinitialize_modem(if_num)
+                succeeded = self.client.wait_for_bearer(
+                    if_num, target='connected', timeout=180, poll_interval=2
+                )
+                if not succeeded:
+                    logger.error('Cellular reconnection timed out for modem %s', if_num)
+        except (OSError, subprocess.SubprocessError, WWANError) as err:
+            logger.error('AT#REBOOT failed for modem %s: %s', if_num, err)
+            succeeded = False
+        response = 'SUCCESS' if succeeded else 'FAILED'
+        audit(response)
+        self._send_response(if_num, number, response)
+
+    @staticmethod
+    def _wait_for_modem_reenumeration(if_num, timeout=90):
+        """Wait for a rebooted modem to disappear and return on reappearance."""
+        deadline = time.monotonic() + timeout
+        disappeared = False
+        while time.monotonic() < deadline:
+            result = subprocess.run(
+                ['/usr/bin/mmcli', '--modem', str(if_num)],
+                check=False, capture_output=True, text=True, timeout=5,
+            )
+            available = result.returncode == 0
+            if not available:
+                disappeared = True
+                logger.info('Modem %s disappeared after AT#REBOOT', if_num)
+            elif disappeared:
+                logger.info('Modem %s reappeared; starting FSM reinitialization', if_num)
+                return
+            time.sleep(2)
+        if not disappeared:
+            logger.warning('Modem %s did not disappear; continuing with FSM reinitialization',
+                           if_num)
+        else:
+            logger.warning('Modem %s did not reappear within %ss; continuing with FSM reinitialization',
+                           if_num, timeout)
 
     def _handle_cell(self, if_num, number, action, audit):
         try:
@@ -336,14 +447,19 @@ class SmsCommandService:
             )
             output = (result.stdout or result.stderr).strip()
             if result.returncode != 0:
-                response = output or 'FAILED'
+                logger.warning(
+                    'Cellular %s failed on interface %s (exit status %s): %s',
+                    action.lower(), if_num, result.returncode,
+                    output or 'no output',
+                )
+                response = 'FAILED'
             else:
                 target = 'connected' if action == 'CONNECT' else 'disconnected'
                 verified = self._wait_bearer_status(if_num, target)
                 status = self.client.get_bearer_status(if_num)
                 logger.info('Cellular %s interface=%s bearer_status=%s verified=%s',
                             action.lower(), if_num, status, verified)
-                response = 'OK' if verified else 'FAILED'
+                response = 'SUCCESS' if verified else 'FAILED'
         except FileNotFoundError:
             # Unit-test/minimal environments may not contain the installed
             # op-mode script; retain the direct WWAN-client fallback there.
@@ -354,7 +470,7 @@ class SmsCommandService:
                 else:
                     verified = self.client.disconnect_bearer_and_wait(
                         if_num, timeout=30, poll_interval=0.5)
-                response = 'OK' if verified else 'FAILED'
+                response = 'SUCCESS' if verified else 'FAILED'
             except Exception as err:
                 logger.warning('Cellular %s failed on interface %s: %s', action.lower(), if_num, err)
                 response = 'FAILED'
@@ -411,9 +527,10 @@ class SmsCommandService:
 
         text = str(msg.get('text', ''))
         match = REBOOT_COMMAND_RE.fullmatch(text)
+        cell_reboot_match = CELL_REBOOT_COMMAND_RE.fullmatch(text)
         # Show the received message for audit purposes, while masking the
         # leading password used by REBOOT.
-        command = (re.sub(r'^(\s*)\S+(?=\s+REBOOT\s*$)',
+        command = (re.sub(r'^(\s*)\S+(?=\s+(?:REBOOT|CELL\s+REBOOT)\s*$)',
                           r'\1[PASSWORD]', text, flags=re.IGNORECASE)
                    .strip())
         if not command:
@@ -432,21 +549,53 @@ class SmsCommandService:
             return
 
         expected_password = self.cfg.authorized_numbers.get(if_name, {}).get(number)
-        if expected_password is None:
+        configured_passwords = set(
+            self.cfg.authorized_numbers.get(if_name, {}).values())
+        sender_whitelisted = expected_password is not None
+        password_authenticated = sender_whitelisted
+
+        if not sender_whitelisted and (match or cell_reboot_match):
+            password_authenticated = (
+                match.group(1) if match else cell_reboot_match.group(1)
+            ) in configured_passwords
+
+        # A password is optional for informational/control commands. If an
+        # authorized sender includes it anyway, accept and remove the prefix.
+        # REBOOT keeps its dedicated password-required syntax below.
+        if not match and not cell_reboot_match:
+            optional_password = re.match(r'^\s*(\S+)\s+(.+?)\s*$', text)
+            if optional_password:
+                supplied_password = optional_password.group(1)
+                valid_password = (sender_whitelisted
+                                  and hmac.compare_digest(supplied_password, expected_password))
+                if not sender_whitelisted:
+                    valid_password = supplied_password in configured_passwords
+                if valid_password:
+                    text = optional_password.group(2)
+                    command = text
+                    password_authenticated = True
+
+        # All commands require a configured password for non-whitelisted
+        # senders. Whitelisted senders may omit it for non-disruptive commands.
+        if not password_authenticated:
             audit('UNAUTHORIZED')
             self._send_response(if_num, number, 'UNAUTHORIZED')
+            return
+
+        if cell_reboot_match:
+            if not hmac.compare_digest(cell_reboot_match.group(1), expected_password):
+                audit('UNAUTHORIZED')
+                self._send_response(if_num, number, 'UNAUTHORIZED')
+                return
+            self._handle_cell_reboot(if_num, number, audit)
             return
 
         if SHOW_SYSTEM_INFO_COMMAND_RE.fullmatch(text):
             self._handle_system_info(if_num, number, audit)
             return
 
-        if SHOW_WAN_IP_ADDRESS_COMMAND_RE.fullmatch(text):
+        if SHOW_WAN_STATUS_COMMAND_RE.fullmatch(text):
             self._handle_interface_addresses(if_name, if_num, number, audit)
-            return
-
-        if SHOW_WAN_FAILOVER_STATUS_COMMAND_RE.fullmatch(text):
-            self._handle_wan_failover_status(if_num, number, audit)
             return
 
         if SHOW_CELL_STATUS_COMMAND_RE.fullmatch(text):

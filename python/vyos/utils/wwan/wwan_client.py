@@ -458,6 +458,14 @@ class WWANClient:
         except DBusError as exc:
             raise WWANError(f"SetAirplaneMode failed: {exc}") from exc
 
+    async def reinitialize_modem(self, interface_number: int) -> str:
+        """Re-run the WWAN manager's modem initialization path."""
+        iface = await self._get_iface(interface_number)
+        try:
+            return await iface.call_reinitialize_modem()
+        except DBusError as exc:
+            raise WWANError(f"ReinitializeModem failed: {exc}") from exc
+
     async def connect_bearer(self, interface_number: int) -> str:
         """Request bearer establishment (fire-and-forget).
 
@@ -1468,6 +1476,10 @@ class WWANClientSync:
         """Airplane mode toggle.  See :meth:`WWANClient.set_airplane_mode`."""
         return self._run(
             self._method("set_airplane_mode", interface_number, enabled))
+
+    def reinitialize_modem(self, interface_number: int) -> str:
+        """Re-run the WWAN manager's modem initialization path."""
+        return self._run(self._call("reinitialize_modem", interface_number))
 
     def connect_bearer(self, interface_number: int) -> str:
         """Fire-and-forget bearer connect.  See :meth:`WWANClient.connect_bearer`."""

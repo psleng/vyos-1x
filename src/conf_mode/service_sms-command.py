@@ -58,7 +58,7 @@ def get_config(config=None):
 
         allowed = [
             str(x).strip()
-            for x in (conf.list_nodes(sms_base + ['authorized-number']) or [])
+            for x in (conf.return_values(sms_base + ['authorized-number']) or [])
             if str(x).strip()
         ]
         if not allowed:
@@ -69,8 +69,28 @@ def get_config(config=None):
 
         enabled_interfaces.append(ifname)
         authorized_numbers[ifname] = {}
+        shared_password = conf.return_value(sms_base + ['password'])
+        configured_passwords = ({shared_password}
+                                if isinstance(shared_password, str)
+                                and shared_password else set())
+        password_errors = []
+        if shared_password:
+            if len(shared_password) < 9:
+                password_errors.append('at least 9 characters')
+            if not re.fullmatch(r'\S+', shared_password):
+                password_errors.append('no spaces')
+            if not re.search(r'[A-Z]', shared_password):
+                password_errors.append('at least one uppercase letter')
+            if not re.search(r'[0-9]', shared_password):
+                password_errors.append('at least one digit')
+            if not re.search(r'[^A-Za-z0-9]', shared_password):
+                password_errors.append('at least one special character')
+            if password_errors:
+                errors.append(
+                    f'Invalid SMS password for {ifname}: ' + ', '.join(password_errors)
+                )
         for number in allowed:
-            password = conf.return_value(sms_base + ['authorized-number', number, 'password'])
+            password = shared_password
             if not re.fullmatch(r'\+?[0-9]{6,20}', number):
                 errors.append(f'Invalid authorized number for {ifname}')
             password_errors = []

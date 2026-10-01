@@ -1850,6 +1850,32 @@ class InterfaceConfig(ServiceInterface):
             raise DBusError("com.igos.IgosModemManager.DisconnectionError", str(e))
 
     @method()
+    async def ReinitializeModem(self) -> 's':  # type: ignore[name-defined]  # noqa: F821, F722
+        """Re-run the manager's modem discovery/configuration path."""
+        try:
+            logger.info("Modem reinitialization requested",
+                        extra={'interface_number': self.interface_number})
+            await self.fsm.on_modem_found()
+            # AT#REBOOT can leave ModemManager disabled while the FSM still
+            # remembers its previous state.  Force the normal configuration
+            # cascade so Enable(True), SIM setup, and auto-connect are run.
+            from vyos.utils.wwan.interfaces_wwan_state_machine import ModemEvent
+            current_state = self.fsm.machine.current_state
+            reconfigurable_states = {
+                'CONNECTED', 'USAGE_MONITORING', 'REGISTERED_IDLE',
+                'FAILED', 'DISCONNECTED',
+            }
+            if self.fsm.config and current_state in reconfigurable_states:
+                self.fsm.transition(ModemEvent.RECONFIGURE)
+                await self.fsm._configure_modem_initial()
+            return f"Modem reinitialized on interface {self.interface_number}"
+        except Exception as error:
+            logger.error("Modem reinitialization failed",
+                         extra={'interface_number': self.interface_number,
+                                'error': str(error)})
+            raise DBusError("com.igos.IgosModemManager.ReinitializationError", str(error))
+
+    @method()
     async def SetAirplaneMode(self, enabled: 'b') -> 's':  # type: ignore[name-defined]  # noqa: F821, F722
         """Op-mode airplane toggle: RF off + park (True) or RF on + reconnect (False).
 
