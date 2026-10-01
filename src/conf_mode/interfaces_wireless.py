@@ -285,6 +285,14 @@ def generate(wifi):
 
         return None
 
+    # PSL: a board may provision an EXACT per-radio MAC in EEPROM (nvmem, exposed
+    # via perle-device-info). Apply it verbatim here so the LAA-mangling
+    # derivation below is skipped for provisioned radios.
+    if 'mac' not in wifi:
+        tmp = nxpwifiutils.provisioned_wifi_mac(wifi['ifname'])
+        if tmp:
+            wifi['mac'] = tmp
+
     if 'mac' not in wifi:
         # http://wiki.stocksy.co.uk/wiki/Multiple_SSIDs_with_hostapd
         # generate locally administered MAC address from used phy interface
