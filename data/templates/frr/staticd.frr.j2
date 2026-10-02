@@ -96,11 +96,23 @@ vrf {{ vrf }}
 {{ ip_prefix }} route 0.0.0.0/0 {{ interface }} tag 210 {{ interface_config.default_route_distance if interface_config.default_route_distance is vyos_defined }}
 {%     endfor %}
 {% endif %}
+{# IPv4 default routes from WWAN interfaces #}
+{% if wwan is vyos_defined %}
+{%     for interface, interface_config in wwan.items() %}
+{{ ip_prefix }} route 0.0.0.0/0 {{ interface }} tag 210 {{ interface_config.default_route_metric if interface_config.default_route_metric is vyos_defined }}
+{%     endfor %}
+{% endif %}
 {# IPv6 routing #}
 {% if route6 is vyos_defined %}
 {%     for prefix, prefix_config in route6.items() %}
 {{ static_routes(ipv6_prefix, prefix, prefix_config) }}
 {# j2lint: disable=jinja-statements-delimeter #}
+{%     endfor %}
+{% endif %}
+{# IPv6 default routes from WWAN interfaces #}
+{% if wwan is vyos_defined %}
+{%     for interface, interface_config in wwan.items() %}
+{{ ipv6_prefix }} route ::/0 {{ interface }} tag 210 {{ interface_config.default_route_metric if interface_config.default_route_metric is vyos_defined }}
 {%     endfor %}
 {% endif %}
 {% if vrf is vyos_defined %}

@@ -426,6 +426,29 @@ def get_pppoe_interfaces(conf, vrf=None):
 
     return pppoe_interfaces
 
+def get_wwan_interfaces(conf, vrf=None):
+    """ Common helper function to retrieve all WWAN (cellular) interfaces from
+    the current CLI session. The carrier default route(s) are installed through
+    FRR (zebra) as interface-scoped backup defaults - exactly like PPPoE - so
+    they must be rendered from configuration to survive an FRR reload. Only
+    interfaces in the requested VRF are returned (None = default VRF). """
+    wwan_interfaces = {}
+    conf.set_level([]) # required for list_nodes()
+    for ifname in conf.list_nodes(['interfaces', 'wwan']):
+        # always reset config level, as get_interface_dict() will alter it
+        conf.set_level([])
+        _, ifconfig = get_interface_dict(conf, ['interfaces', 'wwan'], ifname)
+
+        options = {}
+        if 'default_route_metric' in ifconfig:
+            options.update({'default_route_metric' : ifconfig['default_route_metric']})
+        if 'vrf' in ifconfig:
+            if vrf == ifconfig['vrf']: wwan_interfaces.update({ifname : options})
+        else:
+            if vrf is None: wwan_interfaces.update({ifname : options})
+
+    return wwan_interfaces
+
 def get_interface_dict(config, base, ifname='', recursive_defaults=True, with_pki=False):
     """
     Common utility function to retrieve and mangle the interfaces configuration

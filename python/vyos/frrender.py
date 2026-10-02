@@ -30,6 +30,7 @@ from vyos.config import Config
 from vyos.config import config_dict_merge
 from vyos.configdict import get_dhcp_interfaces
 from vyos.configdict import get_pppoe_interfaces
+from vyos.configdict import get_wwan_interfaces
 from vyos.defaults import frr_debug_enable
 from vyos.defaults import static_route_dhcp_interfaces_path
 from vyos.utils.dict import dict_search
@@ -488,6 +489,9 @@ def get_frrender_dict(conf: Config, argv=None) -> dict:
     tmp = get_pppoe_interfaces(conf)
     if tmp: dict_set_nested('static.pppoe', tmp, dict)
 
+    tmp = get_wwan_interfaces(conf)
+    if tmp: dict_set_nested('static.wwan', tmp, dict)
+
     # keep a re-usable list of dependent VRFs
     dependent_vrfs_default = {}
     if 'bgp' in dict:
@@ -623,6 +627,9 @@ def get_frrender_dict(conf: Config, argv=None) -> dict:
 
             tmp = get_pppoe_interfaces(conf, vrf_name)
             if tmp: dict_set_nested(f'name.{vrf_name}.protocols.static.pppoe', tmp, vrf)
+
+            tmp = get_wwan_interfaces(conf, vrf_name)
+            if tmp: dict_set_nested(f'name.{vrf_name}.protocols.static.wwan', tmp, vrf)
 
             vrf_vni_path = ['vrf', 'name', vrf_name, 'vni']
             if conf.exists(vrf_vni_path):
