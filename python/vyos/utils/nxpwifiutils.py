@@ -7,6 +7,13 @@ import subprocess
 import re
 
 
+# Build-time marker that this image provisions per-radio wifi MACs from nvmem.
+# build-vyos-image writes it from the flavor pinmap WIFI_MAC_NVMEM_SOURCE /
+# WIFI_INTERFACES; it is absent on Perle builds without an identity EEPROM
+# (e.g. the AM64x EVM) -- the signal to leave the module's own MAC alone.
+WIFI_INTERFACES_CONF = '/usr/lib/igos/wifi-interfaces.conf'
+
+
 def pcie_wifi_nxp_model() -> str:
     '''
     Returns NXP wifi PCIE model if one is installed, else ""
@@ -176,7 +183,7 @@ def provisioned_wifi_mac(ifname: str) -> str:
     Returns '' when there is no mapping, no hardware, or anything is unreadable,
     so the caller falls back to the derived address.
     '''
-    conf = '/usr/lib/igos/wifi-interfaces.conf'
+    conf = WIFI_INTERFACES_CONF
     source = ''
     cell = ''
     try:
@@ -214,3 +221,25 @@ def provisioned_wifi_mac(ifname: str) -> str:
         return ''
 
     return ':'.join(f'{b:02x}' for b in raw)
+
+
+def module_assigns_own_mac(wifi: dict) -> bool:
+    '''
+    PSL: True when VyOS must leave an NXP radio's MAC alone so the moal module's
+    self-assigned address stands.
+
+    This holds on Perle builds that do NOT provision per-radio MACs from nvmem:
+    there is no WIFI_INTERFACES_CONF because the flavor pinmap declared no
+    WIFI_MAC_NVMEM_SOURCE / WIFI_INTERFACES (e.g. the AM64x EVM, which has no
+    identity EEPROM). generate() then applies the module's existing MAC verbatim
+    instead of deriving a locally administered one.
+
+    Returns False for non-NXP hardware (upstream LAA derivation kept) and when
+    nvmem provisioning IS configured (the verbatim nvmem MAC, or the derived MAC
+    for an unprovisioned radio, is used as before).
+    '''
+    if 'mac' in wifi:
+        return False
+    if not pcie_wifi_nxp_model():
+        return False
+    return not os.path.exists(WIFI_INTERFACES_CONF)

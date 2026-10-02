@@ -302,20 +302,29 @@ def generate(wifi):
                 # some PHYs tend to have multiple interfaces and thus supply multiple MAC
                 # addresses - we only need the first one for our calculation
                 tmp = f.readline().rstrip()
-        tmp = EUI(tmp).value
-        # mask last nibble from the MAC address
-        tmp &= 0xfffffffffff0
-        # set locally administered bit in MAC address
-        tmp |= 0x020000000000
-        # we now need to add an offset to our MAC address indicating this
-        # subinterfaces index
-        tmp += int(findall(r'\d+', interface)[0])
+        if nxpwifiutils.module_assigns_own_mac(wifi):
+            # PSL: Perle build without nvmem MAC provisioning (no
+            # wifi-interfaces.conf, e.g. the AM64x EVM with no identity EEPROM):
+            # keep the NXP module's self-assigned MAC verbatim instead of
+            # deriving a locally administered one.
+            mac = EUI(tmp)
+            mac.dialect = mac_unix_expanded
+            wifi['mac'] = str(mac)
+        else:
+            tmp = EUI(tmp).value
+            # mask last nibble from the MAC address
+            tmp &= 0xfffffffffff0
+            # set locally administered bit in MAC address
+            tmp |= 0x020000000000
+            # we now need to add an offset to our MAC address indicating this
+            # subinterfaces index
+            tmp += int(findall(r'\d+', interface)[0])
 
-        # convert integer to "real" MAC address representation
-        mac = EUI(hex(tmp).split('x')[-1])
-        # change dialect to use : as delimiter instead of -
-        mac.dialect = mac_unix_expanded
-        wifi['mac'] = str(mac)
+            # convert integer to "real" MAC address representation
+            mac = EUI(hex(tmp).split('x')[-1])
+            # change dialect to use : as delimiter instead of -
+            mac.dialect = mac_unix_expanded
+            wifi['mac'] = str(mac)
 
     # render appropriate new config files depending on access-point or station mode
     if wifi['type'] == 'access-point':
