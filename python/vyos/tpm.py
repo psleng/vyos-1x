@@ -202,6 +202,7 @@ from vyos.utils.process import cmd
 tpm_mountpoint = "/run/tpm-state"
 tpm_partition = "/dev/mmcblk0p3"
 tpm_enabled_path = f"{tpm_mountpoint}/boot/.tpm.enabled"
+tpm_enabled_path_ram = "/tmp/.tpm_enabled"
 tpm_dev_path = "/sys/class/tpm/tpm0"
 
 def mount_tpm_state():
@@ -255,15 +256,24 @@ def tpm_exist():
     return os.path.exists(tpm_dev_path)
 
 def tpm_enabled():
-    """
-     Args:
+    """ 
+     Args:  
         none
     Returns:
         True if tpm support enabled by user, False otherwise.
-    """
+    """ 
     try:
         mount_tpm_state()
-        return os.path.exists(tpm_enabled_path)
+
+        enabled = os.path.exists(tpm_enabled_path)
+
+        if enabled:
+            cmd(f'touch {tpm_enabled_path_ram}')
+        else:
+            cmd(f'rm -f {tpm_enabled_path_ram}')
+
+        return enabled
+    
     finally:
         unmount_tpm_state()
 
@@ -297,6 +307,7 @@ def tpm_enable():
         )
 
         cmd(f'touch {tpm_enabled_path}')
+        cmd(f'touch {tpm_enabled_path_ram}')
 
     finally:
         unmount_tpm_state()
@@ -312,5 +323,7 @@ def tpm_disable():
     try:
         mount_tpm_state()
         cmd(f'rm -f {tpm_enabled_path}')
+        cmd(f'rm -f {tpm_enabled_path_ram}')
+
     finally:
         unmount_tpm_state()
