@@ -42,6 +42,7 @@ from vyos.tpm_pki import validate_certificate_against_tpm_priv_key
 from vyos.template import render
 from vyos.utils.dict import dict_search
 from vyos.utils.process import call
+from vyos.utils.process import cmd
 from vyos.utils.process import is_systemd_service_active
 from vyos.utils.network import check_port_availability
 from vyos.utils.network import is_listen_port_bind_service
@@ -109,16 +110,12 @@ def verify(https):
         if tpm_exist() and tpm_enabled():
 
             try:
-                nginx_user = pwd.getpwnam(user)
-                tss_group = grp.getgrnam('tss')
+                pwd.getpwnam(user)
+                grp.getgrnam('tss')
             except KeyError as error:
                 raise ConfigError(
                     'Nginx TPM access requires the www-data user and tss group!'
                 ) from error
-            if tss_group.gr_gid not in os.getgrouplist(user, nginx_user.pw_gid):
-                raise ConfigError(
-                    'Add www-data to the tss group to use a TPM certificate with nginx!'
-                )
 
             cert_path = get_path_str('cert', 'pem', cert_name)
             key_path = get_path_str('cert', 'key', cert_name)
@@ -280,7 +277,25 @@ def generate(https):
     return None
 
 
+def ensure_tpm_group_membership():
+    nginx_user = pwd.getpwnam(user)
+    tss_group = grp.getgrnam('tss')
+    if tss_group.gr_gid in os.getgrouplist(user, nginx_user.pw_gid):
+        return False
+
+    cmd(
+        ['/usr/sbin/usermod', '-aG', 'tss', user],
+        raising=ConfigError,
+        message='Failed to add www-data to the tss group',
+    )
+    return True
+
+
 def apply(https):
+    if https is not None and https.get('tpm_required'):
+        if ensure_tpm_group_membership():
+            https['nginx_restart_required'] = True
+
     # Reload systemd manager configuration
     call('systemctl daemon-reload')
     http_api_service_name = 'vyos-http-api.service'
