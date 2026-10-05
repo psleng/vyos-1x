@@ -9,9 +9,9 @@ server {
 {% endif %}
 
 server {
-    # Always listen on 127.0.0.1
-    listen 127.0.0.1:{{ port }} ssl;
 {% if listen_address is vyos_defined %}
+    # Always listen on 127.0.0.1 if there is a listen_address defiened, to allow local access to the API
+    listen 127.0.0.1:{{ port }} ssl;
 {%     for address in listen_address %}
     listen {{ address | bracketize_ipv6 }}:{{ port }} ssl;
 {%     endfor %}
