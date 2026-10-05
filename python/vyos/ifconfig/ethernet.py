@@ -245,10 +245,18 @@ class EthernetIf(Interface):
         cmd = f'ethtool --change {ifname}'
         try:
             if speed == 'auto' or duplex == 'auto':
-                cmd += ' autoneg on'
+                self._cmd(f'{cmd} autoneg on')
+                # Enabling the autoneg bit does not restart link negotiation on
+                # every PHY/MAC (e.g. TI CPSW), so a forced->auto change would
+                # otherwise only take effect after a reboot. Restart
+                # auto-negotiation to apply it live; drivers that do not
+                # implement this report an error which is safe to ignore.
+                try:
+                    self._cmd(f'ethtool --negotiate {ifname}')
+                except Exception:
+                    pass
             else:
-                cmd += f' speed {speed} duplex {duplex} autoneg off'
-            return self._cmd(cmd)
+                self._cmd(f'{cmd} speed {speed} duplex {duplex} autoneg off')
         except PermissionError:
             # Some NICs do not tell that they don't support settings speed/duplex,
             # but they do not actually support it either.
