@@ -202,7 +202,7 @@ from vyos.utils.process import cmd
 tpm_mountpoint = "/run/tpm-state"
 tpm_partition = "/dev/mmcblk0p3"
 tpm_enabled_path = f"{tpm_mountpoint}/boot/.tpm.enabled"
-tpm_enabled_path_ram = "/tmp/.tpm_enabled"
+tpm_enabled_path_ram = "/tmp/.tpm.enabled"
 tpm_dev_path = "/sys/class/tpm/tpm0"
 
 def mount_tpm_state():
