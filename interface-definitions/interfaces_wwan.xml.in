@@ -239,10 +239,10 @@
           <!-- ── Default route metric ────────────────────────────── -->
           <leafNode name="default-route-metric">
             <properties>
-              <help>Metric for the carrier-assigned default route(s) installed on this interface</help>
+              <help>Administrative distance for the carrier default route(s) installed on this interface</help>
               <valueHelp>
                 <format>u32:0-255</format>
-                <description>Route metric; lower wins. Default 220 keeps cellular below a wired primary (failover/static=1, DHCP=210)</description>
+                <description>Administrative distance; lower wins. Default 220 keeps cellular below a wired primary (static=1, DHCP=210)</description>
               </valueHelp>
               <constraint>
                 <validator name="numeric" argument="--range 0-255"/>

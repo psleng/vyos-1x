@@ -35,7 +35,7 @@ interfaces
         ├── network-mode <auto|lte|5g|5g-only|3g|2g>      # modem-level RAT selection
         ├── network-time                                  # NITZ → system clock (opt-in; presence enables; NAS signaling, no data traffic)
         │     └── update-interval <300-2592000>           # re-sync cadence for drift correction, s (default: 3600)
-        ├── default-route-metric <0-255>                  # metric for the FSM-installed carrier default route(s) (default: 220; keeps cellular below a wired primary — failover/static=1, DHCP=210)
+        ├── default-route-metric <0-255>                  # administrative distance for the FSM-installed carrier default route(s) via FRR (default: 220; keeps cellular below a wired primary — static=1, DHCP=210)
         │
         ├── ip                                            # IPv4 routing parameters (standard VyOS interface options; ARP/broadcast knobs are inert on a point-to-point cellular bearer)
         │     ├── adjust-mss <bytes|clamp-mss-to-pmtu>

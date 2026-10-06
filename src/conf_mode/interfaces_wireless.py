@@ -37,6 +37,7 @@ from vyos.template import render
 from vyos.utils.dict import dict_search
 from vyos.utils.kernel import check_kmod
 from vyos.utils.process import call
+from vyos.utils.process import cmd
 from vyos.utils.process import is_systemd_service_active
 from vyos.utils.process import is_systemd_service_running
 from vyos.utils.network import interface_exists
@@ -142,6 +143,19 @@ def get_config(config=None):
 
     return wifi
 
+def wifi_phy_supports_6ghz(phy):
+    # Return True/False if the PHY does (not) provide a 6 GHz band, or None when
+    # the capability cannot be determined (e.g. "iw" unavailable).
+    try:
+        info = cmd(f'iw phy {phy} info')
+    except Exception:
+        return None
+    frequencies = [int(f) for f in findall(r'(\d+)(?:\.\d+)?\s+MHz', info)]
+    if not frequencies:
+        return None
+    # The 6 GHz band spans 5925-7125 MHz
+    return any(freq >= 5925 for freq in frequencies)
+
 def verify(wifi):
     if 'deleted' in wifi:
         verify_bridge_delete(wifi)
@@ -193,18 +207,45 @@ def verify(wifi):
             if 'channel_set_width' not in wifi['capabilities']['he']:
                 raise ConfigError('Channel width must be configured!')
 
-        # op_modes drawn from:
-        # https://w1.fi/cgit/hostap/tree/src/common/ieee802_11_common.c?id=195cc3d919503fb0d699d9a56a58a72602b25f51#n1525
-        # 802.11ax (WiFi-6e - HE) can use up to 160MHz bandwidth channels
-        six_ghz_op_modes_he = ['131', '132', '133', '134', '135']
-        # 802.11be (WiFi-7 - EHT) can use up to 320MHz bandwidth channels
-        six_ghz_op_modes_eht = six_ghz_op_modes_he.append('137')
-        if 'security' in wifi and 'wpa' in wifi['security'] and 'mode' in wifi['security']['wpa']:
-            if wifi['security']['wpa']['mode'] == 'wpa3':
-                if 'he' in wifi['capabilities']:
-                    if wifi['capabilities']['he']['channel_set_width'] in six_ghz_op_modes_he:
-                        if 'mgmt_frame_protection' not in wifi or wifi['mgmt_frame_protection'] != 'required':
-                            raise ConfigError('Management Frame Protection (MFP) is required with WPA3 at 6GHz! Consider also enabling Beacon Frame Protection (BFP) if your device supports it.')
+            # Map the 802.11ax (HE) operating class, configured through
+            # "channel-set-width", to its radio band. op_classes drawn from
+            # IEEE 802.11 Table E-4 / hostapd global_op_class:
+            # https://w1.fi/cgit/hostap/tree/src/common/ieee802_11_common.c
+            he_op_class_band = {
+                '81': '2.4', '83': '2.4', '84': '2.4',
+                '115': '5', '116': '5', '117': '5', '118': '5', '119': '5',
+                '120': '5', '121': '5', '122': '5', '123': '5', '124': '5',
+                '125': '5', '126': '5', '127': '5', '128': '5', '129': '5',
+                '130': '5',
+                '131': '6', '132': '6', '133': '6', '134': '6', '135': '6',
+            }
+            op_class = wifi['capabilities']['he']['channel_set_width']
+            he_band = he_op_class_band.get(op_class)
+            # channel 0 selects Automatic Channel Selection (ACS)
+            channel = int(wifi.get('channel', 0))
+
+            band_channel_valid = {
+                '2.4': 1 <= channel <= 14,
+                '5': 34 <= channel <= 177,
+                '6': 1 <= channel <= 233,
+            }
+            if channel != 0 and he_band is not None and not band_channel_valid[he_band]:
+                raise ConfigError(
+                    f'Channel {channel} is not valid for the selected {he_band} GHz '
+                    f'802.11ax operating class (channel-set-width {op_class})!')
+
+            # A 6 GHz operating class can only work on a radio that actually
+            # provides a 6 GHz band - reject it otherwise instead of rendering a
+            # hostapd configuration the hardware cannot honor.
+            if he_band == '6' and wifi_phy_supports_6ghz(physical_device) is False:
+                raise ConfigError(
+                    f'Physical device "{physical_device}" does not provide a 6 GHz '
+                    f'band required by 802.11ax operating class {op_class}!')
+
+            # Management Frame Protection (MFP) is mandatory for WPA3 in 6 GHz
+            if dict_search('security.wpa.mode', wifi) == 'wpa3' and he_band == '6':
+                if wifi.get('mgmt_frame_protection') != 'required':
+                    raise ConfigError('Management Frame Protection (MFP) is required with WPA3 at 6GHz! Consider also enabling Beacon Frame Protection (BFP) if your device supports it.')
 
     if 'security' in wifi:
         if {'wep', 'wpa'} <= set(wifi.get('security', {})):
@@ -285,6 +326,14 @@ def generate(wifi):
 
         return None
 
+    # PSL: a board may provision an EXACT per-radio MAC in EEPROM (nvmem, exposed
+    # via perle-device-info). Apply it verbatim here so the LAA-mangling
+    # derivation below is skipped for provisioned radios.
+    if 'mac' not in wifi:
+        tmp = nxpwifiutils.provisioned_wifi_mac(wifi['ifname'])
+        if tmp:
+            wifi['mac'] = tmp
+
     if 'mac' not in wifi:
         # http://wiki.stocksy.co.uk/wiki/Multiple_SSIDs_with_hostapd
         # generate locally administered MAC address from used phy interface
@@ -294,20 +343,29 @@ def generate(wifi):
                 # some PHYs tend to have multiple interfaces and thus supply multiple MAC
                 # addresses - we only need the first one for our calculation
                 tmp = f.readline().rstrip()
-        tmp = EUI(tmp).value
-        # mask last nibble from the MAC address
-        tmp &= 0xfffffffffff0
-        # set locally administered bit in MAC address
-        tmp |= 0x020000000000
-        # we now need to add an offset to our MAC address indicating this
-        # subinterfaces index
-        tmp += int(findall(r'\d+', interface)[0])
+        if nxpwifiutils.module_assigns_own_mac(wifi):
+            # PSL: Perle build without nvmem MAC provisioning (no
+            # wifi-interfaces.conf, e.g. the AM64x EVM with no identity EEPROM):
+            # keep the NXP module's self-assigned MAC verbatim instead of
+            # deriving a locally administered one.
+            mac = EUI(tmp)
+            mac.dialect = mac_unix_expanded
+            wifi['mac'] = str(mac)
+        else:
+            tmp = EUI(tmp).value
+            # mask last nibble from the MAC address
+            tmp &= 0xfffffffffff0
+            # set locally administered bit in MAC address
+            tmp |= 0x020000000000
+            # we now need to add an offset to our MAC address indicating this
+            # subinterfaces index
+            tmp += int(findall(r'\d+', interface)[0])
 
-        # convert integer to "real" MAC address representation
-        mac = EUI(hex(tmp).split('x')[-1])
-        # change dialect to use : as delimiter instead of -
-        mac.dialect = mac_unix_expanded
-        wifi['mac'] = str(mac)
+            # convert integer to "real" MAC address representation
+            mac = EUI(hex(tmp).split('x')[-1])
+            # change dialect to use : as delimiter instead of -
+            mac.dialect = mac_unix_expanded
+            wifi['mac'] = str(mac)
 
     # render appropriate new config files depending on access-point or station mode
     if wifi['type'] == 'access-point':
