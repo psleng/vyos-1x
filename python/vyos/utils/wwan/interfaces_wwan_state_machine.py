@@ -4131,6 +4131,18 @@ class ModemStateMachine:
             # a misleading APN connect failure with no failover.
             registered = await self._wait_for_stable_registration()
             if not registered:
+                # A queued config change (restart-worthy, e.g. network-mode)
+                # superseded this attempt and made the wait bail early.  Don't
+                # treat it as a registration failure or run SIM failover — just
+                # settle into FAILED so the deferred reconfigure fires and
+                # applies the new config immediately.
+                if self._pending_reconfigure:
+                    logger.info(
+                        "Connection cascade superseded by a pending configuration "
+                        "change — settling to apply it",
+                        extra={'interface_number': self.interface_number})
+                    self.transition(ModemEvent.CONNECTION_FAILED)
+                    return
                 logger.warning(
                     "Modem did not reach a stable REGISTERED state — aborting connection cascade",
                     extra={'interface_number': self.interface_number})
@@ -5613,6 +5625,16 @@ class ModemStateMachine:
         consecutive = 0
 
         while time.time() < deadline:
+            # A config commit that landed mid-cascade (e.g. a network-mode
+            # revert) is queued as _pending_reconfigure and cannot be applied
+            # until this wait returns.  Bail now instead of burning the full
+            # registration timeout on a superseded attempt — the caller aborts
+            # the cascade and the deferred reconfigure runs immediately.
+            if self._pending_reconfigure:
+                logger.info("Pending configuration change — abandoning stable-"
+                           "registration wait to apply it now",
+                           extra={'interface_number': self.interface_number})
+                return False
             try:
                 props = self.proxy.get_interface("org.freedesktop.DBus.Properties")
                 state_variant = await props.call_get(MODEM_INTERFACE, "State")
@@ -9998,7 +10020,10 @@ class ModemStateMachine:
                         return
 
                 modem_iface = self.proxy.get_interface(MODEM_INTERFACE)
-                await modem_iface.call_set_current_modes((allowed, preferred))
+                # dbus-next marshals a DBus '(uu)' STRUCT from a Python list,
+                # NOT a tuple — passing a tuple raises SignatureBodyMismatchError
+                # and the mode write never reaches the modem.
+                await modem_iface.call_set_current_modes([allowed, preferred])
                 await asyncio.sleep(2)
 
                 logger.info("Network mode configured successfully",
