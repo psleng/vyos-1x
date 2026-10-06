@@ -552,6 +552,9 @@ start ()
     chgrp vyattacfg /var/run/vyatta /var/log/vyatta
     chmod 775 /var/run/vyatta /var/log/vyatta
 
+    log_success_msg "TPM state: $(python3 -c 'from vyos.tpm import tpm_enabled; \
+        print("enabled" if tpm_enabled() else "disabled")')" ``
+
     log_daemon_msg "Waiting for NICs to settle down"
     # On boot time udev might take a long time to reorder nic's, this will ensure that
     # all udev activity is completed and all nics presented at boot-time will have their
