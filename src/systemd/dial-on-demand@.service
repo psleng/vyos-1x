@@ -1,7 +1,6 @@
 [Unit]
 Description=WWAN Dial On Demand
 After=ModemManager.service
-Requires=ModemManager.service
 
 [Service]
 Type=simple
