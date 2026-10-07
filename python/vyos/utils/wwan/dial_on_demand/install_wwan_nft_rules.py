@@ -48,6 +48,56 @@ async def async_run_nft_cmd(cmd=''):
     stdout, stderr = await proc.communicate()
 
 
+def standalone_queue_num(interface):
+    # When no load-balancing wan rule governs this interface there is no user
+    # rule number to reuse as the NFQUEUE id, so derive a deterministic one from
+    # the wwan index (wwan0 -> 1, wwan1 -> 2, ...). The consumer reads the queue
+    # number back from the '{interface}_raw_{queue}' table name, so producer and
+    # consumer stay in sync.
+    try:
+        return int(interface[len('wwan'):]) + 1
+    except (ValueError, IndexError):
+        return 1
+
+
+def basic_nft_commands(interface, queue_num):
+    # Drop every IPv6 frame egressing wwanX BEFORE the NFQUEUE rule so IPv6
+    # chatter is discarded instead of being queued (queuing would trigger /
+    # hold a dial-on-demand bring-up).
+    return f'''
+    add table inet {interface}_raw_{queue_num}
+    add chain inet {interface}_raw_{queue_num} output {{ type filter hook output priority raw; policy accept; }}
+    add rule inet {interface}_raw_{queue_num} output oifname {interface} meta nfproto ipv6 drop
+    add rule inet {interface}_raw_{queue_num} output oifname {interface} queue num {queue_num}
+    add chain inet {interface}_raw_{queue_num} prerouting {{ type filter hook prerouting priority raw; policy accept; }}
+    '''
+
+
+async def generate_standalone_nft_rules(interface='wwan0'):
+    # Standalone dial-on-demand (no load-balancing wan rules): intercept
+    # router-originated (local) traffic leaving the wwan interface via the RAW
+    # output hook, and divert LAN->WAN routed traffic whose FIB egress resolves
+    # to the wwan interface via the RAW prerouting hook. Both go to NFQUEUE so
+    # the on-demand trigger can bring the modem up.
+    queue_num = standalone_queue_num(interface)
+    physical_interfaces = f"{{ {', '.join(get_physical_interfaces())} }}"
+    commands = basic_nft_commands(interface, queue_num)
+    # NOTE: forwarded IPv6 destined for wwanX is dropped persistently by the
+    # dial-on-demand prerouting guard in src/conf_mode/interfaces_wwan.py
+    # (below `raw` priority, so before this queue), not here.
+    commands += (
+        f'add rule inet {interface}_raw_{queue_num} prerouting '
+        f'iifname {physical_interfaces} fib daddr oifname "{interface}" '
+        f'queue num {queue_num}\n'
+    )
+    try:
+        logger.info("Standalone command to install: %s", commands)
+        await async_run_nft_cmd(commands)
+        logger.info("Generated standalone nft rules...installing now")
+    except asyncio.CancelledError:
+        raise
+
+
 async def generate_nft_rules(interface='wwan0'):
     logger.info("Start generating nft rules.")
     config = get_config()
@@ -63,12 +113,15 @@ async def generate_nft_rules(interface='wwan0'):
                 if rule_num in tests and iface in rule.get('interface', {})
             ]
 
+    # No load-balancing wan rules: install standalone RAW intercept rules so
+    # dial-on-demand still works without WLB failover/load-sharing configured.
+    if not matching:
+        await generate_standalone_nft_rules(interface)
+        return
+
     failover = False
 
     commands = f''''''
-    # test lines for ip6 frame drops
-    "add rule inet {interface}_raw_{rule_num} output oifname {interface} ip6 daddr {{ ff00::/8, fe80::/10 }} accept"
-    "add rule inet {interface}_raw_{rule_num} prerouting ip6 daddr {{ ff00::/8, fe80::/10 }} accept"
     for rule_num in matching:
         basic_nft_commands = f'''
         add table inet {interface}_raw_{rule_num}
@@ -81,7 +134,6 @@ async def generate_nft_rules(interface='wwan0'):
         inbound_interface = config.get('rule', {}).get(rule_num, {}).get('inbound_interface', {})
 
         if failover is False or inbound_interface == 'any':
-            "add rule inet {interface}_raw_{rule_num} prerouting iifname {physical_interfaces} queue num {rule_num}"
             physical_interfaces = f"{{ {', '.join(get_physical_interfaces())} }}"
             commands = f'''add rule inet {interface}_raw_{rule_num} prerouting iifname {physical_interfaces} fib daddr oifname "{interface}" queue num {rule_num}
             '''
@@ -89,6 +141,7 @@ async def generate_nft_rules(interface='wwan0'):
             commands = f'''add rule inet {interface}_raw_{rule_num} prerouting iifname {{ {inbound_interface} }} fib daddr oifname "{interface}" queue num {rule_num}
             '''
         try:
+            logger.info("Command to install: %s", basic_nft_commands + commands)
             await async_run_nft_cmd(basic_nft_commands + commands)
             logger.info("Generated nft rules...installing now")
         except asyncio.CancelledError:
