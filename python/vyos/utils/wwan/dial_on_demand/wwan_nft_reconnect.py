@@ -25,27 +25,6 @@ shutdown_event = asyncio.Event()
 
 packet_queue = asyncio.Queue(maxsize=1024)
 modem_ready_event = asyncio.Event()
-dhcp_success_event = asyncio.Event()
-renew_dhcp_event = asyncio.Event()
-dhcp_done_event = asyncio.Event()
-accept_packet_event = asyncio.Event()
-
-# async function wrapper for subprocess commands with a timeout
-async def run_cmd(*cmd, timeout=CONNECT_TIMEOUT):
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE)
-
-    try:
-        async with asyncio.timeout(timeout):
-            stdout, stderr = await proc.communicate()
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.communicate()
-        return -1, "", "timeout"
-    #print(stdout.decode())
-    return proc.returncode, stdout.decode(), stderr.decode()
 
 # returns dict {interface: modem_id}
 
@@ -98,8 +77,6 @@ class PacketHandler:
     def __init__(self, interface='wwan0', connect_timeout=30, loop=None, client=None):
         self.interface = interface
         self.connect_timeout = connect_timeout
-        self.modem_id = get_all_wwan_options()[self.interface]
-        self.queue_num = get_interface_queue_num(self.interface)
         self.client = client
         self.tasks = set()
         self.shutdown = False
@@ -227,26 +204,18 @@ class PacketHandler:
 
 
 def get_all_wwan_options():
-    "Map the modem index to the corresponding wwan"
+    "Map each WWAN interface to its modem index, excluding LAN-side (inbound) WWANs"
     result = subprocess.run(["cli-shell-api", "showConfig", "--show-active-only", "--show-commands"], capture_output=True, text=True)
-    result = result.stdout.replace("'", "")
+    config = result.stdout.replace("'", "")
     wwan_to_check = get_modem_mapping()
-    final_wwan = {}
-    if "load-balancing" in result:
-        values = re.findall(r"inbound-interface\s+(\S+)", result)
 
-        if 'any' in values:
-            final_wwan = wwan_to_check
-        else:
-            ignore_wwan = {}
-            for i in values:
-                #print(i)
-                if "wwan" in i:
-                    ignore_wwan.append(i)
-            final_wwan = {k: v for k, v in wwan_to_check.items() if k in ignore_wwan}
-    else:
-        final_wwan = wwan_to_check
-    return final_wwan
+    if "load-balancing" not in config:
+        return wwan_to_check
+
+    # A WWAN used as an 'inbound-interface' is LAN-facing, so it must not be
+    # dialed on demand. Exclude any such interface from the mapping.
+    inbound_interfaces = set(re.findall(r"inbound-interface\s+(\S+)", config))
+    return {k: v for k, v in wwan_to_check.items() if k not in inbound_interfaces}
 
 # for the interface, get the netfilter queue number
 def get_interface_queue_num(interface):
@@ -273,14 +242,11 @@ async def main(interface='wwan0', connect_timeout=30, loop=None, client=None):
     logger.info(f"Given timeout to wait for modem connect: {connect_timeout}")
 
     logger.info(f"The nfqueue to listen to: {queue_num}")
-    modem_index = get_all_wwan_options()
-    logger.info(f'{modem_index}')
-    if modem_index.get(interface) != None:
-        modem_index = modem_index.get(interface)
-    else:
+    wwan_options = get_all_wwan_options()
+    logger.info(f'{wwan_options}')
+    if interface not in wwan_options:
         return
 
-    #print(modem_index)
     if queue_num is None:
         return
 
