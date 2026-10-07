@@ -29,7 +29,7 @@ interfaces
   └── wwan <wwanN>
         ├── description <text>                            # max 255 characters
         ├── disable                                       # valueless — full teardown (delete-style, purges history); interface recreated when removed
-        ├── mtu <68-1500>                                # fallback MTU if carrier does not provide one (default: 1420); also ceiling
+        ├── mtu <68-1500>                                # fallback MTU — used only when carrier provides none and no per-SIM mtu set (default: 1420)
         ├── vrf <name>                                    # VRF instance name
         ├── connection-mode <always-on|connect-on-demand|dial-on-demand>
         ├── network-mode <auto|lte|5g|5g-only|3g|2g>      # modem-level RAT selection
@@ -90,8 +90,8 @@ interfaces
         │     ├── interface <name>                        # designated LAN port (required)
         │     ├── mac <xx:xx:xx:xx:xx:xx>                 # optional — pin to a specific downstream MAC (default: first-MAC-wins)
         │     ├── lease-time <30-600>                     # DHCP lease seconds (default: 60)
-        │     ├── passthrough-management-address <ipv4/prefix>        # FSM-provisioned mgmt v4 (default: 192.168.200.1/24; Policy B: skipped if 'interfaces ethernet <if> address' is set)
-        │     ├── passthrough-management-address-ipv6 <ipv6/prefix>   # FSM-provisioned mgmt v6 (default: fd00:6c61:6e30::1/64; same Policy B)
+        │     ├── passthrough-management-address <ipv4/prefix>        # FSM-provisioned mgmt v4 (default: 192.168.200.1/32; Policy B: skipped if 'interfaces ethernet <if> address' is set)
+        │     ├── passthrough-management-address-ipv6 <ipv6/prefix>   # FSM-provisioned mgmt v6 (default: fd00:6c61:6e30::1/128; same Policy B)
         │     ├── dns-server <ipv4|ipv6> (multi)          # override DNS advertised to downstream (precedence: user > carrier > 8.8.8.8/1.1.1.1)
         │     ├── disable-mss-clamp                       # valueless — turn off TCP MSS clamp-to-PMTU on WWAN egress (on by default)
       │     ├── legacy-dhcpv4-compat                    # valueless — legacy mode: same-subnet v4 router/netmask, disable DHCP option 121
@@ -288,8 +288,8 @@ automatically using a 4-priority APN discovery chain:
 | **PDP type** | per-SIM only, default `ipv4v6` | Dual-stack bearer per slot unless overridden |
 | **Roaming** | per-SIM only, default `enabled` | Roaming is permitted by default so aggregator/MVNO SIMs (e.g. roaming-style Rogers-on-Bell) work out of the box. Use `disable-roaming` per slot to forbid visited networks. |
 | **Network mode** | `auto` | Modem selects best available RAT (5G→LTE→3G→2G) |
-| **MTU** | `1420` (fallback) | Carrier-negotiated bearer MTU is used when available; 1420 is used only if the carrier does not provide one; also acts as a ceiling; per-SIM `mtu` overrides when active |
-| **Per-SIM MTU** | `0` (use interface mtu) | Optional per-SIM override; when the SIM is active, this value is used instead |
+| **MTU** | `1420` (fallback) | Carrier-negotiated bearer MTU is used as-is when available; the interface `mtu` is a fallback used only when the carrier provides none and no per-SIM override is set — it is not a ceiling on the carrier value; a per-SIM `mtu` (if set) caps the effective MTU to the lesser of it and the carrier MTU |
+| **Per-SIM MTU** | `0` (use interface mtu) | Optional per-SIM override; when the SIM is active the effective MTU is the lesser of this value and the carrier MTU (or this value if the carrier provides none) |
 | **SIM PIN** | per-SIM only | If a PIN is configured, the FSM always sends it automatically when the SIM is locked |
 | **SIM failover** | per-SIM, `enabled` | Automatic switch to backup SIM on failure; use `disable` to turn off |
 | **SIM failback** | `enabled` | After sim-failover fires, automatic return to primary SIM; use `disable` to turn off |
@@ -397,7 +397,7 @@ set interfaces wwan wwan0 network-mode 'auto'
 # Re-sync every hour (default); raise for less chatter, lower for tighter time:
 # set interfaces wwan wwan0 network-time update-interval 3600
 
-# MTU — fallback if carrier does not provide one; also ceiling (per-SIM mtu overrides when that SIM is active)
+# MTU — fallback only when the carrier provides none and no per-SIM mtu is set; a per-SIM mtu, if set, caps the effective MTU to the lesser of it and the carrier MTU
 set interfaces wwan wwan0 mtu 1420
 ```
 
@@ -846,8 +846,8 @@ set interfaces wwan wwan0 dhcpv6-options pd 0 interface eth0 sla-id '0'
 >    match `iif wwanN` and continues to use the local table.
 > 5. **Management address** — because the carrier IP is leased away, the
 >    LAN interface still needs an address for SSH/HTTPS to the router.
->    The FSM auto-provisions `192.168.200.1/24` (v4) and
->    `fd00:6c61:6e30::1/64` (v6) by default.  These are configurable.
+>    The FSM auto-provisions `192.168.200.1/32` (v4) and
+>    `fd00:6c61:6e30::1/128` (v6) by default.  These are configurable.
 > 6. **Persistent source-address whitelist** — mirrors the PD ip6tables
 >    egress filter.  A per-FSM chain on FORWARD drops any traffic
 >    arriving on the LAN interface whose source is not the current
@@ -954,8 +954,8 @@ set interfaces wwan wwan0 ip-passthrough lease-time '60'
 # Optional: override the auto-provisioned management addresses
 #   (only takes effect if 'interfaces ethernet <if> address' is unset —
 #    Policy B: explicit user config always wins)
-set interfaces wwan wwan0 ip-passthrough passthrough-management-address '192.168.200.1/24'
-set interfaces wwan wwan0 ip-passthrough passthrough-management-address-ipv6 'fd00:6c61:6e30::1/64'
+set interfaces wwan wwan0 ip-passthrough passthrough-management-address '192.168.200.1/32'
+set interfaces wwan wwan0 ip-passthrough passthrough-management-address-ipv6 'fd00:6c61:6e30::1/128'
 
 # Optional: override DNS advertised to the downstream device (multi-value).
 #   Precedence: user override > carrier-supplied DNS > 8.8.8.8/1.1.1.1 fallback.

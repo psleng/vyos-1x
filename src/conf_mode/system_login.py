@@ -539,6 +539,7 @@ def verify(login):
 
     if 'tacacs' in login:
         tacacs_servers_count: int = 0
+        tacacs_ipv6_server = False
         fail = True
         for server, server_config in dict_search('tacacs.server', login).items():
             if 'key' not in server_config:
@@ -546,6 +547,8 @@ def verify(login):
             if 'disable' not in server_config:
                 tacacs_servers_count += 1
                 fail = False
+                if not is_ipv4(server):
+                    tacacs_ipv6_server = True
 
         if fail:
             raise ConfigError('All TACACS servers are disabled')
@@ -561,6 +564,13 @@ def verify(login):
             tacacs_vrf = dict_search('tacacs.vrf', login)
             if not is_addr_assigned(tmp, vrf=tacacs_vrf):
                 Warning(f'Specified TACACS source-address "{tmp}" is not assigned!')
+            # TACACS source_ip (source-address) is IPv4-only in libpam_tacplus;
+            # it cannot bind for connections to an IPv6 server.
+            if tacacs_ipv6_server:
+                Warning(
+                    'TACACS source-address is IPv4-only and will not apply to '
+                    'IPv6 TACACS servers!'
+                )
 
     if 'max_login_session' in login and 'timeout' not in login:
         raise ConfigError('"login timeout" must be configured!')

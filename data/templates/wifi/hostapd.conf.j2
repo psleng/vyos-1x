@@ -211,10 +211,14 @@ ieee80211n={{ '1' if 'n' in mode or 'ac' in mode or 'ax' in mode else '0' }}
 {% endif %}
 {# HE (802.11ax) #}
 {% if capabilities.he is vyos_defined and mode in 'ax' %}
+{# 6GHz-only operating classes (hostapd global op_class table) - used to gate 6GHz-specific directives #}
+{%     set he_6ghz_op_classes = ['131', '132', '133', '134', '135', '136'] %}
+{%     if capabilities.he.channel_set_width is vyos_defined and capabilities.he.channel_set_width in he_6ghz_op_classes %}
 {# For now, hard-code power levels for indoor-only AP #}
 he_6ghz_reg_pwr_type=0
 {# If we had an option to set indoor/outdoor/all environments for a reg domain, we would need to configure the country3 value as well! #}
 {# country3=0x4f #}
+{%     endif %}
 {%     if capabilities.he.center_channel_freq.freq_1 is vyos_defined %}
 he_oper_centr_freq_seg0_idx={{ capabilities.he.center_channel_freq.freq_1 }}
 {%     endif %}
@@ -230,7 +234,9 @@ he_bss_color={{ capabilities.he.bss_color }}
 {%     if capabilities.he.coding_scheme is vyos_defined %}
 he_basic_mcs_nss_set={{ capabilities.he.coding_scheme }}
 {%     endif %}
+{%     if capabilities.he.channel_set_width is vyos_defined and capabilities.he.channel_set_width in he_6ghz_op_classes %}
 he_6ghz_rx_ant_pat={{ '1' if capabilities.he.antenna_pattern_fixed is vyos_defined else '0' }}
+{%     endif %}
 he_su_beamformer={{ '1' if capabilities.he.beamform.single_user_beamformer is vyos_defined else '0' }}
 he_su_beamformee={{ '1' if capabilities.he.beamform.single_user_beamformee is vyos_defined else '0' }}
 he_mu_beamformer={{ '1' if capabilities.he.beamform.multi_user_beamformer is vyos_defined else '0' }}

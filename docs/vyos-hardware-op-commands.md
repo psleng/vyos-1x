@@ -73,7 +73,10 @@ Set slew-rate without changing termination.
 ## Modem control (out-of-band GPIO)
 
 ### `test hardware modem <name> reset`
-Issue an unconditional reset pulse to the modem.
+Issue an unconditional reset pulse to the modem. `<name>` selects which
+declared modem to reset; the reset pin is resolved per-modem from the active
+pinmap (e.g. `MODEM0` → `MODEM0_UNCOND_RESET`, `MODEM3` →
+`MODEM3_UNCOND_RESET`), so the verb is never tied to a fixed modem.
 
 ### `test hardware modem <name> power <on\|off>`
 Drive the modem power-enable line.
@@ -83,7 +86,7 @@ Select the active SIM slot via the SIM-MUX GPIO.
 
 | Parameter | Description |
 |---|---|
-| `<name>` | Declared modem name (tab-completion from `show modem`) |
+| `<name>` | Any modem declared by the active pinmap (`MODEM0`, `MODEM3`, …); tab-completion from `show modem`. The command is **not** restricted to a single modem — the reference board simply declares one (`MODEM0`). |
 
 ---
 
@@ -139,12 +142,14 @@ test hardware serial UARTC2 protocol rs485h termination on
 # Same thing, addressed by tty path instead of port name
 test hardware serial /dev/ttyS2 protocol rs485h termination on
 
-# Modem bring-up sequence
+# Modem bring-up sequence (modem0 is the reference board's only declared
+# modem; on multi-modem boards use the name from `show modem`, e.g. modem3)
 test hardware modem modem0 power on
 test hardware modem modem0 sim 1
 test hardware modem modem0 reset
 
-# Raw GPIO poke
+# Raw GPIO poke (MODEM0_UNCOND_RESET is MODEM0's per-modem reset pin; the
+# `modem modem0 reset` verb above drives this same line via name lookup)
 test hardware pin SYS_STAT_GREEN set 1
 test hardware pin MODEM0_UNCOND_RESET pulse
 

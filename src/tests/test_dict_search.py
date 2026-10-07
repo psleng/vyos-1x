@@ -15,6 +15,8 @@
 from unittest import TestCase
 from vyos.utils.dict import dict_search
 from vyos.utils.dict import dict_search_recursive
+from vyos.utils.dict import dict_to_key_paths
+from vyos.utils.dict import dict_to_paths_values
 
 data = {
     'string': 'fooo',
@@ -51,7 +53,7 @@ class TestDictSearch(TestCase):
     def test_non_existing_keys_with_default_named(self):
         # TestDictSearch: Return a default value when querying for non-existent key (named arg)
         self.assertEqual(dict_search('non.existing.fancy.key', data, default='test'), 'test')
-		
+
     def test_string(self):
         # TestDictSearch: Return value when querying string
         self.assertEqual(dict_search('string', data), data['string'])
@@ -88,3 +90,23 @@ class TestDictSearch(TestCase):
         self.assertEqual(len(tmp), 2)
         tmp = list(dict_search_recursive(data, 'address'))
         self.assertEqual(len(tmp), 3)
+
+class TestDictToPaths(TestCase):
+    def test_empty_dict_yields_no_paths(self):
+        # An empty config dict must not produce a spurious empty ('') path: a
+        # bond member with an empty ethernet config (no hw-id) was wrongly
+        # rejected as having a '' option assigned.
+        self.assertEqual(list(dict_to_key_paths({})), [])
+        self.assertEqual(dict_to_paths_values({}), {})
+
+    def test_valueless_leaf_yields_its_path(self):
+        # A nested empty dict is a valueless leaf node and must yield its path
+        self.assertEqual(list(dict_to_key_paths({'disable': {}})), [['disable']])
+
+    def test_keyed_and_nested_options(self):
+        self.assertEqual(dict_to_paths_values({'hw_id': '00:00:00:00:00:01'}),
+                         {'hw_id': '00:00:00:00:00:01'})
+        self.assertEqual(dict_to_paths_values({'address': ['192.0.2.1/29']}),
+                         {'address': ['192.0.2.1/29']})
+        self.assertEqual(dict_to_paths_values({'eapol': {'certificate': 'foo'}}),
+                         {'eapol.certificate': 'foo'})

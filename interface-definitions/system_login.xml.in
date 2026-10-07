@@ -524,8 +524,12 @@
                     <format>ipv4</format>
                     <description>TACACS+ server IPv4 address</description>
                   </valueHelp>
+                  <valueHelp>
+                    <format>ipv6</format>
+                    <description>TACACS+ server IPv6 address</description>
+                  </valueHelp>
                   <constraint>
-                    <validator name="ipv4-address"/>
+                    <validator name="ip-address"/>
                   </constraint>
                 </properties>
                 <children>

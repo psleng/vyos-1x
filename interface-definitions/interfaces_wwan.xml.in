@@ -880,7 +880,7 @@
                     <validator name="ipv4-prefix"/>
                   </constraint>
                 </properties>
-                <defaultValue>192.168.200.1/24</defaultValue>
+                <defaultValue>192.168.200.1/32</defaultValue>
               </leafNode>
               <leafNode name="passthrough-management-address-ipv6">
                 <properties>
@@ -893,7 +893,7 @@
                     <validator name="ipv6-prefix"/>
                   </constraint>
                 </properties>
-                <defaultValue>fd00:6c61:6e30::1/64</defaultValue>
+                <defaultValue>fd00:6c61:6e30::1/128</defaultValue>
               </leafNode>
               <leafNode name="dns-server">
                 <properties>

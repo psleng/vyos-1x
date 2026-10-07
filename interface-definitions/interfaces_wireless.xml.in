@@ -434,9 +434,10 @@
                         <!--
                           op_modes drawn from:
                           https://w1.fi/cgit/hostap/tree/src/common/ieee802_11_common.c?id=195cc3d919503fb0d699d9a56a58a72602b25f51#n1525
-                          802.11ax (WiFi-6e - HE) can use up to 160MHz bandwidth channels
+                          802.11ax (WiFi 6 / 6E - HE) operates on 2.4GHz (81-84),
+                          5GHz (115-130) and 6GHz (131-135) operating classes
                         -->
-                        <list>81 83 84 131 132 133 134 135</list>
+                        <list>81 83 84 115 116 117 118 119 120 121 122 123 124 125 126 127 128 129 130 131 132 133 134 135</list>
                       </completionHelp>
                       <valueHelp>
                         <format>81</format>
@@ -449,6 +450,70 @@
                       <valueHelp>
                         <format>84</format>
                         <description>2.4GHz, 40 MHz channel width, secondary 20MHz channel below primary channel</description>
+                      </valueHelp>
+                      <valueHelp>
+                        <format>115</format>
+                        <description>5GHz, 20 MHz channel width (channels 36-48)</description>
+                      </valueHelp>
+                      <valueHelp>
+                        <format>116</format>
+                        <description>5GHz, 40 MHz channel width, secondary 20MHz channel above primary (channels 36-44)</description>
+                      </valueHelp>
+                      <valueHelp>
+                        <format>117</format>
+                        <description>5GHz, 40 MHz channel width, secondary 20MHz channel below primary (channels 40-48)</description>
+                      </valueHelp>
+                      <valueHelp>
+                        <format>118</format>
+                        <description>5GHz, 20 MHz channel width (channels 52-64, DFS)</description>
+                      </valueHelp>
+                      <valueHelp>
+                        <format>119</format>
+                        <description>5GHz, 40 MHz channel width, secondary 20MHz channel above primary (channels 52-60, DFS)</description>
+                      </valueHelp>
+                      <valueHelp>
+                        <format>120</format>
+                        <description>5GHz, 40 MHz channel width, secondary 20MHz channel below primary (channels 56-64, DFS)</description>
+                      </valueHelp>
+                      <valueHelp>
+                        <format>121</format>
+                        <description>5GHz, 20 MHz channel width (channels 100-144, DFS)</description>
+                      </valueHelp>
+                      <valueHelp>
+                        <format>122</format>
+                        <description>5GHz, 40 MHz channel width, secondary 20MHz channel above primary (channels 100-140, DFS)</description>
+                      </valueHelp>
+                      <valueHelp>
+                        <format>123</format>
+                        <description>5GHz, 40 MHz channel width, secondary 20MHz channel below primary (channels 104-144, DFS)</description>
+                      </valueHelp>
+                      <valueHelp>
+                        <format>124</format>
+                        <description>5GHz, 20 MHz channel width (channels 149-161)</description>
+                      </valueHelp>
+                      <valueHelp>
+                        <format>125</format>
+                        <description>5GHz, 20 MHz channel width (channels 149-177)</description>
+                      </valueHelp>
+                      <valueHelp>
+                        <format>126</format>
+                        <description>5GHz, 40 MHz channel width, secondary 20MHz channel above primary (channels 149-165)</description>
+                      </valueHelp>
+                      <valueHelp>
+                        <format>127</format>
+                        <description>5GHz, 40 MHz channel width, secondary 20MHz channel below primary (channels 153-169)</description>
+                      </valueHelp>
+                      <valueHelp>
+                        <format>128</format>
+                        <description>5GHz, 80 MHz channel width</description>
+                      </valueHelp>
+                      <valueHelp>
+                        <format>129</format>
+                        <description>5GHz, 160 MHz channel width</description>
+                      </valueHelp>
+                      <valueHelp>
+                        <format>130</format>
+                        <description>5GHz, 80+80 MHz channel width</description>
                       </valueHelp>
                       <valueHelp>
                         <format>131</format>
@@ -471,7 +536,7 @@
                         <description>6GHz, 80+80 MHz channel width</description>
                       </valueHelp>
                       <constraint>
-                        <regex>(81|83|84|131|132|133|134|135)</regex>
+                        <regex>(81|83|84|115|116|117|118|119|120|121|122|123|124|125|126|127|128|129|130|131|132|133|134|135)</regex>
                       </constraint>
                     </properties>
                   </leafNode>
@@ -713,7 +778,7 @@
               </valueHelp>
               <valueHelp>
                 <format>ax</format>
-                <description>802.11ax (6GHz only for now)</description>
+                <description>802.11ax - WiFi 6 / 6E (2.4, 5 and 6 GHz)</description>
               </valueHelp>
               <constraint>
                 <regex>(a|b|g|n|ac|ax)</regex>

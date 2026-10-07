@@ -315,7 +315,9 @@ def dict_to_key_paths(d: dict) -> list:
     """
     def func(d, path):
         if isinstance(d, dict):
-            if not d:
+            # A nested empty dict is a valueless leaf and yields its path; an
+            # empty top-level dict (path == []) has no options, so yield nothing.
+            if not d and path:
                 yield path
             for k, v in d.items():
                 for r in func(v, path + [k]):

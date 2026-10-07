@@ -462,7 +462,7 @@ def _build_ip_passthrough(wwan):
             _leaf(
                 ipt,
                 'passthrough_management_address',
-                _leaf(ipt, 'management_address', '192.168.200.1/24')
+                _leaf(ipt, 'management_address', '192.168.200.1/32')
             )
         )
     )
@@ -471,7 +471,7 @@ def _build_ip_passthrough(wwan):
             _leaf(
                 ipt,
                 'passthrough_management_address_ipv6',
-                _leaf(ipt, 'management_address_ipv6', 'fd00:6c61:6e30::1/64')
+                _leaf(ipt, 'management_address_ipv6', 'fd00:6c61:6e30::1/128')
             )
         )
     )
