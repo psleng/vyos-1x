@@ -243,3 +243,73 @@ def module_assigns_own_mac(wifi: dict) -> bool:
     if not pcie_wifi_nxp_model():
         return False
     return not os.path.exists(WIFI_INTERFACES_CONF)
+
+
+def device_info_string(cell: str) -> str:
+    '''
+    PSL: Read a string-valued identity EEPROM cell exposed by perle-device-info.
+
+    The build records the perle-device-info platform device in the "source" line
+    of WIFI_INTERFACES_CONF (the same file provisioned_wifi_mac() uses). This
+    reads /sys/devices/platform/<source>/<cell> and returns its ASCII value with
+    any NUL/0xff padding and surrounding whitespace stripped.
+
+    Returns '' when there is no source (e.g. a board without an identity EEPROM,
+    such as the AM64x EVM) or the cell is missing/unreadable.
+    '''
+    source = ''
+    try:
+        with open(WIFI_INTERFACES_CONF) as fp:
+            for line in fp:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                parts = line.split()
+                if len(parts) >= 2 and parts[0] == 'source':
+                    source = parts[1]
+                    break
+    except OSError:
+        return ''
+
+    if not source:
+        return ''
+
+    try:
+        with open(f'/sys/devices/platform/{source}/{cell}', 'rb') as fp:
+            raw = fp.read()
+    except OSError:
+        return ''
+
+    # device-info string cells already strip trailing 0x00/0xff; strip again
+    # defensively, then drop surrounding whitespace.
+    return raw.split(b'\x00', 1)[0].rstrip(b'\xff').decode('ascii', 'ignore').strip()
+
+
+def provisioned_ap_ssid() -> str:
+    '''
+    PSL: Factory-default access-point SSID from the identity EEPROM
+    (perle-device-info 'ssid' cell).
+
+    Returns '' unless the cell holds a valid 1-32 character 802.11 SSID, so the
+    caller leaves the SSID unset (and VyOS enforces its usual requirement) when
+    the hardware is unprovisioned.
+    '''
+    ssid = device_info_string('ssid')
+    if 1 <= len(ssid) <= 32:
+        return ssid
+    return ''
+
+
+def provisioned_ap_passphrase() -> str:
+    '''
+    PSL: Factory-default WPA passphrase from the identity EEPROM
+    (perle-device-info 'password' cell).
+
+    Returns '' unless the cell holds a valid 8-63 character WPA passphrase, so a
+    too-short/blank cell is never injected (which would only trip hostapd or the
+    existing passphrase-length check).
+    '''
+    passphrase = device_info_string('password')
+    if 8 <= len(passphrase) <= 63:
+        return passphrase
+    return ''
