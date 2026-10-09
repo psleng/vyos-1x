@@ -853,6 +853,12 @@
             </properties>
             <command>journalctl --no-hostname --boot --unit snmpd.service</command>
           </leafNode>
+          <leafNode name="sms-command">
+            <properties>
+              <help>Show log for WWAN SMS command service</help>
+            </properties>
+            <command>journalctl --no-hostname --boot --unit sms-command.service</command>
+          </leafNode>
           <leafNode name="spanning-tree">
             <properties>
               <help>Show log for Spanning Tree Protocol (STP)</help>

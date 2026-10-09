@@ -1549,6 +1549,42 @@
               </leafNode>
             </children>
           </node>
+          <!-- ── SMS command processing ─────────────────────────── -->
+          <node name="sms-command" owner="${vyos_conf_scripts_dir}/service_sms-command.py">
+            <properties>
+              <help>SMS command processing for this WWAN interface</help>
+              <priority>902</priority>
+            </properties>
+            <children>
+              <leafNode name="password">
+                <properties>
+                  <help>Shared password for SMS commands on this WWAN interface</help>
+                  <secret/>
+                  <constraint>
+                    <regex>\S+</regex>
+                  </constraint>
+                  <constraintErrorMessage>Password must be a single token of at least 9 characters with an uppercase letter, digit, and special character</constraintErrorMessage>
+                </properties>
+              </leafNode>
+              <leafNode name="authorized-number">
+                <properties>
+                  <help>Authorized source phone number</help>
+                  <completionHelp>
+                    <list>+15551234567</list>
+                  </completionHelp>
+                  <valueHelp>
+                    <format>+15551234567</format>
+                    <description>Allowed source phone number in E.164 format</description>
+                  </valueHelp>
+                  <constraint>
+                    <regex>\+?[0-9]{6,20}</regex>
+                  </constraint>
+                  <multi/>
+                  <constraintErrorMessage>Allowed number must be a phone number (6-20 digits, optional leading +)</constraintErrorMessage>
+                </properties>
+              </leafNode>
+            </children>
+          </node>
           <!-- ── Logging ─────────────────────────────────────────── -->
           <node name="logging">
             <properties>
