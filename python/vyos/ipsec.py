@@ -15,6 +15,7 @@
 
 # Package to communicate with Strongswan VICI
 
+import base64
 
 class ViciInitiateError(Exception):
     """
@@ -245,3 +246,35 @@ def vici_initiate(
         return True
     except Exception:
         raise ViciCommandError(f'Failed to initiate SA for IKE {ike_sa_name}')
+
+
+def vici_load_key(
+    key_data: str, key_type: str = 'any'
+) -> str:
+    """Initiate IKE SA with one child_sa connection with specific peer
+
+    Args:
+        key_data (str): data to be fed in to load_key function
+        key_type (str): to specify type of key
+
+    Returns:
+        bool: a result of initiation command
+    """
+    from vici import Session as vici_session
+
+    try:
+        session = vici_session()
+    except Exception:
+        raise ViciInitiateError('IPsec is not initialized')
+
+    try:
+        der_data = base64.b64decode(key_data)
+        result_from_session = session.load_key(
+            {
+                'type': key_type,
+                'data': der_data
+            }
+        )
+        return result_from_session.get('id', b'').decode()
+    except Exception:
+        raise ViciCommandError(f'Failed to load key')
