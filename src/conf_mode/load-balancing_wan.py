@@ -29,6 +29,13 @@ airbag.enable()
 
 service = 'vyos-wan-load-balance.service'
 
+# Desired dial-on-demand service state for each affected WWAN interface,
+# computed in get_config() (where the sole Config instance is live) and
+# consumed in apply().  Kept module-level so apply() can act on it even when
+# the load-balancing config was deleted (in which case get_config() returns an
+# empty, falsy `lb`).  Reset on every get_config() call.
+_dial_on_demand_plan = []
+
 valid_groups = [
     'address_group',
     'domain_group',
@@ -60,10 +67,12 @@ def get_config(config=None):
 
     set_dependents('conntrack', conf)
 
-    if lb:
-        # WWAN interfaces whose dial-on-demand service must be restarted to
-        # pick up a load-balancing configuration change (e.g. inbound-interface).
-        lb['restart_dial_on_demand'] = _dial_on_demand_restart_interfaces(conf, lb)
+    # Re-evaluate the dial-on-demand service policy for the WWAN interfaces this
+    # commit can affect.  Computed here, where the sole Config instance is live,
+    # and stored module-level so apply() can act on it even when `lb` is empty
+    # (load-balancing deleted).
+    global _dial_on_demand_plan
+    _dial_on_demand_plan = _build_dial_on_demand_plan(conf)
 
     return lb
 
@@ -157,52 +166,142 @@ def generate(lb):
     return None
 
 
-def _dial_on_demand_restart_interfaces(conf, lb):
-    """Return dial-on-demand WWAN interfaces whose relevant WAN load-balancing
-    configuration changed since the last commit.
+def _dial_on_demand_should_run(conf, ifname):
+    """Decide whether the ``dial-on-demand@<ifname>`` service should run.
 
-    The dial-on-demand@<ifname> service builds its dialing behaviour from the
-    WAN load-balancing configuration (which inbound interfaces trigger a dial,
-    the failover flag, interface membership and the interface-health tests), so
-    a change to any of those must restart the service for that interface --
-    e.g. when a rule's inbound-interface is changed.
+    At commit time this script reaches across into the WWAN interface config
+    (``conf`` reflects the configuration being committed) and applies the
+    policy:
+
+    * ``connection-mode`` must be ``dial-on-demand`` -- otherwise the service
+      never runs.
+    * When the interface is governed by WAN load-balancing -- it is both an
+      ``interface-health`` target AND a weighted member of a balancing
+      ``rule`` -- the service runs ONLY when that rule has ``failover``
+      enabled.  A plain weighted load-balance member is expected to stay
+      continuously up, so dial-on-demand does not apply.
+    * A standalone dial-on-demand interface (not referenced by WAN
+      load-balancing) always runs.
+
+    interfaces_wwan applies the identical check from its own file so both
+    commit paths agree regardless of which section changes.
+    """
+    if not ifname.startswith('wwan'):
+        return False
+
+    if conf.return_value(['interfaces', 'wwan', ifname,
+                          'connection-mode']) != 'dial-on-demand':
+        return False
+
+    lb = conf.get_config_dict(['load-balancing', 'wan'],
+                              key_mangling=('-', '_'),
+                              no_tag_node_value_mangle=True,
+                              get_first_key=True)
+
+    in_interface_health = ifname in (lb.get('interface_health') or {})
+
+    weighted_member = False
+    failover_rule = False
+    for rule_conf in (lb.get('rule') or {}).values():
+        if ifname in (rule_conf.get('interface') or {}):
+            weighted_member = True
+            if 'failover' in rule_conf:
+                failover_rule = True
+
+    if in_interface_health and weighted_member:
+        # Governed by WLB: only dial on demand for a failover rule.
+        return failover_rule
+
+    # Standalone dial-on-demand: always run.
+    return True
+
+
+def _build_dial_on_demand_plan(conf):
+    """Return the desired dial-on-demand service state for every WWAN interface
+    whose dialing behaviour can be affected by this load-balancing commit.
+
+    The ``dial-on-demand@<ifname>`` service is started/stopped by policy
+    (:func:`_dial_on_demand_should_run`) that depends on BOTH the WWAN interface
+    config and the WAN load-balancing config.  Because the two sections can be
+    committed independently, a load-balancing commit must re-evaluate the policy
+    for the affected interfaces -- e.g. adding a WWAN to a weighted
+    (non-failover) rule must stop its service, enabling failover must start it,
+    and deleting the load-balancing config must let a now standalone
+    dial-on-demand WWAN start again.
+
+    Candidates are the WWAN interfaces referenced by the new OR the previous
+    (effective) load-balancing config -- the set whose policy result may have
+    changed.  For each, the plan records whether the service should run, whether
+    the dialing-relevant load-balancing config changed this commit, and the
+    systemd instance parameters (idle/connect timeouts) needed to start it.
+
+    The ``changed`` flag drives start vs. restart in apply(): when the relevant
+    config changed, the running service must be restarted to pick up the new
+    configuration; otherwise a plain (idempotent) start keeps it running without
+    needlessly bouncing an active bearer on unrelated commits.
     """
     effective = conf.get_config_dict(['load-balancing', 'wan'],
                                      key_mangling=('-', '_'),
                                      no_tag_node_value_mangle=True,
                                      get_first_key=True,
                                      effective=True)
+    proposed = conf.get_config_dict(['load-balancing', 'wan'],
+                                    key_mangling=('-', '_'),
+                                    no_tag_node_value_mangle=True,
+                                    get_first_key=True)
 
-    # Rule fields that influence when/how the dial-on-demand service dials.
+    # Dialing-relevant view of a WWAN interface's load-balancing config, used to
+    # detect whether a restart is needed: interface-health membership plus the
+    # rule fields that influence when/how the service dials.
     rule_keys = ('inbound_interface', 'interface', 'failover', 'exclude')
 
     def relevant(config, ifname):
-        health = dict_search_args(config, 'interface_health', ifname)
+        health = (config.get('interface_health') or {}).get(ifname)
         rules = {}
         for rule_no, rule_conf in (config.get('rule') or {}).items():
-            if ifname in (rule_conf.get('interface') or []):
+            if ifname in (rule_conf.get('interface') or {}):
                 rules[rule_no] = {key: rule_conf.get(key) for key in rule_keys}
         return {'interface_health': health, 'rule': rules}
 
     # WWAN interfaces referenced anywhere in the new or previous config.
-    candidates = set(lb.get('interface_health') or {})
-    candidates |= set(effective.get('interface_health') or {})
-    for config in (lb, effective):
+    candidates = set()
+    for config in (proposed, effective):
+        candidates |= set(config.get('interface_health') or {})
         for rule_conf in (config.get('rule') or {}).values():
             candidates |= set(rule_conf.get('interface') or [])
 
-    restart = []
+    plan = []
     for ifname in sorted(candidates):
         if not ifname.startswith('wwan'):
             continue
-        # Only interfaces configured for dial-on-demand run the service.
-        if not conf.exists(['interfaces', 'wwan', ifname,
-                            'connection-mode', 'dial-on-demand']):
-            continue
-        if relevant(lb, ifname) != relevant(effective, ifname):
-            restart.append(ifname)
+        dod_base = ['interfaces', 'wwan', ifname, 'dial-on-demand']
+        plan.append({
+            'ifname': ifname,
+            'run': _dial_on_demand_should_run(conf, ifname),
+            'changed': relevant(proposed, ifname) != relevant(effective, ifname),
+            'idle_timeout': conf.return_value(dod_base + ['idle-timeout']) or 30,
+            'connect_timeout': conf.return_value(dod_base + ['connect-timeout']) or 30,
+        })
 
-    return restart
+    return plan
+
+
+def _apply_dial_on_demand_plan():
+    """Start, restart or stop each WWAN dial-on-demand service per the plan.
+
+    * should run and relevant config changed -> restart (pick up the change).
+    * should run and unchanged -> start (idempotent; ensures it is running
+      without bouncing an already-running bearer).
+    * should not run -> stop every instance for the interface.
+    """
+    for item in _dial_on_demand_plan:
+        ifname = item['ifname']
+        if item['run']:
+            action = 'restart' if item['changed'] else 'start'
+            call(f'systemctl {action} dial-on-demand@{ifname}:'
+                 f'{item["idle_timeout"]}:{item["connect_timeout"]}.service')
+        else:
+            call(f'systemctl stop dial-on-demand@{ifname}:*.service')
 
 
 def apply(lb):
@@ -210,10 +309,12 @@ def apply(lb):
         cmd(f'systemctl stop {service}')
     else:
         cmd(f'systemctl restart {service}')
-        # Restart the dial-on-demand service for any WWAN interface whose
-        # load-balancing configuration changed, so it picks up the change.
-        for ifname in lb.get('restart_dial_on_demand', []):
-            call(f'systemctl restart dial-on-demand@{ifname}:*.service')
+
+    # Re-evaluate the dial-on-demand service policy for affected WWAN
+    # interfaces (runs regardless of whether load-balancing itself is
+    # configured, so deleting load-balancing can restart a now-standalone
+    # dial-on-demand WWAN).
+    _apply_dial_on_demand_plan()
 
     call_dependents()
 
