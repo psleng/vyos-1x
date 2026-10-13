@@ -12,9 +12,7 @@ import asyncio
 import argparse
 import logging
 
-from vyos.utils.wwan.wwan_client import (  # noqa: E402
-    WWANClient
-)
+from vyos.utils.wwan.dial_on_demand._client import open_client_with_retry
 
 COOLDOWN = 60           # seconds between connection attempts
 CONNECT_TIMEOUT = 20    # seconds to wait for modem to connect
@@ -101,15 +99,8 @@ class PacketHandler:
     async def setup(self):
         logger.info('Setting up the packet handler object.')
         if self.client is None:
-            client = WWANClient()
-            await client.open()
+            client = await open_client_with_retry(self.interface)
             logger.info('WWAN Client has been created and opened.')
-            setup = await client.add_interface(int(self.interface[4:]))
-            config = await client.set_configuration(int(self.interface[4:]), {
-                "connection_mode": "dial-on-demand",
-                "primary_sim_slot": 1,
-            })
-            logger.info('WWAN Client has been configured.')
             self.client = client
         return self
 

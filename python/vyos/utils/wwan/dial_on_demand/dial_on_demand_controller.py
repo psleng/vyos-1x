@@ -1,12 +1,13 @@
-import vyos.utils.wwan.dial_on_demand.idle_wwan_watcher as idle_wwan_watcher
-import vyos.utils.wwan.dial_on_demand.wwan_nft_reconnect as wwan_nft_reconnect
-import vyos.utils.wwan.dial_on_demand.install_wwan_nft_rules as nft_rules
-import subprocess
-import re
 import argparse
 import asyncio
 import signal
 import logging
+import subprocess
+import re
+import vyos.utils.wwan.dial_on_demand.idle_wwan_watcher as idle_wwan_watcher
+import vyos.utils.wwan.dial_on_demand.wwan_nft_reconnect as wwan_nft_reconnect
+import vyos.utils.wwan.dial_on_demand.install_wwan_nft_rules as nft_rules
+from vyos.utils.wwan.dial_on_demand._client import open_client_with_retry
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO,
@@ -32,24 +33,38 @@ def cleanup(interface='wwan0'):
         )
 
 async def run(interface='wwan0', timeout=30, connect_timeout=30):
+    # Open ONE WWAN D-Bus client for the whole pipeline and hand it to every
+    # stage, instead of each stage opening and closing its own. open_client_with_
+    # retry() waits for the FSM manager (igos-wwan-manager) to claim its bus name,
+    # so the single connect also absorbs the boot race. The client is closed once
+    # here when the pipeline ends.
+    client = await open_client_with_retry(interface)
     try:
+        # Apply the dial-on-demand connection mode ONCE on the shared client.
+        # (Each stage used to re-apply it on its own client, and every apply
+        # makes the FSM fire a RECONFIGURE that bounces a connected bearer.)
+
         logger.info("Starting idle wwan watcher program.")
-        await idle_wwan_watcher.main(interface=interface, timeout=timeout)
+        await idle_wwan_watcher.main(interface=interface, timeout=timeout,
+                                     client=client)
         logger.info("Finished idle wwan watcher program.")
         logger.info("Starting installation of nft rules.")
         await nft_rules.generate_nft_rules(interface=interface)
         logger.info("Finished installing nft rules.")
         logger.info("Starting nfqueue monitor.")
-        await wwan_nft_reconnect.main(interface=interface, connect_timeout=connect_timeout)
+        await wwan_nft_reconnect.main(interface=interface,
+                                     connect_timeout=connect_timeout,
+                                     client=client)
         logger.info("Finished nfqueue monitor.")
     except asyncio.CancelledError:
         raise
     finally:
+        await client.close()
         logger.info("Finished service successfully!")
 
 
 async def main(interface='wwan0', timeout=30, connect_timeout=30, loop=None):
-    """"""
+    """Run the dial-on-demand pipeline and clean up nft state on stop."""
     if loop is None:
         loop = asyncio.get_event_loop()
     current_task = asyncio.create_task(run(interface=interface, timeout=timeout, connect_timeout=connect_timeout))
@@ -61,12 +76,10 @@ async def main(interface='wwan0', timeout=30, connect_timeout=30, loop=None):
 
     try:
         await current_task
-
     except asyncio.CancelledError:
         logger.info("Received a termination signal.")
-        pass
     finally:
-        # should always cleanup
+        # Always remove leftover nftables tables for this interface.
         cleanup(interface=interface)
         loop.remove_signal_handler(signal.SIGTERM)
 

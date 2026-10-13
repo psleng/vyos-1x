@@ -5,6 +5,7 @@ Wants=igos-wwan-manager.service
 
 [Service]
 Type=simple
+ExecStartPre=/bin/sleep 30
 ExecStart=/usr/bin/python3 -u -m vyos.utils.wwan.dial_on_demand.dial_on_demand_controller %i
 StandardOutput=journal
 StandardError=journal
