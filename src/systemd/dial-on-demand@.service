@@ -1,6 +1,7 @@
 [Unit]
 Description=WWAN Dial On Demand
-After=ModemManager.service
+After=igos-wwan-manager.service
+Wants=igos-wwan-manager.service
 
 [Service]
 Type=simple
@@ -8,7 +9,7 @@ ExecStart=/usr/bin/python3 -u -m vyos.utils.wwan.dial_on_demand.dial_on_demand_c
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=dial-on-demand
-Restart=on-success
+Restart=always
 RestartSec=5s
 
 [Install]
