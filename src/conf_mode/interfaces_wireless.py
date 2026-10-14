@@ -141,6 +141,26 @@ def get_config(config=None):
     if 'static_arp' in wifi:
         set_dependents('static_arp', conf)
 
+    # PSL: iGOS boards store a factory-default AP SSID and WPA passphrase in the
+    # identity EEPROM, exposed as perle-device-info nvmem cells. For an
+    # access-point, fall back to those defaults ONLY for values the operator did
+    # not set explicitly: the SSID (open or secured) and, when a WPA block exists
+    # but omits it, the passphrase. No security block is ever synthesised, so an
+    # explicitly open AP stays open. The helpers return '' on non-Perle hardware
+    # or an unprovisioned/invalid cell, leaving behaviour unchanged there.
+    if 'deleted' not in wifi and wifi.get('type') == 'access-point':
+        if 'ssid' not in wifi:
+            tmp = nxpwifiutils.provisioned_ap_ssid()
+            if tmp:
+                wifi['ssid'] = tmp
+
+        if dict_search('security.wpa', wifi) is not None:
+            wpa = wifi['security']['wpa']
+            if 'passphrase' not in wpa:
+                tmp = nxpwifiutils.provisioned_ap_passphrase()
+                if tmp:
+                    wpa['passphrase'] = tmp
+
     return wifi
 
 def wifi_phy_supports_6ghz(phy):
@@ -261,6 +281,13 @@ def verify(wifi):
             wpa = wifi['security']['wpa']
             if not any(i in ['passphrase', 'radius'] for i in wpa):
                 raise ConfigError('Missing WPA key or RADIUS server')
+
+            # PSL: WPA3 (SAE) is invalid without Protected Management Frames.
+            # VyOS already enforces this for 6 GHz; require it on every band so
+            # "mode wpa3" cannot silently render an unjoinable SAE-without-PMF AP.
+            if wpa.get('mode') == 'wpa3' and wifi.get('mgmt_frame_protection') != 'required':
+                raise ConfigError('WPA3 requires Management Frame Protection - '
+                                  'set "mgmt-frame-protection required"')
 
             if 'username' in wpa:
                 if 'passphrase' not in wpa:
