@@ -1,3 +1,4 @@
+import os
 import time
 import argparse
 import subprocess
@@ -8,6 +9,52 @@ import logging
 from vyos.utils.wwan.dial_on_demand._client import open_client_with_retry
 
 logger = logging.getLogger(__name__)
+
+# Per-boot flag marking that we have already passed the "wait for the first
+# bearer connection" window for this interface. /run is tmpfs and is wiped on
+# every reboot, so the flag is absent exactly once per boot and present for
+# every subsequent restart until the next reboot clears it.
+_CONNECTED_ONCE_FLAG = "/run/dial-on-demand.{iface}.connected-once"
+
+
+async def wait_for_initial_connection(client, ifnum, interface,
+                                      max_wait=120, poll=2):
+    """On the first run after boot, wait for the bearer to reach "connected"
+    at least once before the idler decides whether to idle or arm the dial
+    trigger.
+
+    At boot the FSM (igos-wwan-manager) is still running its auto-connect, so a
+    naive status check races it: the bearer looks "not connected", the idler
+    disconnects and returns immediately, and the dial trigger gets armed before
+    the link ever came up. Waiting for one confirmed connection closes that race.
+
+    This runs only once per boot (guarded by a /run tmpfs flag) so a normal
+    restart -- where the bearer was deliberately idled down -- does not block
+    waiting for a connection that nothing is dialing. The wait is bounded so a
+    modem with no SIM/signal cannot stall the pipeline forever; on timeout we
+    fall through and let the normal logic arm the trigger.
+    """
+    flag = _CONNECTED_ONCE_FLAG.format(iface=interface)
+    if os.path.exists(flag):
+        return
+
+    deadline = time.monotonic() + max_wait
+    while time.monotonic() < deadline:
+        if await client.get_bearer_status(ifnum) == "connected":
+            logger.info("Initial bearer connection observed; proceeding")
+            break
+        logger.info("Waiting for initial bearer connection after boot...")
+        await asyncio.sleep(poll)
+    else:
+        logger.info("Initial connection not seen within %ss; proceeding anyway",
+                    max_wait)
+
+    # Mark the boot window complete regardless of outcome so later restarts skip
+    # the wait until the next reboot clears /run.
+    try:
+        open(flag, "w").close()
+    except OSError:
+        logger.info("Could not create boot flag %s", flag)
 
 def get_tx_bytes(iface):
     try:
@@ -72,6 +119,12 @@ async def idler(interface='wwan0', timeout=30, client=None):
 
     ifnum = int(interface[4:])
 
+    # On the first run after boot, let the FSM's auto-connect bring the bearer
+    # up at least once before we evaluate the status below -- otherwise we race
+    # it and arm the dial trigger prematurely. No-op on subsequent restarts.
+    if client is not None:
+        await wait_for_initial_connection(client, ifnum, interface)
+
     # The idle watcher only has a job when the bearer is CONNECTED: wait for it
     # to go idle, then disconnect it so dial-on-demand can re-arm. If the bearer
     # is already down there is nothing to idle-out -- return immediately so the
@@ -83,6 +136,7 @@ async def idler(interface='wwan0', timeout=30, client=None):
     # drops it, so the idle timer would keep resetting and the bearer would never
     # be (re)dialed -- exactly the "pings keep it from coming up" symptom.
     if client is not None and await client.get_bearer_status(ifnum) != "connected":
+        await client.disconnect_bearer(ifnum)
         logger.info("Bearer already disconnected; not idling, arm dial trigger now")
         return
 
@@ -97,6 +151,7 @@ async def idler(interface='wwan0', timeout=30, client=None):
         # etc.), stop idling and let the dial trigger be re-armed instead of
         # waiting on tx that will never settle while packets hit the down link.
         if client is not None and await client.get_bearer_status(ifnum) != "connected":
+            await client.disconnect_bearer(ifnum)
             logger.info("Bearer no longer connected; arming dial trigger")
             break
         tx = get_tx_bytes(interface)

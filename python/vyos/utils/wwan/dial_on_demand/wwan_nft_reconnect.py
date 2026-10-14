@@ -126,6 +126,9 @@ class PacketHandler:
         packet.retain()
         task = self.loop.create_task(self.handle_packet_async(packet))
         self.tasks.add(task)
+        # Drop the task from the set as soon as it finishes so `self.tasks` does
+        # not grow by one per received packet for the life of the handler.
+        task.add_done_callback(self.tasks.discard)
 
     # async packet handler
     def put_packet(self, packet):
@@ -277,6 +280,10 @@ async def main(interface='wwan0', connect_timeout=30, loop=None, client=None):
         handler.shutdown = True
         loop.remove_reader(fd)
         worker_task.cancel()
+        # Await the cancelled consumer so its cancellation actually completes --
+        # otherwise the task object lingers and asyncio logs "Task was destroyed
+        # but it is pending".
+        await asyncio.gather(worker_task, return_exceptions=True)
         await handler.cleanup_tasks()
         nfqueue.unbind()
 

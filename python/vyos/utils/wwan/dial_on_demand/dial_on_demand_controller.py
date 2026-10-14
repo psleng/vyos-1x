@@ -10,8 +10,12 @@ import vyos.utils.wwan.dial_on_demand.install_wwan_nft_rules as nft_rules
 from vyos.utils.wwan.dial_on_demand._client import open_client_with_retry
 
 logger = logging.getLogger(__name__)
+# Do NOT embed %(asctime)s here: journald already timestamps every line (the
+# unit logs to the journal) in the system's local timezone, like every other
+# VyOS service. A service process runs with TZ unset (UTC), so a Python-rendered
+# asctime would show UTC and look "wrong" next to journald's local timestamp.
 logging.basicConfig(level=logging.INFO,
-                    format="%(asctime)s %(module)s: %(message)s")
+                    format="%(module)s: %(message)s")
 
 def cleanup(interface='wwan0'):
     pattern = re.compile(rf"^table\s+(\S+)\s+({interface}+_raw_\d+)$")
