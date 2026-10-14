@@ -2,7 +2,6 @@ import subprocess
 import argparse
 from vyos.config import Config
 from pathlib import Path
-import subprocess
 import asyncio
 import logging
 
@@ -30,6 +29,46 @@ def get_config():
                               get_first_key=True,
                               with_recursive_defaults=True)
     return lb
+
+
+def get_failover_interfaces(config=None):
+    """Interfaces participating in `protocols failover` (its WAN nexthops).
+
+    Collects both forms: `dhcp-interface <if>` (the tag value) and
+    `next-hop <ip> interface <if>` (the child leaf). These are WAN links managed
+    by failover, NOT LAN sources, so forwarded traffic arriving on them must
+    never trigger a dial-on-demand bring-up -- the caller strips them from the
+    prerouting iifname scope. Returns an empty set when failover is not
+    configured.
+    """
+    if config is None:
+        config = Config()
+    failover = config.get_config_dict(['protocols', 'failover'],
+                                      key_mangling=('-', '_'),
+                                      get_first_key=True)
+    ifaces = set()
+    for route_conf in (failover.get('route') or {}).values():
+        for ifname in (route_conf.get('dhcp_interface') or {}):
+            ifaces.add(ifname)
+        for nh_conf in (route_conf.get('next_hop') or {}).values():
+            iface = nh_conf.get('interface')
+            if iface:
+                ifaces.add(iface)
+    return ifaces
+
+
+def get_inbound_interfaces(config=None):
+    """Physical interfaces eligible as dial-on-demand trigger sources.
+
+    get_physical_interfaces() minus any interface participating in
+    `protocols failover`. Never returns an empty list: an empty `iifname { }`
+    is invalid nft and would fail every install, so if every physical interface
+    happens to be a failover member we fall back to the full physical list.
+    """
+    physical = get_physical_interfaces()
+    inbound = sorted(set(physical) - get_failover_interfaces(config))
+    return inbound or physical
+
 
 def run_nft_cmd(cmd=''):
     subprocess.run(
@@ -80,7 +119,7 @@ async def generate_standalone_nft_rules(interface='wwan0'):
     # to the wwan interface via the RAW prerouting hook. Both go to NFQUEUE so
     # the on-demand trigger can bring the modem up.
     queue_num = standalone_queue_num(interface)
-    physical_interfaces = f"{{ {', '.join(get_physical_interfaces())} }}"
+    physical_interfaces = f"{{ {', '.join(get_inbound_interfaces())} }}"
     commands = basic_nft_commands(interface, queue_num)
     # NOTE: forwarded IPv6 destined for wwanX is dropped persistently by the
     # dial-on-demand prerouting guard in src/conf_mode/interfaces_wwan.py
@@ -134,7 +173,7 @@ async def generate_nft_rules(interface='wwan0'):
         inbound_interface = config.get('rule', {}).get(rule_num, {}).get('inbound_interface', {})
 
         if failover is False or inbound_interface == 'any':
-            physical_interfaces = f"{{ {', '.join(get_physical_interfaces())} }}"
+            physical_interfaces = f"{{ {', '.join(get_inbound_interfaces())} }}"
             commands = f'''add rule inet {interface}_raw_{rule_num} prerouting iifname {physical_interfaces} fib daddr oifname "{interface}" queue num {rule_num}
             '''
         else:
