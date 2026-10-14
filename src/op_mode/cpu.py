@@ -14,11 +14,13 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import re
 import sys
 
 import vyos.opmode
 from vyos.utils.cpu import get_cpus
 from vyos.utils.cpu import get_core_count
+from vyos.utils.cpu import decode_arm_cpu
 
 from jinja2 import Template
 
@@ -30,13 +32,15 @@ cpu_template = Template("""
 {% if 'cpu cores' in cpu %}Cores:            {{cpu['cpu cores']}}{% endif %}
 {% if 'cpu MHz' in cpu %}Current MHz:      {{cpu['cpu MHz']}}{% endif %}
 {# ARM (and other architectures) do not expose the x86 keys above in       #}
-{# /proc/cpuinfo, so fall back to the fields they do provide.              #}
-{% if 'CPU implementer' in cpu %}CPU Implementer:  {{cpu['CPU implementer']}}{% endif %}
-{% if 'CPU architecture' in cpu %}CPU Architecture: {{cpu['CPU architecture']}}{% endif %}
-{% if 'CPU variant' in cpu %}CPU Variant:      {{cpu['CPU variant']}}{% endif %}
-{% if 'CPU part' in cpu %}CPU Part:         {{cpu['CPU part']}}{% endif %}
-{% if 'CPU revision' in cpu %}CPU Revision:     {{cpu['CPU revision']}}{% endif %}
-{% if 'BogoMIPS' in cpu %}BogoMIPS:         {{cpu['BogoMIPS']}}{% endif %}
+{# /proc/cpuinfo, so fall back to the fields they do provide. The raw MIDR  #}
+{# register values are decoded to human-readable names where possible and   #}
+{# shown alongside the raw hex. The clock speed is intentionally omitted on #}
+{# Arm: /proc/cpuinfo carries only BogoMIPS (a generic-timer artefact, not  #}
+{# the core clock), and this platform exposes no reliable clock source.     #}
+{% if 'CPU implementer' in cpu %}CPU Vendor:       {{cpu.get('cpu_vendor', 'Unknown')}} ({{cpu['CPU implementer']}}){% endif %}
+{% if 'CPU architecture' in cpu %}CPU Architecture: ARMv{{cpu['CPU architecture']}}{% endif %}
+{% if 'CPU part' in cpu %}Model:            {{cpu.get('cpu_model', 'Unknown')}} ({{cpu['CPU part']}}){% endif %}
+{% if 'cpu_revision' in cpu %}CPU Revision:     {{cpu['cpu_revision']}}{% endif %}
 {% endfor %}
 """)
 
@@ -45,14 +49,38 @@ Physical CPU cores: {{count}}
 CPU model(s): {{models | join(", ")}}
 """)
 
+def _enrich_arm(cpu_data):
+    # Augment each CPU entry with decoded Arm identity (vendor/model/revision)
+    # without discarding the raw /proc/cpuinfo fields, so both the human output
+    # and the raw/API output carry readable names on Arm.
+    enriched = []
+    for cpu in cpu_data:
+        cpu = dict(cpu)
+        decoded = decode_arm_cpu(cpu)
+        if 'vendor' in decoded:
+            cpu['cpu_vendor'] = decoded['vendor']
+        if 'model' in decoded:
+            cpu['cpu_model'] = decoded['model']
+        if 'revision' in decoded:
+            cpu['cpu_revision'] = decoded['revision']
+        enriched.append(cpu)
+    return enriched
+
 def _cpu_model(cpu):
     # x86 exposes a friendly "model name"; ARM and some other architectures
     # do not, so build a best-effort label from the fields they provide.
     if 'model name' in cpu:
         return cpu['model name']
 
+    if 'cpu_model' in cpu:
+        revision = cpu.get('cpu_revision')
+        return f"{cpu['cpu_model']} ({revision})" if revision \
+            else cpu['cpu_model']
+
     parts = []
-    if 'CPU implementer' in cpu:
+    if 'cpu_vendor' in cpu:
+        parts.append(cpu['cpu_vendor'])
+    elif 'CPU implementer' in cpu:
         parts.append(f"impl {cpu['CPU implementer']}")
     if 'CPU part' in cpu:
         parts.append(f"part {cpu['CPU part']}")
@@ -62,15 +90,19 @@ def _cpu_model(cpu):
     return 'unknown'
 
 def _get_raw_data():
-    return get_cpus()
+    return _enrich_arm(get_cpus())
 
 def _format_cpus(cpu_data):
     env = {'cpus': cpu_data}
-    return cpu_template.render(env).strip()
+    rendered = cpu_template.render(env)
+    # The per-field "{% if %}" lines leave empty lines for keys that an
+    # architecture does not expose; collapse runs of blank lines so each CPU
+    # block is contiguous with a single blank line between CPUs.
+    return re.sub(r'\n\s*\n+', '\n\n', rendered).strip()
 
 def _get_summary_data():
     count = get_core_count()
-    cpu_data = get_cpus()
+    cpu_data = _enrich_arm(get_cpus())
     models = [_cpu_model(c) for c in cpu_data]
     env = {'count': count, "models": models}
 
