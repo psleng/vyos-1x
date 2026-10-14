@@ -80,7 +80,7 @@ def _interface_modem_check(iface):
         try:
             modem_state = int(status.get('modem_state', -1))
             fsm_state = status.get('fsm_state', 'DISCONNECTED')
-            print(fsm_state)
+            #print(fsm_state)
         except (TypeError, ValueError):
             modem_state = -1
         if modem_state >= 8 and (fsm_state == 'CONNECTED' or fsm_state == "REGISTERED_IDLE" or fsm_state == "CONNECTING"):
@@ -88,107 +88,6 @@ def _interface_modem_check(iface):
 
     # Fallback: 3GPP registration state 1 HOME / 5 ROAMING = registered.
     return False
-
-def _interface_modem_disconnect(iface):
-    """Tear down the dial-on-demand bearer on a WWAN interface.
-
-    Uses WWANClientSync to disconnect the bearer (modem stays registered) so
-    the modem stops dialing after failing back to a higher-priority interface
-    but can still redial on demand later.
-    """
-    try:
-        client = WWANClientSync()
-        ifnum = int(iface[4:])
-        client.add_interface(ifnum)
-        try:
-            # Only drop an actually-established bearer; a registered/idle modem
-            # has nothing to tear down.
-            if client.get_bearer_status(ifnum) == 'connected':
-                print(f'WLB failback: disconnecting bearer on {iface}')
-                client.disconnect(ifnum)
-        finally:
-            # Always release the D-Bus connection, even if the poll/disconnect
-            # raised — a leaked client would otherwise accumulate one open bus
-            # connection per failback in this long-lived daemon.
-            client.close()
-    except Exception as exc:
-        print(f'WLB failback: disconnect failed for {iface}: {exc}')
-
-
-def get_failover_active_interface(rule_conf, health_state):
-    """Return the active interface name for a failover rule, or None.
-
-    In failover mode wlb_weight_interfaces() returns a single-element list
-    holding the highest-weight healthy interface (the active one).
-    """
-    from vyos.wanloadbalance import wlb_weight_interfaces
-
-    weights, _ = wlb_weight_interfaces(rule_conf, health_state)
-    if len(weights) == 1:
-        return weights[0][0]
-    return None
-
-def handle_dial_on_demand_transition(lb, active_failover_iface, conf):
-    """Keep every non-active dial-on-demand WWAN bearer torn down.
-
-    In failover mode exactly one interface -- the highest-weight healthy one --
-    is active. A dial-on-demand WWAN reports "healthy" while merely registered
-    (bearer down), so it is a legitimate failover target, but its bearer must
-    only be UP while it is the active link. Bringing it UP is owned by the
-    on-demand nft packet-trigger (dial_on_demand pipeline): when WLB steers LAN
-    traffic to the WWAN by fwmark, the trigger queues a packet and dials.
-
-    This function owns the opposite direction: ensuring any dial-on-demand WWAN
-    that is NOT the active link has its bearer DOWN. It reconciles the actual
-    bearer state against the active-link decision on EVERY pass rather than only
-    on the switch edge, because a WWAN bearer can come up without WLB ever
-    selecting it -- e.g. the FSM auto-connects dial-on-demand at boot/service
-    restart, a brief failover blip dialed it, or stray traffic triggered a dial.
-    Edge-only handling misses all of those: if a higher-priority link (e.g.
-    eth0) has been active the whole time, the "switched off the WWAN" edge never
-    fires and the stray bearer lingers up forever.
-
-    `_interface_modem_disconnect` is idempotent (it polls the bearer and only
-    disconnects an actually-connected one, leaving the modem registered so it
-    stays a valid failover target and can redial on demand later), so running
-    the reconcile every pass is safe and self-correcting.
-
-    Args:
-        lb(dict): load-balancer state/config dictionary.
-        active_failover_iface(dict): per-rule memory of the currently active
-            (highest-weight healthy) interface, keyed by rule id. Updated in
-            place (used for logging / cross-pass visibility).
-        conf(Config): VyOS config handle reused for dial-on-demand checks.
-    """
-    if 'rule' not in lb:
-        return
-
-    health_state = lb['health_state']
-
-    for rule_id, rule_conf in lb['rule'].items():
-        if 'failover' not in rule_conf or 'interface' not in rule_conf:
-            continue
-
-        current_iface = get_failover_active_interface(rule_conf, health_state)
-
-        # No healthy active link this pass: do not touch any bearer. A WWAN may
-        # be the only remaining path (about to become active, or mid-dial), so
-        # disconnecting it here could black-hole traffic. Keep the last known
-        # active interface as memory.
-        if current_iface is None:
-            continue
-
-        active_failover_iface[rule_id] = current_iface
-
-        # Reconcile every dial-on-demand WWAN member of this failover rule: the
-        # single active link is allowed to stay connected (the nft trigger dials
-        # it); any OTHER dial-on-demand WWAN must have its bearer torn down,
-        # however it came up.
-        for ifname in rule_conf['interface']:
-            if ifname == current_iface:
-                continue
-            if dial_on_demand_check(ifname, conf):
-                _interface_modem_disconnect(ifname)
 
 def dial_on_demand_check(ifname, conf=None):
     """
@@ -209,9 +108,8 @@ def dial_on_demand_check(ifname, conf=None):
 def _in_failover_rule(ifname, lb):
     """Return True if ifname is a member of any WAN load-balancing failover rule.
 
-    The dial-on-demand daemon behaviours (the modem-state health check and the
-    non-active bearer teardown in handle_dial_on_demand_transition) exist only
-    to support failover. When no failover rule governs the interface, the load
+    The dial-on-demand daemon behaviour (the modem-state health check) exists
+    only to support failover. When no failover rule governs the interface, the load
     balancer must behave exactly as it would for any other interface -- normal
     IP health checks, no bearer management -- regardless of the interface's
     connection-mode. Gating on failover membership keeps the daemon's behaviour
@@ -501,12 +399,6 @@ if __name__ == '__main__':
     # Main loop
 
     init = True;
-    # keys: failover rule id; values: interface name of the previously active
-    # (highest-weight healthy) interface. Comparing it against the current
-    # active interface each pass drives dial-on-demand WWAN bearer connect on
-    # failover TO a WWAN and disconnect on failback OFF a WWAN.
-    active_failover_iface = {}
-    failback_conf = Config()
     while True:
         try:
             ip_change = False
@@ -549,12 +441,13 @@ if __name__ == '__main__':
 
                     restore_default_route(lb, ifname)
 
-            # After evaluating every interface's health, reconcile any
-            # dial-on-demand WWAN bearer with the active failover link: dial it
-            # up when a WWAN has become the active link, or tear it down when a
-            # higher-priority link has taken over.
-            handle_dial_on_demand_transition(lb, active_failover_iface,
-                                             failback_conf)
+            # Note: dial-on-demand WWAN bearers are NOT reconciled here. The
+            # dial-on-demand pipeline brings a bearer up only on real traffic
+            # (the nft packet-trigger) and idles it back down on its own when no
+            # traffic is directed at it, so WLB does not need to tear it down on
+            # failback. WLB's only dial-on-demand-specific job is the modem-state
+            # health spoof in health_check(), which keeps a registered WWAN
+            # selectable as a failover target.
 
             if any(state['state_changed'] for ifname, state in lb['health_state'].items()):
                 if not nftables_update(lb):
