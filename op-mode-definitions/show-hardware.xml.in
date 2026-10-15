@@ -64,12 +64,46 @@
               <help>Show system storage information</help>
             </properties>
             <children>
-              <leafNode name="nvme">
+              <node name="emmc">
+                <properties>
+                  <help>Show eMMC device information</help>
+                </properties>
+                <command>${vyos_op_scripts_dir}/storage_emmc.py show</command>
+                <children>
+                  <tagNode name="extcsd">
+                    <properties>
+                      <help>Show eMMC extended CSD register details</help>
+                      <completionHelp>
+                        <script>ls /dev | egrep '^mmcblk[0-9]+$'</script>
+                      </completionHelp>
+                    </properties>
+                    <command>mmc extcsd read "/dev/$6"</command>
+                  </tagNode>
+                </children>
+              </node>
+              <node name="nvme">
                 <properties>
                   <help>Show NVMe device information</help>
                 </properties>
                 <command>nvme list</command>
-              </leafNode>
+                <children>
+                  <node name="detail">
+                    <properties>
+                      <help>Show detailed NVMe device information</help>
+                    </properties>
+                    <command>nvme list -v</command>
+                  </node>
+                  <tagNode name="health">
+                    <properties>
+                      <help>Show NVMe device health (SMART log) information</help>
+                      <completionHelp>
+                        <script>ls /dev | egrep '^nvme[0-9]+$'</script>
+                      </completionHelp>
+                    </properties>
+                    <command>nvme smart-log "/dev/$6"</command>
+                  </tagNode>
+                </children>
+              </node>
               <node name="scsi">
                 <properties>
                   <help>Show SCSI device information</help>

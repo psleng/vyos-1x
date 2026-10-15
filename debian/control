@@ -390,6 +390,8 @@ Depends:
   net-tools,
 # For "run show hardware storage smart"
   smartmontools,
+# For "run show hardware storage emmc extcsd"
+  mmc-utils,
 # For "run show hardware scsi"
   lsscsi,
 # For "run show hardware pci"
