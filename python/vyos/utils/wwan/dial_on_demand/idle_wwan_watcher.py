@@ -165,7 +165,7 @@ async def idler(interface='wwan0', timeout=30, client=None):
 
         now = int(time.time())
         idle = now - last_active
-        if idle > timeout:
+        if idle >= timeout:
             logger.info(f"idled for: {timeout}")
             await client.disconnect_bearer(int(interface[4:]))
             wait_disconnect = await client.get_bearer_status(ifnum)
