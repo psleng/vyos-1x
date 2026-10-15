@@ -36,7 +36,6 @@ from vyos.wanloadbalance import parse_ppp_nexthop
 
 from vyos.utils.wwan.wwan_client import (  # noqa: E402
     WWANClientSync,
-    WWANError,
 )
 
 
