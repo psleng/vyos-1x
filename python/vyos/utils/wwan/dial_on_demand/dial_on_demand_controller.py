@@ -18,7 +18,7 @@ logging.basicConfig(level=logging.INFO,
                     format="%(module)s: %(message)s")
 
 def cleanup(interface='wwan0'):
-    pattern = re.compile(rf"^table\s+(\S+)\s+({interface}+_raw_\d+)$")
+    pattern = re.compile(rf"^table\s+(\S+)\s+({re.escape(interface)}+_raw_\d+)$")
     result = subprocess.run(
         ["nft", "list", "tables"],
         capture_output=True,
