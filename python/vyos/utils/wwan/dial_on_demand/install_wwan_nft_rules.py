@@ -80,19 +80,27 @@ def run_nft_cmd(cmd=''):
 
 async def async_run_nft_cmd(cmd=''):
     proc = await asyncio.create_subprocess_exec(
-        "nft", "-f", "-", cmd,
+        "nft", "-f", "-",
+        stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await proc.communicate()
+    stdout, stderr = await proc.communicate(cmd.encode())
+    if proc.returncode != 0:
+        raise RuntimeError(f'nft rules installation failed: {stderr.decode().strip()}')
 
 
-def standalone_queue_num(interface):
-    # When no load-balancing wan rule governs this interface there is no user
-    # rule number to reuse as the NFQUEUE id, so derive a deterministic one from
-    # the wwan index (wwan0 -> 1, wwan1 -> 2, ...). The consumer reads the queue
-    # number back from the '{interface}_raw_{queue}' table name, so producer and
-    # consumer stay in sync.
+def wwan_queue_num(interface):
+    # NFQUEUE numbers are global to the network namespace -- they are NOT scoped
+    # to the nft table they are referenced from. Reusing a WLB rule number as the
+    # queue id therefore collides whenever two WWANs share a rule, and an
+    # interface spanning several rules would be split across several queues while
+    # the consumer only binds one. To avoid both, derive ONE deterministic queue
+    # per interface from the wwan index (wwan0 -> 1, wwan1 -> 2, ...). The same
+    # function is used for standalone and WLB installs, so a given interface
+    # always maps to the same unique queue and never collides with another
+    # WWAN's queue. The consumer reads the queue number back from the
+    # '{interface}_raw_{queue}' table name, so producer and consumer stay in sync.
     try:
         return int(interface[len('wwan'):]) + 1
     except (ValueError, IndexError):
@@ -118,7 +126,7 @@ async def generate_standalone_nft_rules(interface='wwan0'):
     # output hook, and divert LAN->WAN routed traffic whose FIB egress resolves
     # to the wwan interface via the RAW prerouting hook. Both go to NFQUEUE so
     # the on-demand trigger can bring the modem up.
-    queue_num = standalone_queue_num(interface)
+    queue_num = wwan_queue_num(interface)
     physical_interfaces = f"{{ {', '.join(get_inbound_interfaces())} }}"
     commands = basic_nft_commands(interface, queue_num)
     # NOTE: forwarded IPv6 destined for wwanX is dropped persistently by the
@@ -158,33 +166,38 @@ async def generate_nft_rules(interface='wwan0'):
         await generate_standalone_nft_rules(interface)
         return
 
-    failover = False
+    # One NFQUEUE (and therefore one '{interface}_raw_{queue}' table) per WWAN
+    # interface, regardless of how many WLB rules reference it. Using the shared
+    # per-interface queue number keeps the id unique across the namespace (no
+    # collision with another WWAN, standalone or WLB) and lets the consumer bind
+    # the single queue and tear down the single table. All rules for this
+    # interface add their prerouting diversions into that one table/queue.
+    queue_num = wwan_queue_num(interface)
+    commands = basic_nft_commands(interface, queue_num)
 
-    commands = f''''''
+    failover = False
     for rule_num in matching:
-        basic_nft_commands = f'''
-        add table inet {interface}_raw_{rule_num}
-        add chain inet {interface}_raw_{rule_num} output {{ type filter hook output priority raw; policy accept; }}
-        add rule inet {interface}_raw_{rule_num} output oifname {interface} queue num {rule_num}
-        add chain inet {interface}_raw_{rule_num} prerouting {{ type filter hook prerouting priority raw; policy accept; }}
-        '''
-        if config.get('rule', {}).get(rule_num, {}).get('failover', {}) is not None:
+        rule_conf = config.get('rule', {}).get(rule_num, {})
+        if rule_conf.get('failover', {}) is not None:
             failover = True
-        inbound_interface = config.get('rule', {}).get(rule_num, {}).get('inbound_interface', {})
+        inbound_interface = rule_conf.get('inbound_interface', {})
 
         if failover is False or inbound_interface == 'any':
-            physical_interfaces = f"{{ {', '.join(get_inbound_interfaces())} }}"
-            commands = f'''add rule inet {interface}_raw_{rule_num} prerouting iifname {physical_interfaces} fib daddr oifname "{interface}" queue num {rule_num}
-            '''
+            scope = f"{{ {', '.join(get_inbound_interfaces())} }}"
         else:
-            commands = f'''add rule inet {interface}_raw_{rule_num} prerouting iifname {{ {inbound_interface} }} fib daddr oifname "{interface}" queue num {rule_num}
-            '''
-        try:
-            logger.info("Command to install: %s", basic_nft_commands + commands)
-            await async_run_nft_cmd(basic_nft_commands + commands)
-            logger.info("Generated nft rules...installing now")
-        except asyncio.CancelledError:
-            raise
+            scope = f"{{ {inbound_interface} }}"
+        commands += (
+            f'add rule inet {interface}_raw_{queue_num} prerouting '
+            f'iifname {scope} fib daddr oifname "{interface}" '
+            f'queue num {queue_num}\n'
+        )
+
+    try:
+        logger.info("Command to install: %s", commands)
+        await async_run_nft_cmd(commands)
+        logger.info("Generated nft rules...installing now")
+    except asyncio.CancelledError:
+        raise
 
 
 if __name__ == "__main__":
