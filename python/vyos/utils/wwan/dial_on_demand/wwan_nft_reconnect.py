@@ -1,0 +1,308 @@
+#!/usr/bin/env python3
+#
+# NFQUEUE-based on-demand WWAN trigger for Debian Bookworm
+#
+# When outbound traffic to wwan0 is detected and the modem is not connected,
+# this script uses ModemManager to bring it up on demand.
+
+from netfilterqueue import NetfilterQueue
+import subprocess
+import re
+import asyncio
+import argparse
+import logging
+
+from vyos.utils.wwan.dial_on_demand._client import open_client_with_retry
+
+COOLDOWN = 60           # seconds between connection attempts
+CONNECT_TIMEOUT = 20    # seconds to wait for modem to connect
+
+logger = logging.getLogger(__name__)
+
+shutdown_event = asyncio.Event()
+
+packet_queue = asyncio.Queue(maxsize=1024)
+modem_ready_event = asyncio.Event()
+
+# returns dict {interface: modem_id}
+
+def get_modem_mapping():
+    result = subprocess.run(["mmcli", "-L"], capture_output=True, text=True)
+    modems = re.findall(r'Modem/(\d+)', result.stdout)
+
+    mapping = {}
+
+    for modem_index in modems:
+        info = subprocess.run(
+            ["mmcli", "-m", modem_index],
+            capture_output=True,
+            text=True
+        ).stdout
+
+        ports = re.findall(r'(wwan\d+)\s+\(net\)', info)
+        for port in ports:
+            mapping[port] = int(modem_index)
+
+    return mapping
+
+# async function to delete the nft netfilter queue rules
+async def teardown_nftables(queue, interface='wwan0'):
+    nft_table = f'{interface}_raw_{queue}'
+    proc = await asyncio.create_subprocess_exec("nft", "delete", "table", "inet", nft_table,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE)
+    try:
+        stdout, stderr = await proc.communicate()
+    except:
+        proc.kill()
+        await proc.communicate()
+        return -1, "", "exception"
+    #print(stdout.decode())
+    if proc.returncode == 0:
+        return True
+    return False
+
+
+def event_loop(loop=None):
+    if loop is None:
+        return asyncio.get_event_loop()
+    else:
+        return loop
+# This function acts as the packet consumer.
+
+# This acts as the packet producer
+class PacketHandler:
+    def __init__(self, interface='wwan0', connect_timeout=30, loop=None, client=None):
+        self.interface = interface
+        self.connect_timeout = connect_timeout
+        self.client = client
+        self.tasks = set()
+        self.shutdown = False
+        self.close_client_needed = False
+        if client is None:
+            self.close_client_needed = True
+        if loop is None:
+            loop = event_loop(loop)
+        self.loop = loop
+        self.modem_bringup_started = False
+
+    # close all the tasks
+    async def cleanup_tasks(self):
+        for task in self.tasks:
+            task.cancel()
+        if self.tasks:
+            await asyncio.gather(*self.tasks, return_exceptions=True)
+        if self.client is None:
+            return
+        if self.close_client_needed:
+            await self.client.close()
+
+    # setup
+    async def setup(self):
+        logger.info('Setting up the packet handler object.')
+        if self.client is None:
+            client = await open_client_with_retry(self.interface)
+            logger.info('WWAN Client has been created and opened.')
+            self.client = client
+        return self
+
+    async def packet_consumer(self, queue_num):
+
+        await modem_ready_event.wait()
+
+        while not packet_queue.empty():
+            pkt = await packet_queue.get()
+            logger.info(f"Packet received and accepting from queue: {pkt}")
+            pkt.accept()
+
+        await teardown_nftables(queue_num, self.interface)
+
+        self.loop.call_soon_threadsafe(shutdown_event.set)
+
+
+    # packet handler wrapper
+    def handle_packet(self, packet):
+        if self.shutdown:
+            packet.accept()
+            return
+        packet.retain()
+        task = self.loop.create_task(self.handle_packet_async(packet))
+        self.tasks.add(task)
+        # Drop the task from the set as soon as it finishes so `self.tasks` does
+        # not grow by one per received packet for the life of the handler.
+        task.add_done_callback(self.tasks.discard)
+
+    # async packet handler
+    def put_packet(self, packet):
+        try:
+            packet_queue.put_nowait(packet)
+        except asyncio.QueueFull:
+            logger.info("Packet queue full → dropping packets")
+            packet.drop()
+            pass
+
+    async def handle_packet_async(self, packet):
+
+        #if await modem_connected(self.modem_id):
+        #print(f"Modem id is: {self.modem_id}")
+
+        if shutdown_event.is_set() or modem_ready_event.is_set():
+            logger.info(f"Packet received and accepting from callback: {packet}")
+            packet.accept()
+            return
+        # enqueue the packet into an async queue (the async queue is not thread safe)
+        try:
+            self.loop.call_soon_threadsafe(self.put_packet, packet)
+            logger.info(f"Packet queued: {packet}")
+        except asyncio.CancelledError:
+            packet.drop()
+            raise
+
+
+        # first case if modem is already connected, set the modem event to ready if it's not already set
+
+        # second case if modem is not connected, bring up the modem ONLY if it hasn't been attempted already
+        # in this case, we also bring up the modem_ready_event
+        #if not modem_bringup_started:
+        #    modem_bringup_started = True
+        # replace the bring_modem_up, wait_for_modem for appropriate functions
+        if self.client is None:
+            return
+        #print(self.connect_timeout)
+        #async with WWANClient() as client:
+
+        #print(await self.client.get_bearer_status(int(self.interface[4:])))
+        #print(await self.client.get_status(int(self.interface[4:])))
+        if await self.client.get_bearer_status(int(self.interface[4:])) == "connected" and not modem_ready_event.is_set():
+            #print("If modem is connected, set modem_ready_event")
+            self.loop.call_soon_threadsafe(modem_ready_event.set)
+            return
+
+        if not self.modem_bringup_started:
+            self.modem_bringup_started = True
+            if await self.client.connect_bearer(int(self.interface[4:])) == 'accepted':
+                #print('connect_bearer started')
+                result = await self.client.wait_for_bearer(int(self.interface[4:]), "connected", timeout=float(self.connect_timeout))
+                logger.info(f"Have we successfully reconnected? {result}")
+                if result == True:
+                    self.loop.call_soon_threadsafe(modem_ready_event.set)
+                    #await renew_dhcp(self.interface)
+        #if not dhcp_success_event.is_set() and modem_bringup_started:
+        #    success, logs = await renew_dhcp("wwan0", timeout=15)
+        #    if success:
+        #        print("DHCP lease acquired (DHCPACK seen)")
+        #        loop.call_soon_threadsafe(dhcp_success_event.set)
+        #    else:
+        #        print("Timeout or failed to get DHCPACK")
+
+
+# -------------------- Main --------------------
+
+
+def get_all_wwan_options():
+    "Map each WWAN interface to its modem index, excluding LAN-side (inbound) WWANs"
+    result = subprocess.run(["cli-shell-api", "showConfig", "--show-active-only", "--show-commands"], capture_output=True, text=True)
+    config = result.stdout.replace("'", "")
+    wwan_to_check = get_modem_mapping()
+
+    if "load-balancing" not in config:
+        return wwan_to_check
+
+    # A WWAN used as an 'inbound-interface' is LAN-facing, so it must not be
+    # dialed on demand. Exclude any such interface from the mapping.
+    inbound_interfaces = set(re.findall(r"inbound-interface\s+(\S+)", config))
+    return {k: v for k, v in wwan_to_check.items() if k not in inbound_interfaces}
+
+# for the interface, get the netfilter queue number
+def get_interface_queue_num(interface):
+
+    result = subprocess.run(["nft", "list", "tables"], capture_output=True, text=True, check=True)
+    matches = re.findall(rf"table\s+\S+\s+({interface}_raw_\d+)", result.stdout)
+    pattern = r'oifname\s+"(?P<oifname>\S+)"\s+queue\s+to\s+(?P<queue>\d+)'
+    for tables in matches:
+        table_info = subprocess.run(['nft', 'list', 'table', 'inet', tables], capture_output=True, text=True, check=True)
+
+        wwan_matches = re.finditer(pattern, table_info.stdout)
+        for m in wwan_matches:
+           if m.group("oifname") == interface:
+               return int(m.group("queue"))
+    return None
+
+def start_nfqueue(nfqueue):
+    nfqueue.run(block=False)
+
+
+async def main(interface='wwan0', connect_timeout=30, loop=None, client=None):
+
+    queue_num = get_interface_queue_num(interface)
+    logger.info(f"Given timeout to wait for modem connect: {connect_timeout}")
+
+    logger.info(f"The nfqueue to listen to: {queue_num}")
+    wwan_options = get_all_wwan_options()
+    logger.info(f'{wwan_options}')
+    if interface not in wwan_options:
+        return
+
+    if queue_num is None:
+        return
+
+    nfqueue = NetfilterQueue()
+    fd = nfqueue.get_fd()
+    loop = event_loop(loop)
+
+    try:
+        handler = PacketHandler(interface, connect_timeout, loop=loop, client=client)
+        if client is None:
+            await handler.setup()
+        # Bind to queue number 1
+        nfqueue.bind(queue_num, handler.handle_packet)
+
+        #nfqueue.run()
+        # Use file descriptor in an async way
+        fd = nfqueue.get_fd()
+        #print(f"Listening on NFQueue fd {fd}")
+
+        loop.add_reader(fd, start_nfqueue, nfqueue)
+
+        logger.info("Started to listen to nfqueue.")
+        worker_task = loop.create_task(handler.packet_consumer(queue_num))
+
+        # We wait for the worker task to tell us to stop.
+        logger.info('Packet consumer task created. Now waiting to finish.')
+        await shutdown_event.wait()
+        logger.info('Finished tasks, closing client and unbinding nfqueue.')
+
+        #await handler.removed_event.wait()
+        #loop.run_forever()
+    except asyncio.CancelledError:
+        raise
+    except asyncio.queues.QueueFull:
+        pass
+    finally:
+        handler.shutdown = True
+        loop.remove_reader(fd)
+        worker_task.cancel()
+        # Await the cancelled consumer so its cancellation actually completes --
+        # otherwise the task object lingers and asyncio logs "Task was destroyed
+        # but it is pending".
+        await asyncio.gather(worker_task, return_exceptions=True)
+        await handler.cleanup_tasks()
+        nfqueue.unbind()
+
+
+if __name__ == "__main__":
+
+    parser = argparse.ArgumentParser(prog="nfqueue-bound-monitor", description="binds wwanX to nfqueue", epilog="Test")
+    parser.add_argument('params',help="colon separated parameter string")
+    args = parser.parse_args()
+    params = args.params
+    items = params.split(':')
+    if len(items) > 2:
+        raise ValueError("Too many arguments for this function")
+    interface, timeout = items
+
+    loop = event_loop(None)
+    try:
+        loop.run_until_complete(main(interface=interface, connect_timeout=timeout, loop=loop))
+    finally:
+        loop.close()

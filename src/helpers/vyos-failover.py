@@ -26,6 +26,60 @@ from vyos.utils.process import rc_cmd
 from vyos.utils.process import run
 from pathlib import Path
 from systemd import journal
+from vyos.utils.wwan.wwan_client import (  # noqa: E402
+    WWANClientSync,
+)
+from vyos.config import Config
+
+
+def _interface_modem_check(iface):
+    """Health check for a dial-on-demand WWAN interface.
+
+    Mirrors the WAN load-balancer spoof (vyos-load-balancer.py): a dial-on-demand
+    bearer is intentionally DOWN whenever it is idle, so testing bearer status
+    would mark the interface permanently unhealthy -- failover would then never
+    select it as a backup nexthop and the on-demand trigger would never get the
+    traffic it needs to dial. Instead treat the interface as healthy when the
+    modem is REGISTERED on the network (ready to dial on demand) or already
+    connected, using the ModemManager modem state (8 REGISTERED .. 11 CONNECTED)
+    combined with the FSM state.
+
+    NB: this runs on every failover poll from the long-lived daemon loop, so the
+    client MUST be closed each time. A leaked WWANClientSync keeps its D-Bus
+    MessageBus connection open; accumulating one per poll eventually exhausts
+    dbus-daemon's max_connections_per_user (default 256), after which the IGOS
+    daemon is no longer reachable (ServiceUnknown).
+    """
+    status = None
+    try:
+        client = WWANClientSync()
+        ifnum = int(iface[4:])
+        try:
+            # add_interface is idempotent and just ensures the service has the
+            # interface object so get_status() can resolve it. No
+            # set_configuration here: re-applying the config every poll makes the
+            # FSM fire a RECONFIGURE that bounces a connected bearer.
+            client.add_interface(ifnum)
+            status = client.get_status(ifnum)
+        finally:
+            client.close()
+    except Exception as exc:
+        print_debug(f'    [ MODEM_CHECK ] health check failed for {iface}: {exc}')
+        return False
+
+    # MMModemState: 8 REGISTERED, 9 DISCONNECTING, 10 CONNECTING, 11 CONNECTED
+    # all mean "on the network and able to carry a bearer".
+    if status is not None:
+        try:
+            modem_state = int(status.get('modem_state', -1))
+            fsm_state = status.get('fsm_state', 'DISCONNECTED')
+        except (TypeError, ValueError):
+            modem_state = -1
+            fsm_state = 'DISCONNECTED'
+        if modem_state >= 8 and fsm_state in ('CONNECTED', 'REGISTERED_IDLE', 'CONNECTING'):
+            return True
+
+    return False
 
 
 my_name = Path(__file__).stem
@@ -40,6 +94,19 @@ config_timeout = 1
 debug = False
 debug_output_journal = False
 debug_output_print = True
+
+def dial_on_demand_check(ifname):
+    """
+    Return True if ifname is a WWAN interface configured for dial-on-demand.
+
+    Only wwanX interfaces with dial-on-demand use the modem bearer check; every
+    other interface (ethX, ...) uses the normal IP health check.
+    """
+    if not ifname.startswith('wwan'):
+        return False
+    conf = Config()
+    return bool(conf.exists_effective(
+        ['interfaces', 'wwan', ifname, 'connection-mode', 'dial-on-demand']))
 
 
 def print_debug(*args, **kwargs):
@@ -137,6 +204,10 @@ def is_target_alive(
         # in any case if 'interface' is given, use it
         if options.interface:
             iface_opt = f'-I {options.interface}'
+
+        if dial_on_demand_check(target_iface):
+            return _interface_modem_check(target_iface)
+
         match proto:
             case 'icmp':
                 command = f'/usr/bin/ping -q {target} {iface_opt} -n -c 2 -W 1'
@@ -599,5 +670,9 @@ if __name__ == '__main__':
                 time.sleep(int(nhc.timeout))
                 if kill_called:
                     break
+
+            # Note: a dial-on-demand WWAN bearer is NOT torn down on failback
+            # here. Dial-on-demand idles its own bearer down when no traffic is
+            # directed at it, so vyos-failover does not need to disconnect it.
 
     print_debug(f"Out of main loop, {kill_called=}")

@@ -35,6 +35,14 @@ service_conf_dir = Path(f'/run/{service_name}.conf.d/')
 systemd_service = '/run/systemd/system/vyos-failover.service'
 rt_proto_failover = Path('/etc/iproute2/rt_protos.d/failover.conf')
 
+# Data needed by _restart_dial_on_demand(), precomputed in get_config() using the
+# single Config instance so apply() never instantiates a second Config (which
+# trips the "more than one instance of Config" build error). A module global
+# rather than a key on the failover dict because failover may be empty ({}) on
+# removal, where verify()/generate() still rely on `if not failover` seeing it as
+# falsy -- stashing a key would make it truthy and break the removal path.
+_dial_on_demand_context = {}
+
 
 def get_vrf_name():
     if argv and len(argv) > 1:
@@ -74,6 +82,23 @@ def get_config(config=None):
 
     if failover:
         failover['vrf_context'] = vrf_name
+
+    # Precompute the dial-on-demand restart context with THIS Config instance so
+    # apply()/_restart_dial_on_demand() need not create a second Config. Stored
+    # in a module global (see its definition) because failover may be {} on
+    # removal and must stay falsy for the `if not failover` guards.
+    global _dial_on_demand_context
+    effective = conf.get_config_dict(base, key_mangling=('-', '_'),
+                                     get_first_key=True, effective=True)
+    wwan = conf.get_config_dict(['interfaces', 'wwan'], key_mangling=('-', '_'),
+                                get_first_key=True)
+    _dial_on_demand_context = {
+        'effective_interfaces': _failover_interfaces(effective or {}),
+        'dial_on_demand_interfaces': [
+            ifname for ifname, ifconfig in wwan.items()
+            if ifconfig.get('connection_mode') == 'dial-on-demand'
+        ],
+    }
 
     return failover
 
@@ -172,6 +197,48 @@ def generate(failover):
 
     return None
 
+def _failover_interfaces(failover):
+    """Set of interfaces participating in a parsed failover dict.
+
+    Both `dhcp-interface <if>` (tag key) and `next-hop <ip> interface <if>`
+    (child leaf) forms.
+    """
+    ifaces = set()
+    for route_conf in (failover.get('route') or {}).values():
+        for ifname in (route_conf.get('dhcp_interface') or {}):
+            ifaces.add(ifname)
+        for nh_conf in (route_conf.get('next_hop') or {}).values():
+            iface = nh_conf.get('interface')
+            if iface:
+                ifaces.add(iface)
+    return ifaces
+
+def _restart_dial_on_demand(failover):
+    """Rebuild the dial-on-demand nft trigger scope when the protocols failover
+    interface set CHANGES (an interface added or removed).
+
+    install_wwan_nft_rules.get_inbound_interfaces() excludes protocols-failover
+    WAN interfaces from the dial-on-demand prerouting scope, and that scope is
+    computed when the dial-on-demand pipeline (re)starts. Restart each running
+    dial-on-demand instance ONLY when the failover interface set differs from the
+    effective config -- not on check-target or other failover edits -- so an
+    active link is not bounced unnecessarily. No-op when no wwan uses
+    dial-on-demand. The restart only rebuilds the nft rules; it does NOT drop the
+    bearer, which igos-wwan-manager owns.
+
+    Uses the context precomputed by get_config() (effective failover interfaces
+    and the dial-on-demand wwan interfaces) instead of instantiating a second
+    Config() here, which would trip the "more than one instance of Config" build
+    error.
+    """
+    context = _dial_on_demand_context
+
+    if _failover_interfaces(failover or {}) == context.get('effective_interfaces', set()):
+        return
+
+    for ifname in context.get('dial_on_demand_interfaces', []):
+        call(f'systemctl restart dial-on-demand@{ifname}:*.service')
+
 def apply(failover):
     # If directory is removed - we can stop the service
     if not service_conf_dir.is_dir():
@@ -185,6 +252,12 @@ def apply(failover):
         if not is_systemd_service_running(service_name):
             call('systemctl daemon-reload')
             call(f'systemctl start {service_name}.service')
+
+    # When the failover interface set CHANGES (an interface added or removed),
+    # the dial-on-demand nft trigger must update which interfaces it excludes
+    # from its prerouting scope. Restart dial-on-demand (if configured) so it
+    # regenerates that scope -- only on an interface-set change.
+    _restart_dial_on_demand(failover)
 
     return None
 
