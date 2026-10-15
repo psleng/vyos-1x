@@ -1313,6 +1313,8 @@ def apply(wwan):
         # path below.
         disable_last_active = wwan.get('_disable_last_active', False)
         _ensure_manager_running()
+
+        wwan_on_demand_service(wwan, ifname, False, 'stop')
         # interface is administratively down: remove its IPv6 egress guard
         _remove_dod_ipv6_drop(ifname)
         removed = asyncio.run(_remove_via_dbus(interface_number))

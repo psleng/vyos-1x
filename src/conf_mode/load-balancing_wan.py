@@ -189,6 +189,9 @@ def _dial_on_demand_should_run(conf, ifname):
     if not ifname.startswith('wwan'):
         return False
 
+    if conf.exists(['interfaces', 'wwan', ifname, 'disable']):
+        return False
+
     if conf.return_value(['interfaces', 'wwan', ifname,
                           'connection-mode']) != 'dial-on-demand':
         return False
