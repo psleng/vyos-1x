@@ -88,6 +88,8 @@ class PacketHandler:
 
     # close all the tasks
     async def cleanup_tasks(self):
+        for task in self.tasks:
+            task.cancel()
         if self.tasks:
             await asyncio.gather(*self.tasks, return_exceptions=True)
         if self.client is None:
