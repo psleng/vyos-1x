@@ -53,6 +53,7 @@ from vyos.utils.process import is_systemd_service_active
 from vyos.utils.process import is_systemd_service_running
 from vyos import ConfigError
 from vyos import airbag
+from vyos import tpm
 
 airbag.enable()
 
@@ -422,6 +423,20 @@ def verify(pki):
                 private = ca_conf['private']
                 protected = 'password_protected' in private
 
+                if tpm.tpm_enabled():
+                    save_file = ca_conf['private']['key']
+                    # We will save all tpm sealed private keys in /config/auth/
+                    save_dir = "/config/auth/"
+
+                    # TODO: Assume that if the file exists in this location, it is likely the tpm sealed key; but what if unrelated file happens to share the same name
+                    if os.path.exists(save_dir + save_file):
+                        reread_key = tpm.read_tpm_key_file(save_file)
+                        ca_conf['private']['key'] = reread_key
+
+                    else:
+                        # TODO: This may conflict with future pki changes; Shu's changes for TPM would also be handled here
+                        pass
+
                 if not is_valid_private_key(private['key'], protected):
                     raise ConfigError(f'Invalid private key on CA certificate "{name}"')
 
@@ -443,6 +458,21 @@ def verify(pki):
             if 'private' in cert_conf and 'key' in cert_conf['private']:
                 private = cert_conf['private']
                 protected = 'password_protected' in private
+
+                # If we do not have the key, try to read the file to retrieve it
+                if tpm.tpm_enabled() and not is_valid_private_key(private['key'], protected):
+                    save_file = cert_conf['private']['key']
+                    # We will save all tpm sealed private keys in /config/auth/
+                    save_dir = "/config/auth/"
+
+                    # TODO: Assume that if the file exists in this location, it is likely the tpm sealed key; what if unrelated / old file exists with same name
+                    if os.path.exists(save_dir + save_file):
+                        reread_key = tpm.read_tpm_key_file(save_file)
+                        cert_conf['private']['key'] = reread_key
+
+                    else:
+                        # TODO: may conflict with openssl pki implementation.  Ideally, Shu's changes for TPM would need to be accounted for
+                        pass
 
                 if not is_valid_private_key(private['key'], protected):
                     raise ConfigError(f'Invalid private key on certificate "{name}"')
@@ -500,6 +530,22 @@ def verify(pki):
             if 'private' in key_conf and 'key' in key_conf['private']:
                 private = key_conf['private']
                 protected = 'password_protected' in private
+
+                # If we do not have the key, try to read the file to retrieve it
+                if tpm.tpm_enabled() and not is_valid_private_key(private['key'], protected):
+                    save_file = key_conf['private']['key']
+                    # We will save all tpm sealed private keys in /config/auth/
+                    save_dir = "/config/auth/"
+
+                    # TODO: Assume that if the file exists in this location, it is likely the tpm sealed key; what if unrelated / old file exists with same name
+                    if os.path.exists(save_dir + save_file):
+                        reread_key = tpm.read_tpm_key_file(save_file)
+                        key_conf['private']['key'] = reread_key
+
+                    else:
+                        # TODO: may conflict with openssl pki implementation.  Ideally, Shu's changes for TPM would need to be accounted for
+                        pass
+
                 if not is_valid_private_key(private['key'], protected):
                     raise ConfigError(f'Invalid private key on key-pair "{name}"')
 
