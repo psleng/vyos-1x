@@ -35,6 +35,14 @@ service_conf_dir = Path(f'/run/{service_name}.conf.d/')
 systemd_service = '/run/systemd/system/vyos-failover.service'
 rt_proto_failover = Path('/etc/iproute2/rt_protos.d/failover.conf')
 
+# Data needed by _restart_dial_on_demand(), precomputed in get_config() using the
+# single Config instance so apply() never instantiates a second Config (which
+# trips the "more than one instance of Config" build error). A module global
+# rather than a key on the failover dict because failover may be empty ({}) on
+# removal, where verify()/generate() still rely on `if not failover` seeing it as
+# falsy -- stashing a key would make it truthy and break the removal path.
+_dial_on_demand_context = {}
+
 
 def get_vrf_name():
     if argv and len(argv) > 1:
@@ -74,6 +82,23 @@ def get_config(config=None):
 
     if failover:
         failover['vrf_context'] = vrf_name
+
+    # Precompute the dial-on-demand restart context with THIS Config instance so
+    # apply()/_restart_dial_on_demand() need not create a second Config. Stored
+    # in a module global (see its definition) because failover may be {} on
+    # removal and must stay falsy for the `if not failover` guards.
+    global _dial_on_demand_context
+    effective = conf.get_config_dict(base, key_mangling=('-', '_'),
+                                     get_first_key=True, effective=True)
+    wwan = conf.get_config_dict(['interfaces', 'wwan'], key_mangling=('-', '_'),
+                                get_first_key=True)
+    _dial_on_demand_context = {
+        'effective_interfaces': _failover_interfaces(effective or {}),
+        'dial_on_demand_interfaces': [
+            ifname for ifname, ifconfig in wwan.items()
+            if ifconfig.get('connection_mode') == 'dial-on-demand'
+        ],
+    }
 
     return failover
 
@@ -200,22 +225,19 @@ def _restart_dial_on_demand(failover):
     active link is not bounced unnecessarily. No-op when no wwan uses
     dial-on-demand. The restart only rebuilds the nft rules; it does NOT drop the
     bearer, which igos-wwan-manager owns.
-    """
-    conf = Config()
-    vrf_name = get_vrf_name()
-    base = ['vrf', 'name', vrf_name] if vrf_name else []
-    base += ['protocols', 'failover']
-    effective = conf.get_config_dict(base, key_mangling=('-', '_'),
-                                     get_first_key=True, effective=True)
 
-    if _failover_interfaces(failover or {}) == _failover_interfaces(effective or {}):
+    Uses the context precomputed by get_config() (effective failover interfaces
+    and the dial-on-demand wwan interfaces) instead of instantiating a second
+    Config() here, which would trip the "more than one instance of Config" build
+    error.
+    """
+    context = _dial_on_demand_context
+
+    if _failover_interfaces(failover or {}) == context.get('effective_interfaces', set()):
         return
 
-    wwan = conf.get_config_dict(['interfaces', 'wwan'], key_mangling=('-', '_'),
-                                get_first_key=True)
-    for ifname, ifconfig in wwan.items():
-        if ifconfig.get('connection_mode') == 'dial-on-demand':
-            call(f'systemctl restart dial-on-demand@{ifname}:*.service')
+    for ifname in context.get('dial_on_demand_interfaces', []):
+        call(f'systemctl restart dial-on-demand@{ifname}:*.service')
 
 def apply(failover):
     # If directory is removed - we can stop the service
