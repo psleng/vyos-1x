@@ -589,7 +589,6 @@ if __name__ == '__main__':
     # Translates nexthop with dhcp_interface to usual nexthop
     nexthop_by_dhcp_nexthop = {}
 
-    print('failover started')
     had_sleeps = True
     while not kill_called:
         # Check in case daemon was launched without routes
