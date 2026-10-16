@@ -42,7 +42,8 @@ exclude_users=*{{ ',' + exclude_users | join(',') if exclude_users is vyos_defin
 {% if tacacs.server is vyos_defined %}
 {%     for server, server_config in tacacs.server.items() %}
 secret={{ server_config.key }}
-server={{ server }}:{{ server_config.port }}
+{#     IPv6 literals must be bracketed so the host:port split is unambiguous #}
+server={{ ('[' ~ server ~ ']') if ':' in server else server }}:{{ server_config.port }}
 
 {%     endfor %}
 {% endif %}
