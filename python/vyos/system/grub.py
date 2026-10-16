@@ -129,6 +129,48 @@ def _image_has_dtb():
         return False
 
 
+def version_dm_verity(version_name: str, root_dir: str = '') -> bool:
+    """Resolve the dm-verity verdict for an installed version's GRUB entry
+
+    The verdict is a property of the image being booted, NOT of the running
+    system. Falling back to the running image's flavor is what downgraded a
+    freshly added verity image to `root=UUID=...` when it was installed from
+    a non-verity image (the initramfs then refuses to boot, fail-closed).
+
+    Order: running image -> running flavor; otherwise the version's own
+    squashfs flavor.json; otherwise preserve the existing entry's verdict;
+    only as a last resort, the running flavor.
+    """
+    # Lazy import: vyos.system.image imports this module
+    from vyos.system.image import get_running_image
+    from vyos.system.image import image_dm_verity
+
+    if not root_dir:
+        root_dir = disk.find_persistence()
+
+    # Never loop-mount the live root squashfs; its flavor is authoritative.
+    if version_name == get_running_image():
+        return get_image_dm_verity()
+
+    image_dir = Path(f'{root_dir}/boot/{version_name}')
+    candidates = [image_dir / f'{version_name}.squashfs']
+    if image_dir.is_dir():
+        candidates += sorted(p for p in image_dir.glob('*.squashfs')
+                             if p not in candidates)
+    for squashfs in candidates:
+        verdict = image_dm_verity(str(squashfs))
+        if verdict is not None:
+            return verdict
+
+    version_config = Path(f'{root_dir}/{GRUB_DIR_VYOS_VERS}/{version_name}.cfg')
+    if version_config.exists():
+        return 'root=/dev/mapper/verity-root' in version_config.read_text()
+
+    print(f'WARNING: dm-verity: cannot determine verity flag for '
+          f'"{version_name}"; falling back to the running image flavor')
+    return get_image_dm_verity()
+
+
 def version_add(version_name: str,
                 root_dir: str = '',
                 boot_opts: str = '',
@@ -148,9 +190,9 @@ def version_add(version_name: str,
     if not root_dir:
         root_dir = disk.find_persistence()
     # dm-verity images boot the root squashfs via /dev/mapper/verity-root
-    # (see grub_vyos_version.j2); default to the flavor baked into the image.
+    # (see grub_vyos_version.j2); resolve the verdict from THIS version's image.
     if dm_verity is None:
-        dm_verity = get_image_dm_verity()
+        dm_verity = version_dm_verity(version_name, root_dir)
     version_config: str = f'{root_dir}/{GRUB_DIR_VYOS_VERS}/{version_name}.cfg'
     render(
         version_config, TMPL_VYOS_VERSION, {
