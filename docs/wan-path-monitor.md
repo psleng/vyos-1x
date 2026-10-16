@@ -1,6 +1,6 @@
-# WAN path testing
+# WAN path monitor
 
-`/usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py` provides passive interface readiness,
+`/usr/lib/python3/dist-packages/vyos/utils/wan/wan_path_monitor.py` provides passive interface readiness,
 active probes, and a stateful health monitor. Route failover is opt-in and
 changes only runtime default-route metrics; it does not modify the VyOS
 configuration.
@@ -39,14 +39,14 @@ Checks whether `wwan0` is administratively up, has an address, and has a usable
 route.
 
 ```sh
-sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 \
+sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_path_monitor.py wwan0 \
   --method interface-status
 ```
 
 ## Ping
 
 ```sh
-sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 \
+sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_path_monitor.py wwan0 \
   --method ping \
   --primary-target 1.1.1.1
 ```
@@ -54,7 +54,7 @@ sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 
 ## TCP
 
 ```sh
-sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 \
+sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_path_monitor.py wwan0 \
   --method tcp \
   --primary-target 1.1.1.1 \
   --port 443
@@ -65,7 +65,7 @@ sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 
 IPv4 (`A`) query:
 
 ```sh
-sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 \
+sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_path_monitor.py wwan0 \
   --method dns \
   --primary-target 1.1.1.1 \
   --name example.com \
@@ -75,7 +75,7 @@ sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 
 IPv6 (`AAAA`) query:
 
 ```sh
-sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 \
+sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_path_monitor.py wwan0 \
   --method dns \
   --primary-target 2606:4700:4700::1111 \
   --name example.com \
@@ -85,7 +85,7 @@ sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 
 ## HTTP
 
 ```sh
-sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 \
+sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_path_monitor.py wwan0 \
   --method http \
   --primary-target http://example.com/
 ```
@@ -93,7 +93,7 @@ sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 
 ## HTTPS
 
 ```sh
-sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 \
+sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_path_monitor.py wwan0 \
   --method https \
   --primary-target https://example.com/
 ```
@@ -104,7 +104,7 @@ Use `--watch` to repeat a test. Two targets can be tested concurrently with
 `--secondary-target`.
 
 ```sh
-sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 \
+sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_path_monitor.py wwan0 \
   --method ping \
   --primary-target 1.1.1.1 \
   --secondary-target 8.8.8.8 \
@@ -152,7 +152,7 @@ Example with two targets and a 10-second interval:
 PING
 
 ```sh
-sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 \
+sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_path_monitor.py wwan0 \
   --method ping \
   --primary-target 1.1.1.1 \
   --secondary-target 8.8.8.8 \
@@ -162,7 +162,7 @@ sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 
   --failure-threshold 3 \
   --recovery-threshold 2
 
-sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 \
+sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_path_monitor.py wwan0 \
   --method ping \
   --primary-target 2606:4700:4700::1111 \
   --watch \
@@ -175,7 +175,7 @@ sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 
 DNS:
 
 ```sh
-sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 \
+sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_path_monitor.py wwan0 \
   --method dns \
   --primary-target 1.1.1.1 \
   --name example.com \
@@ -186,7 +186,7 @@ sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 
   --failure-threshold 3 \
   --recovery-threshold 2
 
-sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 \
+sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_path_monitor.py wwan0 \
   --method dns \
   --primary-target 1.1.1.1 \
   --secondary-target 8.8.8.8 \
@@ -202,7 +202,7 @@ sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 
 TCP:
 
 ```sh
-sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 \
+sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_path_monitor.py wwan0 \
   --method tcp \
   --primary-target 1.1.1.1 \
   --port 443 \
@@ -212,7 +212,7 @@ sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 
   --failure-threshold 3 \
   --recovery-threshold 2
 
-sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 \
+sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_path_monitor.py wwan0 \
   --method tcp \
   --primary-target 1.1.1.1 \
   --secondary-target 8.8.8.8 \
@@ -227,7 +227,7 @@ sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 
 HTTP:
 
 ```sh
-sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 \
+sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_path_monitor.py wwan0 \
   --method http \
   --primary-target http://example.com/ \
   --watch \
@@ -236,7 +236,7 @@ sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 
   --failure-threshold 3 \
   --recovery-threshold 2
 
-sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 \
+sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_path_monitor.py wwan0 \
   --method http \
   --primary-target http://example.com/ \
   --secondary-target http://example.org/ \
@@ -250,7 +250,7 @@ sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 
 HTTPS:
 
 ```sh
-sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 \
+sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_path_monitor.py wwan0 \
   --method https \
   --primary-target https://example.com/ \
   --watch \
@@ -259,7 +259,7 @@ sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 
   --failure-threshold 3 \
   --recovery-threshold 2
 
-sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py wwan0 \
+sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_path_monitor.py wwan0 \
   --method https \
   --primary-target https://example.com/ \
   --secondary-target https://example.org/ \
@@ -288,7 +288,7 @@ After three consecutive failed rounds, the primary WAN is considered DOWN. To
 change the runtime route preference to cellular, add the cellular interface:
 
 ```sh
-sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py eth0 \
+sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_path_monitor.py eth0 \
   --method ping \
   --primary-target 1.1.1.1 \
   --secondary-target 8.8.8.8 \
@@ -324,7 +324,7 @@ For a direct, opt-in primary-to-cellular failover monitor, add
 demoted after the failure threshold and restored after the recovery threshold:
 
 ```sh
-sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_testing.py eth0 \
+sudo python3 /usr/lib/python3/dist-packages/vyos/utils/wan/wan_path_monitor.py eth0 \
   --method ping \
   --primary-target 1.1.1.1 \
   --watch \

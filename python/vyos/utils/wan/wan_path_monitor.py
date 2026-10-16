@@ -1,7 +1,7 @@
 # Copyright VyOS maintainers and contributors <maintainers@vyos.io>
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
-"""Interface readiness, WAN probes, and opt-in default-route failover."""
+"""WAN path monitoring, reachability probes, and opt-in route failover."""
 
 import errno
 import json
