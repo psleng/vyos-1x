@@ -1691,6 +1691,22 @@ class ModemStateMachine:
                     logger.info("Cancelled failback monitor due to modem removal",
                                extra={'interface_number': self.interface_number})
 
+                # Cancel the CONNECTED-only signal-strength poll loop.  It is
+                # started on entry to CONNECTED and normally cancelled by
+                # _stop_network_interface_monitoring(), but the abrupt
+                # modem-removal path below transitions straight to SCANNING
+                # without that teardown.  If left running it keeps feeding
+                # stale samples into the signal tracker and repainting the
+                # STAT LED solid — so the LED stays locked solid instead of
+                # going dark/blink once the modem is gone (and on into a
+                # subsequent FAILED/sim-missing state).
+                if (getattr(self, '_signal_poll_task', None)
+                        and not self._signal_poll_task.done()):
+                    self._signal_poll_task.cancel()
+                    self._signal_poll_task = None
+                    logger.info("Cancelled signal-strength poll loop due to modem removal",
+                               extra={'interface_number': self.interface_number})
+
                 # Cancel bearer disconnect timer (no point waiting if modem is gone)
                 if hasattr(self, '_bearer_disconnect_timer') and self._bearer_disconnect_timer and not self._bearer_disconnect_timer.done():
                     self._bearer_disconnect_timer.cancel()
@@ -7542,6 +7558,18 @@ class ModemStateMachine:
                        'mm_state': mm_state,
                        'failed_reason': failed_reason,
                        'failed_reason_name': reason_name})
+
+            # Apply the FAILED-state STAT-LED pattern (slow blink of the
+            # signal colour) here, not only from transition().  A modem that
+            # is already FAILED at attach — or whose FAILED condition is
+            # delivered via the synthesized initial event — reaches this
+            # investigator WITHOUT passing through transition()'s LED policy,
+            # so without this the LED keeps whatever it last showed (e.g. the
+            # solid 'connected' colour from before the SIM was pulled).  The
+            # blink loop self-darkens when there is no usable signal, so a
+            # dark LED still reads as "no coverage", a blinking one as
+            # "registered/failed but signal present".
+            self._set_led_mode('blink', reason=f'failed:{reason_name}')
 
             # unknown-capabilities (4) is a MODEM fault, not a SIM problem —
             # ModemManager could not read the modem's capabilities at all, so
@@ -13596,9 +13624,15 @@ class ModemStateMachine:
                        'level': level, 'avg_dbm': avg_dbm, 'level_name': level_name}
             )
 
-        # In blink mode the blink loop owns the GPIO; only record the level
-        # above and let the loop toggle it.  Solid/connected drives it here.
-        if self._led_mode == 'blink':
+        # Only the CONNECTED 'solid' mode paints the LED from the signal
+        # poll.  In 'blink' the blink loop owns the GPIO and toggles it; in
+        # 'off' (or any other non-connected state) the LED must stay as last
+        # set.  Guarding on == 'solid' (rather than != 'blink') is deliberate:
+        # a signal-poll task left running after an abrupt modem removal must
+        # never relight the LED solid while the FSM is off/failed/scanning.
+        # We still record self._led_level above so the blink loop and a later
+        # 'solid' render show the same colour.
+        if self._led_mode != 'solid':
             return
 
         try:
