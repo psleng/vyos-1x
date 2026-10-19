@@ -186,6 +186,22 @@ class InterfaceConfig(ServiceInterface):
             "ra_valid_lifetime": 3600,        # AdvValidLifetime (s)
         },
 
+        # IPv6 management-address — FSM stamps <carrier-prefix>::host-id/128
+        # on wwanN and firewalls it (ICMPv6 + ESTABLISHED/RELATED + auto-443
+        # + user permit-tcp/udp/source).  Opt-in: enabled only when the user
+        # creates `interfaces wwan <if> ipv6 management-address`.  This entry
+        # MUST exist here — set_configuration() only forwards keys present in
+        # DEFAULT_CONFIG to the FSM, so without it the whole feature is
+        # silently dropped and no address is ever stamped.
+        "ipv6_management_address": {
+            "enabled": False,
+            "host_id": "::1",
+            "disable_default_https": False,
+            "permit_tcp": [],
+            "permit_udp": [],
+            "permit_source": [],
+        },
+
         # IP Passthrough (DOCSIS-modem-style) — hand carrier IP to one
         # downstream device via dnsmasq on a designated LAN interface.
         # Empty / enabled=False = disabled; populated by conf_mode when the
