@@ -10934,6 +10934,17 @@ class ModemStateMachine:
                 await self._passthrough.teardown()
             elif iface_changed:
                 await self._passthrough.teardown()
+
+            # The management address must be reachable whenever ip-passthrough
+            # is configured, even before/without a carrier bearer so an
+            # operator can reach the router on the LAN segment.  When the
+            # bearer is live the bearer-IP apply path (below) stamps it; when
+            # it is not, apply it directly here.  Idempotent.
+            if (self._passthrough.cfg.is_active()
+                    and self.machine.current_state not in (
+                        ModemState.CONNECTED.value,
+                        ModemState.USAGE_MONITORING.value)):
+                await self._passthrough.ensure_mgmt_only()
         except Exception as e:
             logger.warning("Passthrough reconcile failed: %s", e,
                            extra={'interface_number': self.interface_number})
@@ -15299,6 +15310,20 @@ class ModemStateMachine:
         10 CONNECTING, 11 CONNECTED.
         """
         mm_state = await self._read_mm_state_bounded()
+
+        # ip-passthrough's management address must be present for as long as
+        # the feature is configured, independent of any carrier bearer — a
+        # unit parked in REGISTERED_IDLE (connect-on-demand that never dialed)
+        # must still be reachable on the passthrough LAN segment.  Stamp it
+        # here on every resting check; idempotent and a no-op when the feature
+        # is inactive or the user owns the ethernet address (Policy B).
+        try:
+            if (getattr(self, '_passthrough', None) is not None
+                    and self._passthrough.cfg.is_active()):
+                await self._passthrough.ensure_mgmt_only()
+        except Exception as e:
+            logger.debug("Resting-state mgmt-address ensure failed: %s", e,
+                         extra={'interface_number': self.interface_number})
 
         # State may have changed while the bounded D-Bus read yielded control
         # (for example, a user CONNECT arrived). Never act on a stale snapshot.

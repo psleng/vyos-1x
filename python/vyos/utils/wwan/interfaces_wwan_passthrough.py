@@ -356,9 +356,11 @@ class PassthroughManager:
             return
 
         if not (carrier_v4 or carrier_v6):
-            logger.warning("passthrough: no carrier IP available; tearing down",
+            logger.warning("passthrough: no carrier IP available; tearing down "
+                           "carrier state (mgmt address retained)",
                            extra=self._log_extra)
-            await self.teardown()
+            await self.teardown(keep_mgmt=True)
+            await self.ensure_mgmt_only()
             return
 
         # Detect IP change ─ trigger the handoff sequence if needed.
@@ -511,9 +513,18 @@ class PassthroughManager:
                     carrier_v4, carrier_v6, carrier_v6_prefix, self.cfg.interface,
                     extra=self._log_extra)
 
-    async def teardown(self) -> None:
+    async def teardown(self, keep_mgmt: bool = False) -> None:
         """Stop dnsmasq, drop mgmt addr (if owned), clean up iptables
-        and the policy-routing entries used for inbound forwarding."""
+        and the policy-routing entries used for inbound forwarding.
+
+        ``keep_mgmt=True`` preserves the Policy-B management address on the
+        LAN port while tearing down all carrier-dependent state.  This keeps
+        the router reachable on the passthrough LAN segment across a carrier
+        bearer loss — the management address should exist for as long as
+        ip-passthrough is configured, not only while a carrier IP is live.
+        Callers that disable the feature entirely leave ``keep_mgmt`` at its
+        default so the address is removed with everything else.
+        """
         # Stop the safety-net reconcile loop first so it cannot race a
         # re-apply against this teardown.
         self._stop_reconcile_task()
@@ -539,7 +550,8 @@ class PassthroughManager:
         # for the FORCERENEW + DHCPNAK mechanism.
         await self._force_release_v4()
         await self._stop_dnsmasq()
-        await self._remove_mgmt_address()
+        if not keep_mgmt:
+            await self._remove_mgmt_address()
         await self._remove_shadow_addrs()
         await self._unblock_v4_saddr(self._last_v4)
         await self._unblock_v6_saddr(self._last_v6)
@@ -1009,6 +1021,26 @@ class PassthroughManager:
         self._sysctl_saved = {}
 
     # ── management address (Policy B) ───────────────────────────────────
+    async def ensure_mgmt_only(self) -> None:
+        """Stamp the Policy-B management address without a carrier bearer.
+
+        The management address is what lets an operator reach the router on
+        the passthrough LAN segment, so it must be present whenever
+        ip-passthrough is configured — not only while the modem holds a live
+        carrier IP.  This brings the LAN link up and adds the mgmt address;
+        it is idempotent and a no-op when passthrough is inactive or the user
+        owns the ethernet address (Policy B).
+
+        The full carrier handoff (dnsmasq, shadow addresses, policy routing)
+        is still driven exclusively by :meth:`apply` once a carrier IP exists.
+        """
+        if not self.cfg.is_active():
+            return
+        if self.cfg.mgmt_owned_by_user:
+            return
+        await self._ensure_lan_link_up()
+        await self._ensure_mgmt_address()
+
     async def _ensure_mgmt_address(self) -> None:
         if self.cfg.mgmt_owned_by_user:
             return  # user wins — do nothing
