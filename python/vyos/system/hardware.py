@@ -119,6 +119,44 @@ def get_board_identity(
     }
 
 
+def get_nvmem_password(
+    machine: str | None = None,
+    device_info_path: Path = DEVICE_INFO_PATH,
+) -> str:
+    """Return the per-device factory ("sticker") password from board NVMEM.
+
+    Read verbatim from the ``password`` nvmem identity cell on non-x86 boards.
+    Returns an empty string when the cell is absent, unreadable, or blank — an
+    unprogrammed EEPROM cell typically reads back as all ``0xFF`` (or all
+    ``0x00``), which must NOT be treated as a usable password.  The caller
+    decides the fallback (e.g. the normal default password) when this is empty.
+
+    This value is plaintext (a label/sticker password); callers are expected to
+    hash it before applying it to ``/etc/shadow``.
+    """
+    # x86 boards carry no board nvmem identity EEPROM.
+    if is_x86(machine):
+        return ''
+
+    try:
+        raw = (device_info_path / 'password').read_bytes()
+    except OSError:
+        return ''
+
+    # Reject an unprogrammed/blank cell (all 0xFF or all 0x00 fill).
+    stripped = raw.strip(b'\xff').strip(b'\x00')
+    if not stripped:
+        return ''
+
+    value = raw.decode('utf-8', errors='replace').strip()
+    # A replacement character means non-UTF-8 bytes (garbage / binary fill);
+    # treat the cell as unusable rather than applying a corrupt password.
+    if not value or '\ufffd' in value:
+        return ''
+
+    return value
+
+
 def get_stable_hardware_id(
     machine: str | None = None,
     dmi_path: Path = DMI_ID_PATH,
