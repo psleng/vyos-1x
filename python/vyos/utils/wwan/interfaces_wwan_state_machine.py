@@ -100,6 +100,14 @@ WWAN_PERSIST_DIR = "/config/wwan"
 # longer be present.
 APN_STATE_DIR = "/run/wwan/apn"
 
+# Data-limit disconnect hold persistence.
+# Stored under /run/wwan (tmpfs): survives a service crash/restart so the FSM
+# stays parked on a capped SIM (no reconnect blip) instead of briefly
+# reconnecting, but is intentionally cleared on reboot.  A cold boot re-derives
+# the cap from the persisted /config usage counter instead (which is the
+# durable source of truth for data usage across reboots).
+HOLD_STATE_DIR = "/run/wwan"
+
 # ── Central defaults ────────────────────────────────────────────────────────
 # Single source of truth for configuration defaults.  Every code path that
 # needs a fallback value should reference these dicts rather than hard-coding
@@ -332,10 +340,6 @@ class ModemState(str, Enum):
     SIM_ENABLING = "SIM_ENABLING"
     SIM_RECONFIGURING = "SIM_RECONFIGURING"
     REGISTERED_IDLE = "REGISTERED_IDLE"  # Registered on network, no bearer (connect-on-demand)
-    # Usage monitoring states
-    USAGE_MONITORING = "USAGE_MONITORING"
-    USAGE_THRESHOLD = "USAGE_THRESHOLD"
-    USAGE_RESETTING = "USAGE_RESETTING"
 
 class ModemEvent(str, Enum):
     START_SCAN = "start_scan"
@@ -351,7 +355,6 @@ class ModemEvent(str, Enum):
     RECONFIGURE = "reconfigure"
     SIM_READY = "sim_ready"
     CONNECTED = "connected"
-    USAGE_LIMIT_EXCEEDED = "usage_limit_exceeded"
     # SIM switch events
     SWITCH_SIM = "switch_sim"
     SIM_DISCONNECTED = "sim_disconnected"
@@ -360,9 +363,6 @@ class ModemEvent(str, Enum):
     SIM_ENABLED = "sim_enabled"
     SIM_SWITCH_COMPLETE = "sim_switch_complete"
     ENTER_IDLE = "enter_idle"  # Transition to REGISTERED_IDLE (connect-on-demand)
-    # Usage monitoring events
-    START_USAGE_MONITORING = "start_usage_monitoring"
-    RESET_USAGE = "reset_usage"
 
 class ModemStateMachine:
     modem_state_machines = {}
@@ -499,6 +499,12 @@ class ModemStateMachine:
         self.failback_task = None                # Periodic failback check task
         self.failback_suppressed_by_data_limit = False  # Sticky failover: suppress failback until billing reset
         self._sticky_failover_timestamp = None            # When sticky hold was activated
+        # Data-limit 'disable'/'disconnect' hold: bearer held down (radio stays
+        # ON, NOT airplane mode) until the billing cycle rolls over, when the
+        # liveness watchdog reconnects.  See _maybe_lift_data_limit_hold().
+        self._data_limit_hold = False
+        self._data_limit_hold_since = None
+        self._data_limit_hold_billing_date = 1
         self.failback_suppressed_by_connection_failure = False  # Suppress failback when primary SIM's APN cascade failed
         # Anti-flap protection — SIM 1 must be CONTINUOUSLY present for
         # sim_failback_stability_time seconds before failback fires.  A user
@@ -1634,7 +1640,6 @@ class ModemStateMachine:
                 original_state = self.machine.current_state
 
                 if original_state in [ModemState.CONNECTED.value,
-                                      ModemState.USAGE_MONITORING.value,
                                       ModemState.DISCONNECTING.value]:
                     # Salvage the active SIM's in-flight session usage before we
                     # drop the bearer reference.  The live bearer is usually
@@ -2400,7 +2405,6 @@ class ModemStateMachine:
                     ModemState.CONFIGURING.value,
                     ModemState.CONNECTING.value,
                     ModemState.CONNECTED.value,
-                    ModemState.USAGE_MONITORING.value,
                     ModemState.REGISTERED_IDLE.value,
                     ModemState.WAITING_FOR_SIM.value,
                     ModemState.FAILED.value):
@@ -2917,8 +2921,7 @@ class ModemStateMachine:
         """
         # The FSM may have already moved on (e.g. a fast disconnect) by the
         # time this task runs — only finalise if we are still CONNECTED.
-        if self.machine.current_state not in (ModemState.CONNECTED.value,
-                                              ModemState.USAGE_MONITORING.value):
+        if self.machine.current_state != ModemState.CONNECTED.value:
             logger.debug("Skipping connected finalise — FSM no longer CONNECTED",
                         extra={'interface_number': self.interface_number,
                                'current_state': self.machine.current_state})
@@ -3005,14 +3008,13 @@ class ModemStateMachine:
         # Enhanced SIM hot-swap detection
         if mm_state == 2:  # LOCKED (SIM missing or PIN required)
             if current_fsm_state in [ModemState.CONFIGURING.value, ModemState.CONNECTING.value,
-                                    ModemState.CONNECTED.value, ModemState.USAGE_MONITORING.value]:
+                                    ModemState.CONNECTED.value]:
                 # Distinguish between PIN-locked and actually missing SIM
                 self._safe_create_task(self._handle_locked_state_detection())
 
         elif mm_state == 3:  # DISABLED
             if current_fsm_state in [ModemState.CONFIGURING.value, ModemState.CONNECTING.value,
-                                    ModemState.CONNECTED.value, ModemState.FAILED.value,
-                                    ModemState.USAGE_MONITORING.value, ModemState.DISCONNECTED.value,
+                                    ModemState.CONNECTED.value, ModemState.FAILED.value, ModemState.DISCONNECTED.value,
                                     ModemState.REGISTERED_IDLE.value, ModemState.DISCONNECTING.value]:
                 # Don't trigger SIM missing if this is service-initiated or we're in reset grace period
                 if not self.service_initiated_disable and not self._is_in_reset_grace_period():
@@ -3051,8 +3053,7 @@ class ModemStateMachine:
                 logger.info("Modem enabled, continuing configuration",
                            extra={'interface_number': self.interface_number})
                 # Don't transition - let configuration continue
-            elif current_fsm_state in [ModemState.CONNECTED.value,
-                                       ModemState.USAGE_MONITORING.value]:
+            elif current_fsm_state == ModemState.CONNECTED.value:
                 # CONNECTED → ENABLED: registration dropped below SEARCHING — the
                 # modem lost the network entirely (deeper drop than SEARCHING).
                 # Treat as a registration loss and recover, but only when this
@@ -3080,8 +3081,7 @@ class ModemStateMachine:
                     # Transition to CONNECTING state
                     self.transition(ModemEvent.CONNECT)
 
-            elif current_fsm_state in [ModemState.CONNECTED.value,
-                                       ModemState.USAGE_MONITORING.value]:
+            elif current_fsm_state == ModemState.CONNECTED.value:
                 # CONNECTED → SEARCHING: the modem lost its serving cell and is
                 # re-scanning (e.g. the active supported-bands set was changed
                 # to a band the current cell does not use, coverage was lost, or
@@ -3155,7 +3155,7 @@ class ModemStateMachine:
                     self.transition(ModemEvent.CONNECT)
                     self._safe_create_task(self.apply_modem_configuration())
 
-            elif current_fsm_state in [ModemState.CONNECTED.value, ModemState.USAGE_MONITORING.value]:
+            elif current_fsm_state == ModemState.CONNECTED.value:
                 # Modem dropped from CONNECTED to REGISTERED without going through
                 # DISCONNECTING (state 9).  This can happen with "Regular deactivation"
                 # where the carrier drops the bearer but the modem stays registered.
@@ -3187,7 +3187,7 @@ class ModemStateMachine:
                     self._safe_create_task(self.handle_disconnection_recovery())
 
         elif mm_state == 9:  # DISCONNECTING
-            if current_fsm_state in [ModemState.CONNECTED.value, ModemState.USAGE_MONITORING.value]:
+            if current_fsm_state == ModemState.CONNECTED.value:
                 # Connection being terminated - stop network interface monitoring and trigger enhanced reconnection
                 self._disconnect_reason_override = 'modemmanager_disconnecting'
                 logger.warning("ModemManager disconnecting - starting enhanced reconnection",
@@ -3307,7 +3307,7 @@ class ModemStateMachine:
         # Track user-initiated disconnects and stop network interface monitoring
         if event == ModemEvent.DISCONNECT:
             # Check if this is from user or ModemManager
-            if current_state in [ModemState.CONNECTED.value, ModemState.USAGE_MONITORING.value]:
+            if current_state == ModemState.CONNECTED.value:
                 # Stop network interface monitoring when leaving connected state
                 try:
                     self._safe_create_task(self._stop_network_interface_monitoring())
@@ -3335,7 +3335,7 @@ class ModemStateMachine:
             # On-demand disconnect path: drop bearer but keep registration.
             # Treat this as intentional/normal (not a failure path) and stop
             # connected-state monitoring without forcing Linux link down.
-            if current_state in [ModemState.CONNECTED.value, ModemState.USAGE_MONITORING.value]:
+            if current_state == ModemState.CONNECTED.value:
                 try:
                     self._safe_create_task(self._stop_network_interface_monitoring())
                 except RuntimeError:
@@ -3505,7 +3505,6 @@ class ModemStateMachine:
             # being silently dropped.
             _settle_states = (
                 ModemState.CONNECTED.value,
-                ModemState.USAGE_MONITORING.value,
                 ModemState.REGISTERED_IDLE.value,
                 ModemState.DISCONNECTED.value,
                 ModemState.FAILED.value,
@@ -3560,7 +3559,6 @@ class ModemStateMachine:
         # the flag will have been re-set by any newer queued config.
         if self.machine.current_state not in (
                 ModemState.CONNECTED.value,
-                ModemState.USAGE_MONITORING.value,
                 ModemState.REGISTERED_IDLE.value,
                 ModemState.DISCONNECTED.value,
                 ModemState.FAILED.value,
@@ -3615,6 +3613,17 @@ class ModemStateMachine:
             self._previous_config = self.config.copy()
 
         self.config = config
+
+        # A new config supersedes an active data-limit disconnect hold: the
+        # operator is reconfiguring (e.g. raising the limit or changing the
+        # action), so lift the hold and the data-limit-induced user-disconnect
+        # so this reconfigure can re-establish the connection.
+        if getattr(self, '_data_limit_hold', False):
+            self._data_limit_hold = False
+            self._data_limit_hold_since = None
+            self._clear_hold_state_file()
+            self.user_disconnected = False
+            self.bearer_requested = True
 
         # 🔄 Extract configuration loading using safe extraction framework
         self._load_configuration_safe(config)
@@ -4090,7 +4099,19 @@ class ModemStateMachine:
 
             # Check connection mode: park at REGISTERED_IDLE for connect-on-demand
             if self.machine.current_state == ModemState.CONFIGURING.value:
-                if (self.connection_mode == 'connect-on-demand'
+                if self._restore_hold_state():
+                    # A data-limit 'disable'/'disconnect' hold persisted across a
+                    # service restart: stay offline (radio on, registered) until
+                    # the billing cycle rolls over rather than reconnecting on a
+                    # capped SIM just to immediately disconnect again.  The
+                    # watchdog lifts the hold via _maybe_lift_data_limit_hold().
+                    self.user_disconnected = True
+                    self.bearer_requested = False
+                    logger.info("Data-limit hold active — parking at "
+                                "REGISTERED_IDLE until billing cycle resets",
+                               extra={'interface_number': self.interface_number})
+                    self.transition(ModemEvent.ENTER_IDLE)
+                elif (self.connection_mode == 'connect-on-demand'
                         and not self.bearer_requested):
                     logger.info("Connect-on-demand active — parking at REGISTERED_IDLE "
                                 "(modem registered, no bearer, SMS available)",
@@ -4482,8 +4503,7 @@ class ModemStateMachine:
                 # Transition to CONNECTED and stay there for event-driven monitoring
                 if self.machine.current_state == ModemState.CONNECTING.value:
                     self.transition(ModemEvent.CONNECTED)
-                elif self.machine.current_state in (ModemState.CONNECTED.value,
-                                                    ModemState.USAGE_MONITORING.value):
+                elif self.machine.current_state == ModemState.CONNECTED.value:
                     # FSM already advanced to a genuine connected state via an
                     # MM CONNECTED (11) signal that raced ahead of us — fine,
                     # proceed with the connected-side bringup below.
@@ -7621,8 +7641,7 @@ class ModemStateMachine:
                     current_fsm_state = self.machine.current_state
                     if current_fsm_state in [ModemState.CONFIGURING.value,
                                              ModemState.CONNECTING.value,
-                                             ModemState.CONNECTED.value,
-                                             ModemState.USAGE_MONITORING.value]:
+                                             ModemState.CONNECTED.value]:
                         self.transition(ModemEvent.CONNECTION_FAILED)
                     return
                 if (not active_present) or alternate_present:
@@ -7642,8 +7661,7 @@ class ModemStateMachine:
                 current_fsm_state = self.machine.current_state
                 if current_fsm_state in [ModemState.CONFIGURING.value,
                                          ModemState.CONNECTING.value,
-                                         ModemState.CONNECTED.value,
-                                         ModemState.USAGE_MONITORING.value]:
+                                         ModemState.CONNECTED.value]:
                     self.transition(ModemEvent.CONNECTION_FAILED)
                 return
 
@@ -7667,8 +7685,7 @@ class ModemStateMachine:
             current_fsm_state = self.machine.current_state
             if current_fsm_state in [ModemState.CONFIGURING.value,
                                      ModemState.CONNECTING.value,
-                                     ModemState.CONNECTED.value,
-                                     ModemState.USAGE_MONITORING.value]:
+                                     ModemState.CONNECTED.value]:
                 self.transition(ModemEvent.CONNECTION_FAILED)
 
         except Exception as e:
@@ -8131,8 +8148,7 @@ class ModemStateMachine:
             # This is safe because the GPIO SIM-detect watcher emits only on
             # absent->present EDGES (no initial-state event at boot), so a
             # genuine INSERTED edge always represents a real reinsertion.
-            healthy_states = (ModemState.CONNECTED.value,
-                              ModemState.USAGE_MONITORING.value)
+            healthy_states = (ModemState.CONNECTED.value,)
             if slot == selected and state not in healthy_states:
                 if not self._is_reset_allowed():
                     logger.info("SIM_DETECT: selected-slot SIM inserted but reset "
@@ -10792,7 +10808,7 @@ class ModemStateMachine:
 
         # apply_config() always fires RECONFIGURE before scheduling this
         # coroutine, so by the time we run the FSM has already left its prior
-        # stable state (CONNECTED / USAGE_MONITORING / REGISTERED_IDLE / ...)
+        # stable state (CONNECTED / REGISTERED_IDLE / ...)
         # and is parked in CONFIGURING.  Capture the real bearer state up-front
         # so we can decide how to settle the FSM afterwards.
         bearer_up = await self._is_bearer_connected()
@@ -10969,9 +10985,7 @@ class ModemStateMachine:
             # bearer is live the bearer-IP apply path (below) stamps it; when
             # it is not, apply it directly here.  Idempotent.
             if (self._passthrough.cfg.is_active()
-                    and self.machine.current_state not in (
-                        ModemState.CONNECTED.value,
-                        ModemState.USAGE_MONITORING.value)):
+                    and self.machine.current_state != ModemState.CONNECTED.value):
                 await self._passthrough.ensure_mgmt_only()
         except Exception as e:
             logger.warning("Passthrough reconcile failed: %s", e,
@@ -11000,9 +11014,7 @@ class ModemStateMachine:
         # changes that depend on bearer IPs (DNS, MTU, prefix) refresh
         # without waiting for the next IP-change event.  The apply path
         # is idempotent — re-applying with unchanged IPs is a no-op.
-        if self.machine.current_state in (
-                ModemState.CONNECTED.value,
-                ModemState.USAGE_MONITORING.value):
+        if self.machine.current_state == ModemState.CONNECTED.value:
             try:
                 await self._apply_bearer_ip_configuration()
             except Exception as e:
@@ -12200,8 +12212,21 @@ class ModemStateMachine:
 
         try:
             # Monitor while connected
-            while self.machine.current_state in (ModemState.CONNECTED.value,
-                                                 ModemState.USAGE_MONITORING.value):
+            while self.machine.current_state == ModemState.CONNECTED.value:
+                # Re-read the active SIM's data config every poll so live
+                # `commit`s to data-usage size/action/warning take effect
+                # without a reconnect, and so the limit/action follow the
+                # active slot after a SIM switch.  This task is started once
+                # on connect and is NOT restarted by a settings-only reconfigure
+                # (which completes faster than this loop's sleep interval), so
+                # without this refresh
+                # the loop would keep using the config captured at connect
+                # time and the configured action would never fire.
+                data_cfg = self._get_active_sim_data_config()
+                data_limit = data_cfg['data_limit_size']
+                data_action = data_cfg['data_limit_action']
+                data_warning_thresholds = sorted(data_cfg.get('data_limit_warning', []))
+
                 try:
                     # Check data usage statistics from bearer
                     introspect = await self.bus.introspect(MODEM_MANAGER_SERVICE, self.bearer_path)
@@ -12353,7 +12378,7 @@ class ModemStateMachine:
                 logger.warning("Data limit sim-failover requested but sim_failover is "
                               "globally disabled, disconnecting instead",
                               extra={'interface_number': self.interface_number})
-                self.transition(ModemEvent.USAGE_LIMIT_EXCEEDED)
+                await self._handle_data_limit_disconnect('disconnect')
                 return
 
             logger.warning("Data limit exceeded - initiating SIM failover",
@@ -12368,7 +12393,7 @@ class ModemStateMachine:
                               "(no usable alternate / blocked) — disconnecting instead",
                               extra={'interface_number': self.interface_number,
                                      'current_sim': self.current_active_sim})
-                self.transition(ModemEvent.USAGE_LIMIT_EXCEEDED)
+                await self._handle_data_limit_disconnect('disconnect')
 
         except Exception as e:
             logger.error(f"Data limit failover failed: {e}",
@@ -12376,31 +12401,169 @@ class ModemStateMachine:
             self.transition(ModemEvent.CONNECTION_FAILED)
 
     async def _handle_data_limit_disconnect(self, action: str):
-        """Enforce data-limit local disconnect/disable policies.
+        """Enforce the data-limit ``disable``/``disconnect`` policy.
 
-        ``disable`` parks WWAN in airplane mode (RF off) until manually
-        re-enabled. ``disconnect`` holds the bearer down without forcing
-        airplane mode.
+        Both actions simply disconnect and hold the bearer down — the radio
+        stays ON (NOT airplane mode) and network registration is kept — until
+        the billing cycle rolls over.  While held the usage monitor is not
+        running, so the FSM liveness watchdog detects the billing-cycle flip
+        and reconnects (see _maybe_lift_data_limit_hold()).  A config commit
+        also supersedes the hold (see apply_config()).
         """
         action = (action or 'disconnect').strip().lower()
 
-        logger.warning("Data limit action triggered: %s",
-                      action,
-                      extra={'interface_number': self.interface_number,
-                             'active_sim': self.current_active_sim})
+        # Record the active SIM's billing day so the watchdog knows when the
+        # cycle rolls over and the hold may be lifted.
+        active_slot = (self._current_usage_slot()
+                       or self.primary_sim_slot or 1)
+        billing_date = self._get_sim_data_config(active_slot).get(
+            'data_limit_billing_date', 1)
 
-        # Keep the bearer down after this action unless/until explicitly
-        # reconnected by operator intent.
+        logger.warning(
+            "Data limit action '%s' — disconnecting until billing cycle "
+            "(day %s) resets",
+            action, billing_date,
+            extra={'interface_number': self.interface_number,
+                   'active_sim': self.current_active_sim,
+                   'billing_date': billing_date})
+
+        # Arm the billing-cycle hold so the watchdog auto-reconnects later.
+        self._data_limit_hold = True
+        self._data_limit_hold_since = datetime.datetime.now()
+        self._data_limit_hold_billing_date = billing_date
+        # Persist the hold (service-restart tier) so a service crash/restart
+        # keeps the modem parked instead of reconnecting on the capped SIM.
+        self._persist_hold_state()
+
+        # Keep the bearer down until the hold is lifted (billing reset or a
+        # superseding config commit).
         self.user_disconnected = True
         self.bearer_requested = False
 
-        if action == 'disable':
-            await self.set_airplane_mode(True)
-            return
-
-        if self.machine.current_state in (ModemState.CONNECTED.value,
-                                          ModemState.USAGE_MONITORING.value):
+        if self.machine.current_state == ModemState.CONNECTED.value:
             self.transition(ModemEvent.DISCONNECT)
+
+    def _maybe_lift_data_limit_hold(self) -> bool:
+        """Lift a data-limit disconnect hold once the billing cycle rolls over.
+
+        Called from the liveness watchdog while the bearer is parked by a
+        data-limit ``disable``/``disconnect`` action.  When the billing cycle
+        crosses the hold start, clear the hold and re-drive the connection; the
+        restarted usage monitor then resets the per-SIM counter for the new
+        cycle.  Returns True when the hold was lifted.
+        """
+        if not getattr(self, '_data_limit_hold', False):
+            return False
+        since = getattr(self, '_data_limit_hold_since', None)
+        if since is None:
+            return False
+        now = datetime.datetime.now()
+        # Guard against an untrustworthy clock (pre-NTP/RTC) falsely tripping
+        # the billing boundary — mirrors _load_persisted_usage()'s guard.
+        if not self._clock_is_sane(now):
+            return False
+        billing_date = getattr(self, '_data_limit_hold_billing_date', 1)
+        if not self._billing_cycle_crossed(since, now, billing_date):
+            return False
+
+        logger.info(
+            "Billing cycle (day %s) crossed — lifting data-limit disconnect "
+            "hold and reconnecting",
+            billing_date,
+            extra={'interface_number': self.interface_number,
+                   'billing_date': billing_date})
+        self._data_limit_hold = False
+        self._data_limit_hold_since = None
+        self._clear_hold_state_file()
+        self.user_disconnected = False
+        self.bearer_requested = True
+        # Re-drive the connection cascade from the current modem state.
+        if self.config:
+            self.apply_config(self.config)
+        return True
+
+    def _hold_state_path(self) -> str:
+        """Path of the per-interface data-limit hold state file (tmpfs)."""
+        return os.path.join(
+            HOLD_STATE_DIR, f"wwan{self.interface_number}_datalimit_hold.json")
+
+    def _persist_hold_state(self) -> None:
+        """Persist the data-limit disconnect hold to /run/wwan (tmpfs).
+
+        Survives a service crash/restart so the FSM stays parked on the capped
+        SIM; cleared on reboot by design (a cold boot re-derives the cap from
+        the /config usage counter).
+        """
+        try:
+            os.makedirs(HOLD_STATE_DIR, exist_ok=True)
+            doc = {
+                'active': bool(self._data_limit_hold),
+                'since': (self._data_limit_hold_since.isoformat()
+                          if self._data_limit_hold_since else None),
+                'billing_date': int(self._data_limit_hold_billing_date),
+            }
+            path = self._hold_state_path()
+            tmp = path + '.tmp'
+            with open(tmp, 'w') as f:
+                json.dump(doc, f)
+            os.replace(tmp, path)
+        except Exception as e:
+            logger.warning(f"Could not persist data-limit hold state: {e}",
+                          extra={'interface_number': self.interface_number})
+
+    def _clear_hold_state_file(self) -> None:
+        """Remove the persisted data-limit hold state file."""
+        try:
+            path = self._hold_state_path()
+            if os.path.exists(path):
+                os.remove(path)
+        except Exception as e:
+            logger.warning(f"Could not clear data-limit hold state: {e}",
+                          extra={'interface_number': self.interface_number})
+
+    def _restore_hold_state(self) -> bool:
+        """Restore a data-limit disconnect hold persisted across a service restart.
+
+        Returns True if an active hold was restored (caller parks the modem
+        instead of connecting).  If the billing cycle already rolled over while
+        the service was down, the stale hold is dropped so the modem reconnects
+        fresh — the /config usage counter's own billing reset then clears the
+        cap.
+        """
+        try:
+            path = self._hold_state_path()
+            if not os.path.exists(path):
+                return False
+            with open(path) as f:
+                doc = json.load(f)
+            if not doc.get('active'):
+                return False
+            since_raw = doc.get('since')
+            since = (datetime.datetime.fromisoformat(since_raw)
+                     if since_raw else None)
+            billing_date = int(doc.get('billing_date', 1))
+            now = datetime.datetime.now()
+            if (since is not None and self._clock_is_sane(now)
+                    and self._billing_cycle_crossed(since, now, billing_date)):
+                logger.info("Persisted data-limit hold is stale (billing cycle "
+                            "already rolled over) — discarding and reconnecting",
+                           extra={'interface_number': self.interface_number,
+                                  'billing_date': billing_date})
+                self._clear_hold_state_file()
+                return False
+            self._data_limit_hold = True
+            self._data_limit_hold_since = since or now
+            self._data_limit_hold_billing_date = billing_date
+            logger.info("Restored data-limit disconnect hold after service "
+                        "restart — staying offline until billing cycle "
+                        "(day %s) resets", billing_date,
+                       extra={'interface_number': self.interface_number,
+                              'billing_date': billing_date})
+            return True
+        except Exception as e:
+            logger.warning(f"Could not restore data-limit hold state: {e}",
+                          extra={'interface_number': self.interface_number})
+            return False
 
     # ── Per-SIM persistent usage tracking ────────────────────────────────────
 
@@ -14576,8 +14739,7 @@ class ModemStateMachine:
         # actually up: if a reconnect path forgot to call _record_bearer_up(),
         # the window would otherwise grow forever.  Treat any connected state as
         # "no current downtime".
-        _connected_states = (ModemState.CONNECTED.value,
-                             ModemState.USAGE_MONITORING.value)
+        _connected_states = (ModemState.CONNECTED.value,)
         status['current_bearer_downtime_seconds'] = (
             max(0, int(time.time() - self._bearer_down_since))
             if self._bearer_down_since
@@ -15164,8 +15326,6 @@ class ModemStateMachine:
             ModemState.SIM_DISABLING.value: 330.0,
             ModemState.SIM_ENABLING.value: 330.0,
             ModemState.SIM_RECONFIGURING.value: 330.0,
-            ModemState.USAGE_THRESHOLD.value: 60.0,
-            ModemState.USAGE_RESETTING.value: 60.0,
         }
         check_interval = 15.0
         logger.info("FSM liveness watchdog started",
@@ -15182,6 +15342,18 @@ class ModemStateMachine:
                     # monitors/recovery against that intentional condition.
                     self._resting_divergence_count = 0
                     continue
+                if getattr(self, '_data_limit_hold', False):
+                    # Bearer parked by a data-limit 'disable'/'disconnect'
+                    # action: stay down until the billing cycle rolls over,
+                    # then reconnect.  If the modem came back out-of-band (e.g.
+                    # a config commit that lifted the hold), clear the stale
+                    # flag and fall through to normal connected handling.
+                    if state != ModemState.CONNECTED.value:
+                        self._maybe_lift_data_limit_hold()
+                        self._resting_divergence_count = 0
+                        continue
+                    self._data_limit_hold = False
+                    self._data_limit_hold_since = None
                 deadline = deadlines.get(state)
                 if deadline is not None:
                     # Transient state -- enforce its deadline.
@@ -15266,8 +15438,7 @@ class ModemStateMachine:
                         self._configure_modem_initial(),
                         name='watchdog_initial_configuration')
                     continue
-                if state in (ModemState.CONNECTED.value,
-                             ModemState.USAGE_MONITORING.value):
+                if state == ModemState.CONNECTED.value:
                     # CONNECTED normally owns the ping health loop and usage
                     # monitor. If either task died unexpectedly, recreate it;
                     # both start helpers are idempotent and respect config.
@@ -15488,10 +15659,10 @@ class ModemStateMachine:
           1. Non-disruptive reconcile -- if MM actually has the modem CONNECTED
              (the DISCONNECTING/CONNECTING race), re-sync FSM -> CONNECTED and
              keep the live bearer.
-             2. Drive CONNECTION_FAILED (valid from every transient state except
-                 USAGE_RESETTING) so the FAILED retry loop rebuilds.
-             3. Last resort -- controlled START_SCAN rebuild (covers
-                 USAGE_RESETTING and any rejected/no-op'd CONNECTION_FAILED).
+             2. Drive CONNECTION_FAILED (valid from every transient state) so
+                 the FAILED retry loop rebuilds.
+             3. Last resort -- controlled START_SCAN rebuild (covers any
+                 rejected/no-op'd CONNECTION_FAILED).
         """
         try:
             self._emit_alert(
@@ -16606,6 +16777,30 @@ class ModemStateMachine:
                           'failure_threshold': failure_threshold})
 
         while self.machine.current_state == ModemState.CONNECTED.value:
+            # Re-read connectivity-monitoring config each poll so live `commit`s
+            # to interval/targets/thresholds/test flags (and a live disable)
+            # take effect without a reconnect.  This task is started once on
+            # entry to CONNECTED and is NOT restarted by a settings-only
+            # reconfigure (which completes faster than this loop's sleep), so
+            # without this refresh the loop keeps using the config captured
+            # when the connection first came up.
+            connectivity_config = self.config.get('connectivity_monitoring', {}) if self.config else {}
+            if not connectivity_config.get('enabled', True):
+                # Honored live — stop probing until re-enabled.  The state
+                # watchdog restarts this loop once it is turned back on.
+                logger.info("Connectivity monitoring disabled via commit — stopping probe loop",
+                           extra={'interface_number': self.interface_number})
+                break
+            interval = connectivity_config.get('interval', DEFAULT_CONNECTIVITY_CONFIG['interval'])
+            timeout = connectivity_config.get('timeout', DEFAULT_CONNECTIVITY_CONFIG['timeout'])
+            retry_count = connectivity_config.get('retry_count', DEFAULT_CONNECTIVITY_CONFIG['retry_count'])
+            failure_threshold = connectivity_config.get('failure_threshold', DEFAULT_CONNECTIVITY_CONFIG['failure_threshold'])
+            ipv4_targets = connectivity_config.get('ipv4_targets', DEFAULT_CONNECTIVITY_CONFIG['ipv4_targets'])
+            ipv6_targets = connectivity_config.get('ipv6_targets', DEFAULT_CONNECTIVITY_CONFIG['ipv6_targets'])
+            test_ipv4 = connectivity_config.get('test_ipv4', DEFAULT_CONNECTIVITY_CONFIG['test_ipv4'])
+            test_ipv6 = connectivity_config.get('test_ipv6', DEFAULT_CONNECTIVITY_CONFIG['test_ipv6'])
+            require_both = connectivity_config.get('require_both', DEFAULT_CONNECTIVITY_CONFIG['require_both'])
+
             try:
                 # Only test if we have a bearer connection (guard against brief state gaps)
                 if not self.bearer_path:
@@ -17793,8 +17988,7 @@ class ModemStateMachine:
                         extra={'interface_number': self.interface_number,
                                'initial_ip': self._last_known_ip})
 
-            while self.machine.current_state in (ModemState.CONNECTED.value,
-                                                 ModemState.USAGE_MONITORING.value):
+            while self.machine.current_state == ModemState.CONNECTED.value:
                 try:
                     current_ips = await self._get_current_ip()
                     bearer_ips = await self._get_bearer_expected_ips()
@@ -17919,10 +18113,7 @@ class ModemStateMachine:
             # (e.g. "Regular deactivation" from carrier) and did not
             # reconnect within the debounce window.  Transition the FSM
             # and attempt to re-establish the connection.
-            # Note: FSM may be in USAGE_MONITORING (not just CONNECTED)
-            # because the state machine transitions there after connect.
-            if (self.machine.current_state in (ModemState.CONNECTED.value,
-                                                ModemState.USAGE_MONITORING.value)
+            if (self.machine.current_state == ModemState.CONNECTED.value
                     and not self.user_disconnected):
                 logger.warning("Bearer lost while FSM in %s — triggering reconnection recovery",
                               self.machine.current_state,
