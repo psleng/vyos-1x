@@ -126,12 +126,50 @@ class Session:
 
         return out
 
+    def show_cellular_firmware(self):
+        session = self._session
+        data = self._data
+
+        try:
+            out = session.show_cellular_firmware(data['interface'])
+            return json.loads(out)
+        except Exception as error:
+            raise error
+
     def add_system_image(self):
         session = self._session
         data = self._data
 
         try:
             res = session.install_image(data['location'])
+        except Exception as error:
+            raise error
+
+        return res
+
+    def set_cellular_firmware(self):
+        session = self._session
+        data = self._data
+
+        try:
+            res = session.set_cellular_firmware(
+                data['version'],
+                data.get('interface'),
+            )
+        except Exception as error:
+            raise error
+
+        return res
+
+    def delete_cellular_firmware(self):
+        session = self._session
+        data = self._data
+
+        try:
+            res = session.delete_cellular_firmware(
+                data['version'],
+                data.get('interface'),
+            )
         except Exception as error:
             raise error
 
