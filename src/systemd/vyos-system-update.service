@@ -4,7 +4,11 @@ After=network.target vyos-router.service
 
 [Service]
 Type=simple
-Restart=always
+# Restart only on abnormal exit. A clean exit (code 0) means there is no
+# update URL to check (none configured and none baked into the image), so the
+# service should stay stopped instead of looping. The normal path never exits.
+Restart=on-failure
+RestartSec=60
 ExecStart=/usr/bin/python3 /usr/libexec/vyos/system/vyos-system-update-check.py --config /run/vyos-system-update.conf
 
 [Install]

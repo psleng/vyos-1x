@@ -36,20 +36,36 @@ if __name__ == '__main__':
                         '--config',
                         action='store',
                         help='Path to system-update-check configuration',
-                        required=True,
+                        required=False,
+                        default='/run/vyos-system-update.conf',
                         type=Path)
 
     args = parser.parse_args()
-    try:
-        config_path = Path(args.config)
-        config = json.loads(config_path.read_text())
-    except Exception as err:
-        print(
-            f'Configuration file "{config_path}" does not exist or malformed: {err}'
-        )
-        exit(1)
 
-    url_json = config.get('url')
+    # The service runs by default, so the run-time configuration file is
+    # optional: it only exists when the `system update-check` CLI node is
+    # configured (to override the URL). When it is absent or has no URL, fall
+    # back to the default update URL baked into the image at build time
+    # (vyos-build writes it into /usr/share/vyos/version.json from the build
+    # flavor's `update_url`). This lets update notifications work with zero
+    # configuration.
+    url_json = None
+    config_path = Path(args.config)
+    if config_path.is_file():
+        try:
+            config = json.loads(config_path.read_text())
+            url_json = config.get('url')
+        except Exception as err:
+            print(f'Configuration file "{config_path}" is malformed: {err}')
+
+    if not url_json:
+        url_json = vyos.version.get_version_data().get('update_url')
+
+    if not url_json:
+        # No URL configured and none baked into the image: nothing to check.
+        print('No update-check URL configured or baked into the image; exiting.')
+        exit(0)
+
     local_data = vyos.version.get_full_version_data()
     local_version = local_data.get('version')
 
