@@ -55,6 +55,7 @@ from vyos.utils.process import run
 from vyos.utils.process import DEVNULL
 from vyos.utils.boot import boot_configuration_complete
 from vyos.configdiff import get_config_diff
+from vyos.system.hardware import get_nvmem_password
 from vyos import ConfigError
 from vyos import airbag
 
@@ -90,6 +91,17 @@ PASSWORD_POLICY_DEFAULT_MINIMUM_LENGTH = 9
 PASSWORD_POLICY_DEFAULT_MINIMUM_DIGIT = 1
 PASSWORD_POLICY_DEFAULT_MINIMUM_UPPERCASE = 1
 PASSWORD_POLICY_DEFAULT_MINIMUM_SPECIAL = 1
+
+# PERLE: Default admin account and the "password unchanged" sentinel.
+# While the account's encrypted-password is still this sentinel, the per-device
+# NVMEM "sticker" password (or the normal default password when no valid
+# sticker is present) is applied to /etc/shadow WITHOUT being written into the
+# CLI config.  Keeping the config at the sentinel means a reset to the default
+# config re-derives the sticker from hardware and the stored config never
+# carries a per-device secret.  Once an admin sets a real password the sentinel
+# no longer matches and neither default is applied.
+DEFAULT_LOGIN_USER = 'igos'
+PASSWORD_SENTINEL = '!'
 
 # As of OpenSSH 9.8p1 in Debian trixie, DSA keys are no longer supported
 SSH_DSA_DEPRECATION_WARNING: str = (
@@ -582,6 +594,45 @@ def generate(login):
     # calculate users encrypted password
     if 'user' in login:
         for user, user_config in login['user'].items():
+            # PERLE: default-account sticker password.
+            # When the default admin account is still at the '!' sentinel
+            # (password never changed), apply the per-device NVMEM sticker
+            # password to /etc/shadow — or the normal default password when no
+            # valid sticker is present — WITHOUT persisting it into the CLI
+            # config (the config stays at '!').  This is applied as a normal,
+            # non-expired password; forced-change-on-first-login is a separate
+            # enforcement stage.
+            if (
+                user == DEFAULT_LOGIN_USER
+                and dict_search('authentication.encrypted_password', user_config)
+                == PASSWORD_SENTINEL
+                and not dict_search('authentication.plaintext_password', user_config)
+            ):
+                sticker = get_nvmem_password()
+                effective_password = sticker if sticker else DEFAULT_PASSWORD
+
+                # Avoid re-hashing (fresh salt) on every commit: if /etc/shadow
+                # already accepts this password, leave it untouched.
+                current_shadow = get_shadow_password(user)
+                already_applied = False
+                if current_shadow and current_shadow not in ('!', '*', ''):
+                    try:
+                        already_applied = linux_context.verify(
+                            effective_password, current_shadow
+                        )
+                    except Exception:
+                        already_applied = False
+
+                if already_applied:
+                    del login['user'][user]['authentication']['encrypted_password']
+                else:
+                    login['user'][user]['authentication'][
+                        'encrypted_password'
+                    ] = linux_context.hash(effective_password)
+                # Do not fall through to the plaintext / config-writeback path:
+                # the sentinel must remain '!' in the CLI config.
+                continue
+
             tmp = dict_search('authentication.plaintext_password', user_config)
             if tmp:
                 encrypted_password = linux_context.hash(tmp)

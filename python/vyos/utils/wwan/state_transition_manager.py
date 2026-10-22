@@ -86,9 +86,6 @@ class StateTransitionManager:
             transitions=[
                 StateTransition("MODEM_FOUND", "WAITING_FOR_CONFIG", "WAIT_FOR_CONFIG", "Wait for configuration"),
                 StateTransition("WAITING_FOR_CONFIG", "CONFIGURING", "CONFIG_UPDATE", "Apply configuration"),
-                StateTransition("USAGE_MONITORING", "MODEM_FOUND", "MODEM_FOUND", "Hot-plug: New modem detected"),
-                StateTransition("USAGE_MONITORING", "WAITING_FOR_CONFIG", "WAIT_FOR_CONFIG", "Hot-plug: Wait for config"),
-                StateTransition("USAGE_MONITORING", "CONFIGURING", "CONFIG_UPDATE", "Hot-plug: Apply configuration"),
             ]
         )
 
@@ -100,7 +97,6 @@ class StateTransitionManager:
                 StateTransition("CONFIGURING", "CONNECTING", "CONNECT", "Attempt network connection"),
                 StateTransition("CONFIGURING", "REGISTERED_IDLE", "ENTER_IDLE", "Park at registered-idle (connect-on-demand)"),
                 StateTransition("CONNECTING", "CONNECTED", "CONNECTED", "Connection established successfully"),
-                StateTransition("CONNECTED", "USAGE_MONITORING", "START_USAGE_MONITORING", "Start data usage monitoring"),
                 StateTransition("REGISTERED_IDLE", "CONNECTING", "CONNECT", "D-Bus connect from on-demand idle"),
                 StateTransition("DISCONNECTED", "CONNECTING", "CONNECT", "Watchdog reconnect from registered-but-disconnected state"),
                 # Watchdog reconcile: MM reports the bearer already up while the
@@ -118,12 +114,10 @@ class StateTransitionManager:
             description="Network disconnection and cleanup",
             transitions=[
                 StateTransition("CONNECTED", "DISCONNECTING", "DISCONNECT", "User or system disconnect"),
-                StateTransition("USAGE_MONITORING", "DISCONNECTING", "DISCONNECT", "Disconnect from monitoring"),
                 StateTransition("DISCONNECTING", "DISCONNECTED", "DISCONNECTED", "Disconnection completed"),
                 StateTransition("DISCONNECTING", "CONNECTED", "CONNECTED", "Reconcile: bearer verified still up (stale/racy disconnect)"),
                 StateTransition("DISCONNECTING", "CONFIGURING", "CONFIG_UPDATE", "Recovery: reconfigure after bearer loss"),
                 StateTransition("CONNECTED", "REGISTERED_IDLE", "ENTER_IDLE", "On-demand disconnect: drop bearer, keep registration"),
-                StateTransition("USAGE_MONITORING", "REGISTERED_IDLE", "ENTER_IDLE", "On-demand disconnect from monitoring"),
                 StateTransition("CONNECTING", "REGISTERED_IDLE", "ENTER_IDLE", "In-flight connect aborted by user disconnect (on-demand)"),
             ]
         )
@@ -146,13 +140,11 @@ class StateTransitionManager:
                 StateTransition("REGISTERED_IDLE", "WAITING_FOR_SIM", "SIM_MISSING", "SIM removed while idle"),
                 StateTransition("FAILED", "WAITING_FOR_SIM", "SIM_MISSING", "SIM removed while in failed state"),
                 StateTransition("CONNECTED", "WAITING_FOR_SIM", "SIM_MISSING", "SIM removed while connected"),
-                StateTransition("USAGE_MONITORING", "WAITING_FOR_SIM", "SIM_MISSING", "SIM removed during usage monitoring"),
                 StateTransition("CONNECTING", "WAITING_FOR_SIM", "SIM_MISSING", "SIM removed while connecting"),
                 StateTransition("DISCONNECTING", "WAITING_FOR_SIM", "SIM_MISSING", "SIM removed during disconnect"),
 
                 # SIM switching transitions
                 StateTransition("CONNECTED", "SIM_SWITCHING", "SWITCH_SIM", "Initiate SIM switch"),
-                StateTransition("USAGE_MONITORING", "SIM_SWITCHING", "SWITCH_SIM", "SIM switch from monitoring"),
                 StateTransition("CONFIGURING", "SIM_SWITCHING", "SWITCH_SIM", "SIM switch from config"),
                 StateTransition("DISCONNECTED", "SIM_SWITCHING", "SWITCH_SIM", "SIM switch when disconnected"),
                 StateTransition("FAILED", "SIM_SWITCHING", "SWITCH_SIM", "SIM switch from failed state"),
@@ -188,13 +180,6 @@ class StateTransitionManager:
             transitions=[
                 StateTransition("CONNECTING", "FAILED", "CONNECTION_FAILED", "Connection attempt failed"),
                 StateTransition("CONNECTED", "FAILED", "CONNECTION_FAILED", "Active connection failed"),
-                # USAGE_MONITORING is the normal connected steady state (CONNECTED
-                # -> START_USAGE_MONITORING).  _handle_failed_state_event fires
-                # CONNECTION_FAILED from it on a non-SIM modem failure; without
-                # this row process_event() raised and the FSM stuck in
-                # USAGE_MONITORING (connection dead, no retry loop).  Mirrors
-                # the CONNECTED->FAILED row above.
-                StateTransition("USAGE_MONITORING", "FAILED", "CONNECTION_FAILED", "Connection failed while monitoring"),
                 StateTransition("CONFIGURING", "FAILED", "CONNECTION_FAILED", "Configuration failed"),
                 StateTransition("DISCONNECTING", "FAILED", "CONNECTION_FAILED", "Recovery from disconnecting failed"),
                 # A reconnect attempt (e.g. apply_modem_configuration's
@@ -222,7 +207,6 @@ class StateTransitionManager:
                 StateTransition("CONNECTED", "CONFIGURING", "RECONFIGURE", "Reconfigure connected modem"),
                 StateTransition("DISCONNECTED", "CONFIGURING", "RECONFIGURE", "Reconfigure disconnected modem"),
                 StateTransition("FAILED", "CONFIGURING", "RECONFIGURE", "Reconfigure failed modem"),
-                StateTransition("USAGE_MONITORING", "CONFIGURING", "RECONFIGURE", "Reconfigure from monitoring"),
                 StateTransition("REGISTERED_IDLE", "CONFIGURING", "RECONFIGURE", "Reconfigure from on-demand idle"),
             ]
         )
@@ -241,9 +225,6 @@ class StateTransitionManager:
                 StateTransition("CONNECTED", "SCANNING", "START_SCAN", "Modem removed while connected"),
                 StateTransition("DISCONNECTING", "SCANNING", "START_SCAN", "Modem removed during disconnect"),
                 StateTransition("DISCONNECTED", "SCANNING", "START_SCAN", "Modem removed while disconnected"),
-                StateTransition("USAGE_MONITORING", "SCANNING", "START_SCAN", "Modem removed during monitoring"),
-                StateTransition("USAGE_THRESHOLD", "SCANNING", "START_SCAN", "Modem removed at usage threshold"),
-                StateTransition("USAGE_RESETTING", "SCANNING", "START_SCAN", "Modem removed during usage reset"),
                 StateTransition("SIM_SWITCHING", "SCANNING", "START_SCAN", "Modem removed during SIM switch"),
                 StateTransition("SIM_DISCONNECTING", "SCANNING", "START_SCAN", "Modem removed during SIM disconnect"),
                 StateTransition("SIM_DISABLING", "SCANNING", "START_SCAN", "Modem removed during SIM disable"),
@@ -253,21 +234,10 @@ class StateTransitionManager:
             ]
         )
 
-        # Usage Monitoring Flow
-        usage_flow = StateTransitionGroup(
-            name="Usage Monitoring Flow",
-            description="Data usage monitoring and threshold management",
-            transitions=[
-                StateTransition("USAGE_MONITORING", "USAGE_THRESHOLD", "USAGE_LIMIT_EXCEEDED", "Usage limit exceeded"),
-                StateTransition("USAGE_THRESHOLD", "USAGE_RESETTING", "RESET_USAGE", "Reset usage counters"),
-                StateTransition("USAGE_RESETTING", "CONFIGURING", "RECONFIGURE", "Reconfigure after reset"),
-            ]
-        )
-
         # Store all transition groups
         self.transition_groups = [
             initial_flow, config_flow, connection_flow, disconnection_flow,
-            sim_flow, error_flow, reconfig_flow, usage_flow,
+            sim_flow, error_flow, reconfig_flow,
             hardware_removal_flow
         ]
 

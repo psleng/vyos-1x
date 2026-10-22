@@ -94,7 +94,7 @@ interfaces
         │     ├── passthrough-management-address-ipv6 <ipv6/prefix>   # FSM-provisioned mgmt v6 (default: fd00:6c61:6e30::1/128; same Policy B)
         │     ├── dns-server <ipv4|ipv6> (multi)          # override DNS advertised to downstream (precedence: user > carrier > 8.8.8.8/1.1.1.1)
         │     ├── disable-mss-clamp                       # valueless — turn off TCP MSS clamp-to-PMTU on WWAN egress (on by default)
-      │     ├── legacy-dhcpv4-compat                    # valueless — legacy mode: same-subnet v4 router/netmask, disable DHCP option 121
+        │     ├── legacy-dhcpv4-compat                    # valueless — legacy mode: same-subnet v4 router/netmask, disable DHCP option 121
         │     └── router-advert                           # RA tuning for the downstream device (dnsmasq)
         │           ├── interval <4-1800>                 # unsolicited RA cadence, s (default: 60)
         │           ├── router-lifetime <0-9000>          # default-router lifetime, s (default: 1800; 0 = not a default router)

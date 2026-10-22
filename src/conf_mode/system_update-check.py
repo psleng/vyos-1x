@@ -53,10 +53,17 @@ def verify(config):
     if config is None:
         return
 
-    if 'url' not in config:
-        raise ConfigError('URL is required!')
+    # Nothing to verify when the user has disabled update checks.
+    if 'disable' in config:
+        return
 
-    url = config['url']
+    # 'url' is optional: when it is omitted the update-check service falls back
+    # to the default URL baked into the image at build time
+    # (/usr/share/vyos/version.json). Only an explicitly configured URL is
+    # verified here for reachability.
+    url = config.get('url')
+    if not url:
+        return
 
     # Make sure that provided URL is available and responses a valid JSON
     # otherwise print warning and display type of error (connection, timeout and etc.)
@@ -73,9 +80,9 @@ def verify(config):
 
 
 def generate(config):
-    # bail out early - looks like removal from running config
-    if config is None:
-        # Remove old config and return
+    # Remove the override config (reverting to the baked-in default URL) and
+    # any stale MOTD when the node is removed or update checks are disabled.
+    if config is None or 'disable' in config:
         service_conf.unlink(missing_ok=True)
         # MOTD used in /run/motd.d/10-update
         motd_file.unlink(missing_ok=True)
@@ -89,11 +96,16 @@ def generate(config):
 
 
 def apply(config):
-    if config:
-        if 'auto_check' in config:
-            call(f'systemctl restart {service_name}.service')
+    # Update-check notifications are enabled by default in the image (the
+    # service uses the URL baked into /usr/share/vyos/version.json when nothing
+    # is configured). `system update-check disable` turns them off persistently;
+    # otherwise ensure the service is enabled and (re)started so any change here
+    # (e.g. an overridden URL) takes effect, or it reverts to the baked default.
+    if config is not None and 'disable' in config:
+        call(f'systemctl disable --now {service_name}.service')
     else:
-        call(f'systemctl stop {service_name}.service')
+        call(f'systemctl enable {service_name}.service')
+        call(f'systemctl restart {service_name}.service')
 
 
 if __name__ == '__main__':

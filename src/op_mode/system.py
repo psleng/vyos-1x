@@ -26,8 +26,18 @@ config = ConfigTreeQuery()
 base = ['system', 'update-check']
 
 
-def _compare_version_raw():
+def _get_update_url():
+    # An explicitly configured URL overrides the default baked into the image
+    # at build time (/usr/share/vyos/version.json from the build flavor's
+    # `update_url`).
     url = config.value(base + ['url'])
+    if not url:
+        url = vyos.version.get_version_data().get('update_url')
+    return url
+
+
+def _compare_version_raw():
+    url = _get_update_url()
     local_data = vyos.version.get_full_version_data()
     remote_data = vyos.version.get_remote_version(url)
     if not remote_data:
@@ -62,9 +72,9 @@ def _formatted_compare_version(data):
 
 
 def _verify():
-    if not config.exists(base):
-        return False
-    return True
+    # The subsystem is usable when a URL can be resolved: either configured via
+    # CLI or baked into the image at build time.
+    return bool(_get_update_url())
 
 
 def show_update(raw: bool):
