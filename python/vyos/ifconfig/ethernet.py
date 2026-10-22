@@ -178,12 +178,14 @@ class EthernetIf(Interface):
             return output
         return None
 
-    def set_speed_duplex(self, speed, duplex):
+    def set_speed_duplex(self, speed, duplex, quiet=False):
         """
         Set link speed in Mbit/s and duplex.
 
         @speed can be any link speed in MBit/s, e.g. 10, 100, 1000 auto
         @duplex can be half, full, auto
+        @quiet suppresses the "unsupported" warnings (used when re-applying an
+        unchanged setting after the interface came up)
 
         Example:
         >>> from vyos.ifconfig import EthernetIf
@@ -212,11 +214,13 @@ class EthernetIf(Interface):
             raise ValueError('Value out of range (duplex)')
 
         if not self.ethtool.check_speed_duplex(speed, duplex):
-            Warning(f'changing speed/duplex setting on "{ifname}" is unsupported!')
+            if not quiet:
+                Warning(f'changing speed/duplex setting on "{ifname}" is unsupported!')
             return
 
         if not self.ethtool.check_auto_negotiation_supported():
-            Warning(f'changing auto-negotiation setting on "{ifname}" is unsupported!')
+            if not quiet:
+                Warning(f'changing auto-negotiation setting on "{ifname}" is unsupported!')
             return
 
         # Get current speed and duplex settings:
@@ -262,9 +266,38 @@ class EthernetIf(Interface):
             # but they do not actually support it either.
             # In that case it's probably better to ignore the error
             # than end up with a broken config.
-            print(
-                'Warning: could not set speed/duplex settings: operation not permitted!'
-            )
+            if not quiet:
+                print(
+                    'Warning: could not set speed/duplex settings: operation not permitted!'
+                )
+
+    def _update_speed_duplex(self, config, was_down):
+        """
+        Apply configured speed/duplex. Must run after the interface is up.
+
+        phylink-based drivers (e.g. TI am65-cpsw on AM64x) only attach the PHY
+        in ndo_open. An ethtool speed/duplex/autoneg change made while the
+        interface is down is accepted but kept only in phylink's own state,
+        which is discarded when the PHY is attached - the setting is silently
+        lost. So apply it with the interface up, and re-apply it whenever the
+        interface has just come up from down (boot, re-enable after 'disable'),
+        not only when the speed/duplex nodes changed. set_speed_duplex() skips
+        the change when the NIC already matches, so re-applying is harmless.
+        """
+        if 'disable' in config:
+            # Applied once the interface is enabled again (was_down path)
+            return
+        if not {'speed', 'duplex'} <= set(config):
+            return
+
+        changed = 'speed_duplex_changed' in config
+        if not (changed or was_down):
+            return
+
+        # The cached NIC state was read in __init__, possibly while the
+        # interface was down and no PHY was attached - re-read it now.
+        self.ethtool = Ethtool(self.ifname)
+        self.set_speed_duplex(config['speed'], config['duplex'], quiet=not changed)
 
     def set_gro(self, state):
         """
@@ -569,6 +602,10 @@ class EthernetIf(Interface):
         interface setup code and provide a single point of entry when working
         on any interface."""
 
+        # Sampled before anything below can change the admin state; see
+        # _update_speed_duplex() for why a down->up transition matters.
+        was_down = self.get_admin_state() == 'down'
+
         # disable ethernet flow control (pause frames)
         value = 'off' if 'disable_flow_control' in config else 'on'
         self.set_flow_control(value)
@@ -597,13 +634,6 @@ class EthernetIf(Interface):
         # TSO (TCP segmentation offloading)
         self.set_tso(dict_search('offload.tso', config) is not None)
 
-        # Set physical interface speed and duplex
-        if 'speed_duplex_changed' in config:
-            if {'speed', 'duplex'} <= set(config):
-                speed = config.get('speed')
-                duplex = config.get('duplex')
-                self.set_speed_duplex(speed, duplex)
-
         # Set interface ring buffer
         if 'ring_buffer' in config:
             for rx_tx, size in config['ring_buffer'].items():
@@ -617,6 +647,10 @@ class EthernetIf(Interface):
 
         # call base class last
         super().update(config)
+
+        # Set physical interface speed and duplex - only once the interface is
+        # up, see _update_speed_duplex()
+        self._update_speed_duplex(config, was_down)
 
         # enable/disable EAPoL (Extensible Authentication Protocol over Local Area Network)
         self.set_eapol()
