@@ -22,6 +22,7 @@ show
                     ├── signal                              # RF signal metrics
                     ├── sim                                 # SIM/slot/PIN information
                     ├── status                              # connection state and IP config
+                    ├── bearer-leases                       # who is holding the bearer up (failover/operator) and why
                     ├── wait-failover-alert                 # wait for next failover alert
                     │     └── timeout <1-600>               # override wait timeout (seconds)
                     ├── monitor-alerts                      # collect live alerts for a timeout window
@@ -151,6 +152,49 @@ igos@igos:~$ show interfaces wwan wwan0 status
 | | Duration | Current bearer session duration (hours/minutes/seconds) |
 
 **JSON mode:** `show interfaces wwan wwan0 status --raw`
+
+---
+
+### `show interfaces wwan <wwanN> bearer-leases`
+
+Shows who is currently holding the cellular bearer up and why.  Use it to
+answer "why is this metered link up right now?".  It lists the bearer-demand
+leases held by clients such as the WAN load-balancing failover daemon.  See
+*Bearer-Demand Leases* in the `set` command reference.
+
+```
+igos@igos:~$ show interfaces wwan wwan0 bearer-leases
+Interface:        wwan0
+Connection mode:  dial-on-demand
+Bearer demanded:  yes
+Lease-managed:    yes
+Operator request: no
+Connect-retry:    failed-retry schedule
+
+Owner           Reason                      TTL(s)    Expires(s)  Age(s)
+--------------------------------------------------------------------------
+wlb-failover    active failover target      15        12          184
+```
+
+| Field | Description |
+|---|---|
+| Bearer demanded | `yes` if an operator `connect_bearer()` request or any live lease wants the bearer up |
+| Lease veto | Shown only when active: airplane mode / `disable` or a **data-limit hold** is overriding the leases, so they can't bring the bearer up |
+| Lease-managed | `yes` while the bearer is up because of lease demand; the FSM idles it ~5 s after the last lease ends |
+| Operator request | Persistent operator intent from `connect_bearer()` (cleared by `disconnect_bearer()`) |
+| Connect-retry | The configured `connect-retry` profile, or `failed-retry schedule` when unset |
+| Owner / Reason | Lease holder (`wlb-failover`, `cli`, `operator`, …) and its annotation |
+| TTL / Expires / Age | Renewal budget, seconds until the lease lapses if not renewed (`-` = persistent), and seconds since it was first acquired |
+
+With no live leases the table is replaced by `No active bearer-demand leases.`
+
+> **Note:** In `always-on` mode the bearer is FSM-managed and leases can't be
+> acquired, so the command shows the mode with no active leases.
+
+**JSON mode:** `show interfaces wwan wwan0 bearer-leases --raw`.  The keys are
+`interface`, `connection_mode`, `demanded`, `vetoed`, `data_limit_hold`,
+`lease_owns_bearer`, `operator_requested`, `retry_profile` (`""` when unset)
+and `leases`.  Each lease has `owner`, `reason`, `ttl`, `expires_in` and `age`.
 
 ---
 
@@ -508,7 +552,11 @@ igos@igos:~$ disconnect interface wwan0
 > **Note:** In `connect-on-demand` and `dial-on-demand` modes, the
 > `disconnect_bearer()` D-Bus method can also be used programmatically.
 > In those modes, the bearer is released but the modem stays registered
-> on the network (SMS available, no data).
+> on the network (SMS available, no data).  If another client holds a live
+> bearer-demand lease (for example, WLB is holding the link up for failover),
+> `disconnect_bearer()` only withdraws the operator request and the bearer
+> stays up.  Check `show interfaces wwan <wwanN> bearer-leases` to see who is
+> holding it.
 
 ---
 
@@ -724,7 +772,10 @@ scripts use the `WWANClientSync` client library from
 | `connect()` | — | `"accepted"` | Initiate bearer connection |
 | `disconnect()` | — | `"accepted"` | Terminate bearer connection |
 | `connect_bearer()` | — | `"accepted"` | Establish data bearer (on-demand modes) |
-| `disconnect_bearer()` | — | `"accepted"` | Release data bearer (on-demand modes) |
+| `disconnect_bearer()` | — | `"accepted"` | Release data bearer (on-demand modes); teardown skipped while another client holds a live lease |
+| `bearer_lease_acquire(owner, ttl, reason)` | string, double, string | `"accepted"` | Acquire/renew a bearer-demand lease (on-demand modes).  `owner` must be `cli`, `operator`, `wlb-failover` or `dod-traffic`; `ttl <= 0` = persistent (operator owners only); finite TTL capped at 3600 s |
+| `bearer_lease_release(owner)` | string | `"accepted"` | Release a lease (no-op if none); bearer stays up if other leases remain |
+| `bearer_lease_list()` | — | JSON string | Lease/demand view used by `show … bearer-leases` |
 | `send_sms(recipient, message)` | number, text | `{"message_id": N}` | Send SMS |
 | `list_sms()` | — | Array of message dicts | List all SMS messages |
 | `read_sms(message_id)` | integer | Message dict | Read specific SMS (marks as read) |
@@ -834,13 +885,16 @@ an HTTPS POST body, use `syslog-identifier igos-wwan-alertbus-json` and parse
 | `op-mode-definitions/clear-sms.xml.in` | XML: `clear interfaces wwan … sms` and `data-usage` commands |
 | `op-mode-definitions/connect.xml.in` | XML: `connect interface` (shared with PPPoE/SSTPC) |
 | `op-mode-definitions/disconnect.xml.in` | XML: `disconnect interface` (shared with PPPoE/SSTPC) |
-| `src/op_mode/show_wwan.py` | Python: status, hardware, sim, signal, detail, clear data-usage handlers |
+| `src/op_mode/show_wwan.py` | Python: status, hardware, sim, signal, detail, bearer-leases, clear data-usage handlers |
 | `src/op_mode/wwan_sms.py` | Python: send, list, read, delete SMS handlers |
 | `src/op_mode/connect_disconnect.py` | Python: connect/disconnect handler (shared) |
 | `python/vyos/utils/wwan/wwan_client.py` | Python: `WWANClientSync` D-Bus client library |
 | `python/vyos/utils/wwan/alert_adapters.py` | Python: AlertBus subscriber adapters (REST/MQTT/SNMP skeletons) |
 | `python/vyos/utils/wwan/interfaces_wwan_config.py` | Python: D-Bus service — per-interface methods |
 | `python/vyos/utils/wwan/interfaces_wwan_service_manager.py` | Python: D-Bus service — control plane |
+| `python/vyos/utils/wwan/bearer_lease.py` | Python: bearer-demand lease registry (TTL leases per interface/owner) |
+| `python/vyos/utils/wwan/bearer_retry.py` | Python: `connect-retry` backoff profiles |
+| `src/helpers/vyos-load-balancer.py` | Python: WLB daemon — holds the `wlb-failover` lease while a dial-on-demand WWAN is the active failover egress |
 
 ---
 
@@ -852,6 +906,7 @@ an HTTPS POST body, use `syslog-identifier igos-wwan-alertbus-json` and parse
 | `show interfaces wwan detail` | Detailed standard info for all WWAN interfaces |
 | `show interfaces wwan wwan0` | Standard interface info for wwan0 |
 | `show interfaces wwan wwan0 status` | Connection state, IP config, signal, SMS, data usage |
+| `show interfaces wwan wwan0 bearer-leases` | Who is holding the bearer up (failover/operator leases) and why |
 | `show interfaces wwan wwan0 hardware` | Manufacturer, model, IMEI, firmware |
 | `show interfaces wwan wwan0 signal` | RSSI, RSRP, RSRQ, SNR, active bands |
 | `show interfaces wwan wwan0 sim` | SIM slots, IMSI, ICCID, failover, PIN/PUK status |

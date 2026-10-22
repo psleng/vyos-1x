@@ -39,6 +39,8 @@ from vyos.utils.wwan.interfaces_wwan_util import (
 )
 from vyos.utils.wwan import interfaces_wwan_diag as wwan_diag
 from vyos.utils.wwan.sim_controller import make_sim_controller
+from vyos.utils.wwan.bearer_lease import BearerLeaseRegistry
+from vyos.utils.wwan.bearer_retry import retry_schedule
 
 # Check if Android APN lookup library is available
 try:
@@ -627,6 +629,25 @@ class ModemStateMachine:
         self._registration_flap_failover_triggered = False  # Whether flap detection has triggered a failover
         self.connect_requested = False      # Queued connect from D-Bus client, honored when FSM is ready
         self.connection_mode = 'always-on'   # 'always-on' | 'connect-on-demand' | 'dial-on-demand'
+        # --- Bearer demand leases (event-driven, multi-client) ---------------
+        # Generalises the single `bearer_requested` operator bit into a set of
+        # named, TTL-bounded leases held by any client that needs the bearer up
+        # (WLB failover, the dial-on-demand traffic trigger, the operator CLI).
+        # In the on-demand modes a live lease brings/keeps the bearer up and its
+        # lapse idles a bearer the leases raised; see _reconcile_bearer_demand().
+        # With no leases the reconciler never runs, so existing behaviour is
+        # unchanged.  Leases that stop being renewed expire on their own, so a
+        # crashed client cannot pin a metered bearer.
+        self.bearer_leases = BearerLeaseRegistry()
+        self._lease_sweep_task = None
+        self._lease_sweep_interval = 1.0        # 1s reconcile/sweep tick
+        self._lease_idle_grace = 5.0            # small linger before idle teardown
+        self._lease_idle_deadline = None        # monotonic deadline, or None
+        # True only while the bearer is up because of lease demand (raised or
+        # adopted while a lease was held).  The reconciler never idles a bearer
+        # it does not own, so with no leases existing behaviour is unchanged.
+        self._lease_owns_bearer = False
+        self._connect_retry_profile = None      # None => failed-retry schedule in effect
         self.last_scan_results = []          # Cached network scan results for status reporting
         # A configuration that arrives while the FSM is in a transitional state
         # (CONNECTING / DISCONNECTING / SIM_*) cannot be reconfigured in place —
@@ -3855,6 +3876,20 @@ class ModemStateMachine:
         self._failed_retry_intervals = list(self.parsed_config.failed_retry.intervals)
         self._failed_retry_max_interval = self.parsed_config.failed_retry.max_interval
         self._failed_retry_escalation_threshold = self.parsed_config.failed_retry.escalation_threshold
+
+        # Connect-retry profile (user-facing knob).  Only when explicitly
+        # configured does the named profile override the per-attempt backoff
+        # schedule used by the failed-state retry loop above (applied uniformly
+        # to every failure reason).  Unset leaves the `failed-retry` schedule
+        # exactly as configured, so a custom failed-retry is never clobbered.
+        connect_retry = self.parsed_config.raw_config.get('connect_retry')
+        if connect_retry:
+            self._connect_retry_profile = connect_retry
+            intervals, max_interval = retry_schedule(connect_retry)
+            self._failed_retry_intervals = intervals
+            self._failed_retry_max_interval = max_interval
+        else:
+            self._connect_retry_profile = None
 
         # Bearer D-Bus signal monitoring state
         self._bearer_proxy = None
@@ -15746,6 +15781,167 @@ class ModemStateMachine:
             logger.error(f"Watchdog controlled rescan failed: {e}",
                         extra={'interface_number': self.interface_number})
 
+    # ===================================================================
+    # Bearer demand leases
+    # ===================================================================
+    # States in which the FSM is mid-transition and must NOT be nudged by the
+    # lease reconciler; the next 1s sweep tick re-evaluates once it settles
+    # (mirrors the _pending_reconfigure deferral idiom).
+    _LEASE_TRANSITIONAL_STATES = {
+        ModemState.INITIAL.value, ModemState.SCANNING.value,
+        ModemState.MODEM_FOUND.value, ModemState.WAITING_FOR_CONFIG.value,
+        ModemState.CONFIGURING.value, ModemState.CONNECTING.value,
+        ModemState.DISCONNECTING.value, ModemState.WAITING_FOR_SIM.value,
+        ModemState.SIM_SWITCHING.value, ModemState.SIM_DISCONNECTING.value,
+        ModemState.SIM_DISABLING.value, ModemState.SIM_ENABLING.value,
+        ModemState.SIM_RECONFIGURING.value,
+    }
+
+    def _current_state_name(self):
+        return (self.machine.current_state
+                if getattr(self, 'machine', None) else None)
+
+    def _bearer_demanded(self, now=None):
+        """True if the operator OR any live lease wants the bearer up.
+
+        This is the demand signal the reconciler ORs with the always-on policy
+        floor.  ``bearer_requested`` carries persistent operator intent; the
+        lease registry carries the transient failover/traffic demand.
+        """
+        if self.bearer_requested:
+            return True
+        return self.bearer_leases.any_live(self.interface_number, now=now)
+
+    def bearer_lease_acquire(self, owner, ttl=None, reason=''):
+        """Acquire or renew *owner*'s bearer-demand lease, then reconcile.
+
+        Idempotent: renewing simply pushes the expiry forward.  Returns
+        ``"accepted"`` -- callers poll bearer status to observe the outcome.
+        """
+        self.bearer_leases.acquire(self.interface_number, owner,
+                                   ttl=ttl, reason=reason)
+        self._lease_idle_deadline = None  # any demand cancels a pending teardown
+        self._ensure_lease_sweeper()
+        self._reconcile_bearer_demand()
+        return 'accepted'
+
+    def bearer_lease_release(self, owner):
+        """Release *owner*'s bearer-demand lease, then reconcile."""
+        existed = self.bearer_leases.release(self.interface_number, owner)
+        self._reconcile_bearer_demand()
+        return existed
+
+    def _ensure_lease_sweeper(self):
+        """Start the 1s lease sweep/reconcile loop if it is not running."""
+        if self._shutting_down:
+            return
+        if self._lease_sweep_task is None or self._lease_sweep_task.done():
+            self._lease_sweep_task = self._safe_create_task(
+                self._lease_sweep_loop(),
+                name=f'lease_sweep_{self.interface_number}')
+
+    async def _lease_sweep_loop(self):
+        """Expire stale leases and reconcile the bearer once per second.
+
+        Started on the first lease acquire and exits once no lease is live and
+        the reconciler no longer owns the bearer, so an interface that never
+        sees a lease never runs this loop.  Poll-based on purpose: it is
+        self-healing (a missed event is corrected on the next tick) and it
+        re-evaluates once the FSM leaves a transitional state.
+        """
+        try:
+            while not self._shutting_down:
+                try:
+                    self.bearer_leases.sweep()
+                    self._reconcile_bearer_demand()
+                except Exception as e:  # pragma: no cover - defensive
+                    logger.debug(
+                        f"lease sweep error: {e}",
+                        extra={'interface_number': self.interface_number})
+                if (not self._lease_owns_bearer
+                        and not self.bearer_leases.any_live(self.interface_number)):
+                    return
+                await asyncio.sleep(self._lease_sweep_interval)
+        except asyncio.CancelledError:
+            raise
+
+    def _lease_vetoed(self):
+        """True when a higher-priority policy owns the bearer and leases must
+        not bring it up: airplane/admin disable, or a data-limit hold (a
+        failover lease must never reconnect a capped SIM)."""
+        return bool(getattr(self, '_admin_disabled', False)
+                    or getattr(self, '_airplane_mode_active', False)
+                    or getattr(self, '_airplane_mode_requested', False)
+                    or getattr(self, '_data_limit_hold', False)
+                    or self._shutting_down)
+
+    def _reconcile_bearer_demand(self):
+        """Drive REGISTERED_IDLE <-> CONNECTED from lease demand.
+
+        Invariant: **no leases ever held => no behaviour change.**  The
+        reconciler only manages a bearer that lease demand raised (or adopted
+        while a lease was held); a bearer the existing FSM logic brought up --
+        dial-on-demand's connect-at-boot, an operator connect_bearer() -- is
+        never torn down by it.
+
+        Precedence:
+          * always-on -> no-op; the FSM owns the bearer end to end.
+          * veto (airplane/admin disable/data-limit hold/shutdown) -> no-op.
+          * transitional state -> defer; re-checked on the next sweep tick.
+          * live lease -> take ownership; connect if not up/connecting.
+          * no live lease, lease-owned, CONNECTED, no operator request ->
+            idle down after a small grace (ENTER_IDLE -> REGISTERED_IDLE).
+
+        A demand that cannot be satisfied is retried by the existing
+        failed-state retry loop (connect-retry profile), not by clients.
+        """
+        if self.connection_mode == 'always-on':
+            return
+        if self._lease_vetoed():
+            self._lease_idle_deadline = None
+            return
+
+        state = self._current_state_name()
+        if state in self._LEASE_TRANSITIONAL_STATES:
+            return
+
+        if self.bearer_leases.any_live(self.interface_number):
+            self._lease_owns_bearer = True
+            self._lease_idle_deadline = None
+            if state == ModemState.REGISTERED_IDLE.value:
+                self.user_disconnected = False
+                self.transition(ModemEvent.CONNECT)
+            elif state not in {ModemState.CONNECTED.value,
+                               ModemState.CONNECTING.value}:
+                self.user_disconnected = False
+                self.connect_requested = True
+            return
+
+        if not self._lease_owns_bearer:
+            self._lease_idle_deadline = None
+            return
+
+        if state != ModemState.CONNECTED.value:
+            # Bearer already down (idled elsewhere, dropped): ownership ends so
+            # a later connect by other logic is never torn down by us.
+            self._lease_owns_bearer = False
+            self._lease_idle_deadline = None
+            return
+
+        if self.bearer_requested:
+            # Operator wants it up: hand ownership back to the operator path.
+            self._lease_owns_bearer = False
+            self._lease_idle_deadline = None
+            return
+
+        now = time.monotonic()
+        if self._lease_idle_deadline is None:
+            self._lease_idle_deadline = now + self._lease_idle_grace
+        elif now >= self._lease_idle_deadline:
+            self._lease_idle_deadline = None
+            self._lease_owns_bearer = False
+            self.transition(ModemEvent.ENTER_IDLE)
+
     async def shutdown(self):
         """Graceful shutdown of the FSM.
 
@@ -15788,6 +15984,7 @@ class ModemStateMachine:
              '_registration_loss_timer', 'reset_timeout_task', '_scan_task',
              '_periodic_sim_check_task', '_failed_retry_task',
              '_sim_missing_watch_task', '_bearer_disconnect_timer',
+             '_lease_sweep_task',
              '_bridging_netlink_task', '_bridging_reconciliation_task',
              '_bridging_ndp_task'),
             reason='fsm_shutdown')

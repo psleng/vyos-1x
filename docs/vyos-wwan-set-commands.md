@@ -32,6 +32,10 @@ interfaces
         ├── mtu <68-1500>                                # fallback MTU — used only when carrier provides none and no per-SIM mtu set (default: 1420)
         ├── vrf <name>                                    # VRF instance name
         ├── connection-mode <always-on|connect-on-demand|dial-on-demand>
+        ├── dial-on-demand                                # traffic-trigger settings (used only with connection-mode dial-on-demand)
+        │     ├── idle-timeout <10-600>                   #   default: 30  (s with no egress traffic before the bearer is dropped to REGISTERED_IDLE)
+        │     └── connect-timeout <30-600>                #   default: 30  (s to wait for the bearer to come up after traffic triggers a dial)
+        ├── connect-retry <conservative|normal|aggressive>  # bearer connect-retry backoff while demand is held (unset: failed-retry schedule applies)
         ├── network-mode <auto|lte|5g|5g-only|3g|2g>      # modem-level RAT selection
         ├── network-time                                  # NITZ → system clock (opt-in; presence enables; NAS signaling, no data traffic)
         │     └── update-interval <300-2592000>           # re-sync cadence for drift correction, s (default: 3600)
@@ -227,8 +231,9 @@ bearer is established:
 - all timers and intervals (`timeouts`, `reconnection`, `interface-management`
   delays, `data-usage monitoring-interval`, `network-scan timeout`, …)
 - `data-usage` / per-SIM `data-limit` thresholds, actions, billing-date, warnings
-- `connectivity-monitoring`, `reconnection`, `failed-retry`, `hardware-reset`,
-  `sim-failover` / `sim-failback` policy, `apn-discovery`, `logging`
+- `connectivity-monitoring`, `reconnection`, `failed-retry`, `connect-retry`,
+  `hardware-reset`, `sim-failover` / `sim-failback` policy, `apn-discovery`,
+  `logging`
 - `network-time` and its `update-interval` (re-sync cadence is picked up live; never bounces the bearer)
 - `ip-passthrough` and `ipv6-bridging` (reconciled in place)
 - **edits to the SIM slot you are *not* currently running on** — e.g.
@@ -295,6 +300,7 @@ automatically using a 4-priority APN discovery chain:
 | **SIM failback** | `enabled` | After sim-failover fires, automatic return to primary SIM; use `disable` to turn off |
 | **APN discovery (Android)** | `enabled` | Android APN database lookup, configured APNs, and automatic (network-assigned) APNs are all tried |
 | **Connection mode** | `always-on` | Modem connects immediately at boot and stays connected |
+| **Connect-retry profile** | unset | The `failed-retry` schedule governs connect retries; setting `connect-retry` replaces that schedule with a named profile |
 | **Enhanced reconnection** | `enabled` | Signal-quality-aware reconnection; use `disable-enhanced` to fall back to basic fixed-interval |
 | **Reconnection retry** | good-signal `15 s`, poor-signal `45 s` | Active by default (enhanced reconnection is on) |
 | **Signal threshold** | RSSI `-85 dBm`, RSRP `-105 dBm` | Boundary between "good" and "poor" reconnection strategies; RSRP is used on LTE/5G, RSSI on 2G/3G (the two scales differ by ~20 dB) |
@@ -1060,9 +1066,16 @@ set interfaces wwan wwan0 sim sim-failover signal-threshold rsrp -113
 ### Connection Mode
 
 > **If unconfigured:** `always-on` — modem connects at boot and stays connected.
+> `connect-retry` unset — the `failed-retry` schedule governs connect retries.
 
 ```
 set interfaces wwan wwan0 connection-mode 'always-on'
+
+# Connect-retry profile — how aggressively the FSM keeps retrying a bearer
+# connect while something still wants the bearer up (see "Bearer-Demand Leases"
+# below).  conservative | normal | aggressive.  No default: when unset, the
+# failed-retry intervals/max-interval apply unchanged.  Live-apply.
+# set interfaces wwan wwan0 connect-retry 'aggressive'
 ```
 
 ### Connection Mode Design Notes
@@ -1072,8 +1085,8 @@ Three connection modes are available (choose one):
 | Mode | Startup bearer | D-Bus `connect_bearer()` | D-Bus `disconnect_bearer()` | D-Bus `get_bearer_status()` |
 |---|---|---|---|---|
 | **always-on** (default) | yes, auto | **rejected** (`InvalidConnectionMode`) | **rejected** (`InvalidConnectionMode`) | `"connected"` / `"disconnected"` |
-| **connect-on-demand** | **no** (REGISTERED_IDLE) | bring up bearer | drop bearer → REGISTERED_IDLE | `"connected"` / `"disconnected"` |
-| **dial-on-demand** | **yes**, auto | bring up bearer | drop bearer → REGISTERED_IDLE | `"connected"` / `"disconnected"` |
+| **connect-on-demand** | **no** (REGISTERED_IDLE) | bring up bearer | drop bearer → REGISTERED_IDLE (ignored while another client holds a lease) | `"connected"` / `"disconnected"` |
+| **dial-on-demand** | **yes**, auto | bring up bearer | drop bearer → REGISTERED_IDLE (ignored while another client holds a lease) | `"connected"` / `"disconnected"` |
 
 **always-on** — Current default.  Modem registers, bearer is established, Linux
 interface comes up, and stays connected indefinitely.  Because the bearer is
@@ -1158,6 +1171,92 @@ is available in every mode.
 - No routing withdrawal — upstream apps see the interface as "available"
 - Next `connect_bearer()` re-establishes the bearer transparently
 - Registration-loss events still propagate normally (interface goes down)
+
+### Bearer-Demand Leases (on-demand modes)
+
+In `connect-on-demand` and `dial-on-demand`, a client that needs the bearer up
+can hold a named **lease**.  The FSM keeps the bearer up while any lease is
+live, unless a veto applies:
+
+```
+lease demand brings the bearer up  ⇔  live lease
+                                       AND NOT ( airplane mode / disable
+                                                 OR data-limit hold )
+```
+
+**No leases means no change.**  The lease reconciler only manages a bearer that
+lease demand brought up, or that was already up while a lease was held.  It
+never touches a bearer the existing logic brought up, such as dial-on-demand's
+connect at boot or an operator `connect_bearer()`.  An interface that never
+receives a lease never runs the reconciler: the 1 s sweep task starts on the
+first lease and stops once no lease is live and it no longer manages the
+bearer.  `always-on` ignores leases entirely, and the D-Bus lease calls are
+rejected in that mode.
+
+| Lease owner | Held by | TTL | Purpose |
+|---|---|---|---|
+| `wlb-failover` | WAN load-balancing daemon | 15 s, renewed every 5 s | Holds the cellular bearer up for the **whole** outage while this WWAN is the active failover egress; released when a higher-priority path recovers |
+| `dod-traffic` | *(reserved)* | positive TTL, renewed | Reserved for a lease-driven dial-on-demand trigger; the current traffic trigger still uses `connect_bearer()` / `disconnect_bearer()` |
+| `cli` / `operator` | operator tooling | may be persistent | Explicit operator demand |
+
+While it runs, the reconciler checks every second:
+
+- **Lease live** → it takes over the bearer.  From `REGISTERED_IDLE` it
+  connects.  From `DISCONNECTED` / `FAILED` it queues a connect.  If the bearer
+  is already `CONNECTED`, it takes over that bearer.
+- **No live lease, bearer lease-managed** → after a short grace (~5 s) it idles
+  the bearer to `REGISTERED_IDLE`.  A new lease during the grace cancels the
+  teardown.  If an operator `connect_bearer()` request is active, control goes
+  back to the operator and the bearer stays up.
+- **Mid-transition** (connecting, SIM switch, configuring, …) → it does nothing
+  and checks again on the next tick.
+
+If a client stops renewing its lease (for example, it crashes), the lease
+expires and the bearer is not held up indefinitely.  A finite lease can never
+exceed 1 h.  Only `cli` / `operator` may hold a persistent lease.
+
+**Vetoes.**  Airplane mode, `disable`, and an active **data-limit hold** all
+override leases.  A failover lease never reconnects a SIM that has hit its data
+limit.  The lease stays recorded, and if the hold lifts while the lease is
+still live, the bearer comes up.
+
+**Event-driven failover.**  When a `dial-on-demand` WWAN is a member of a
+`load-balancing wan rule … failover`, WLB acquires the `wlb-failover` lease as
+soon as the cellular link becomes the selected failover egress.  The bearer
+stays up for the outage regardless of traffic gaps, so tunnels such as
+WireGuard, IPsec or OpenVPN don't flap.  WLB releases the lease when the
+preferred path recovers, and the FSM idles the bearer down.  WLB's
+modem-registration health check is unchanged, so a registered-but-idle modem
+stays selectable as a failover target.  If no failover rule contains a
+dial-on-demand WWAN, WLB never acquires a lease and the lease path stays
+inactive.
+
+**`disconnect_bearer()` is lease-aware.**  With no live lease it behaves
+exactly as before.  If another client holds a live lease, the call still clears
+the operator request, but it skips the teardown and does not suppress
+auto-recovery.  This stops the traffic-driven dial-on-demand idle watcher from
+dropping a bearer that WLB is holding for failover.  To force the link down
+regardless of leases, use airplane mode or `disable`.
+
+**Connect retry while demand is held.**  If the bearer can't be established
+while demand exists, clients don't loop.  The FSM's failed-state retry keeps
+trying, and its schedule is the `failed-retry` intervals/max-interval unless
+`connect-retry` names a profile.  A profile applies the same way to every
+failure reason:
+
+| Profile | Retry schedule (s) | Ceiling (s) |
+|---|---|---|
+| `conservative` | 30, 120, 300, 900, 1800 | 7200 |
+| `normal` | 30, 60, 120, 300, 600, 1800, 3600 | 7200 |
+| `aggressive` | 5, 10, 20, 30, 60, 120 | 300 |
+
+After the schedule is exhausted, every further attempt waits for the ceiling.
+`normal` matches the default `failed-retry` schedule.  When `connect-retry` is
+set, it replaces the `failed-retry intervals` and `max-interval`.
+`failed-retry disable` and `escalation-threshold` still apply.
+
+Use `show interfaces wwan wwanN bearer-leases` to see who is holding the
+bearer up and why.
 
 > **Status:** All three connection modes are **fully implemented**.
 
@@ -1343,6 +1442,10 @@ set interfaces wwan wwan0 hardware-reset cooldown 300
 set interfaces wwan wwan0 failed-retry intervals '30,60,120,300,600,1800,3600'
 set interfaces wwan wwan0 failed-retry max-interval 7200
 set interfaces wwan wwan0 failed-retry escalation-threshold 3
+
+# Shortcut: a named connect-retry profile replaces intervals + max-interval
+# (see "Bearer-Demand Leases").  Leave unset to use the values above.
+# set interfaces wwan wwan0 connect-retry 'aggressive'
 ```
 
 ### Carrier / Network Scan
@@ -1602,6 +1705,7 @@ set interfaces wwan wwan0 logging sink 'both'
 | `sim slot N disable` | *(D-Bus only)* | both enabled (no `disable` set) |
 | `apn-discovery disable` | `android_apn_discovery` | `enabled` |
 | `connection-mode` | `connection_mode` | `always-on` |
+| `connect-retry` | `connect_retry` | *(unset — failed-retry schedule)* |
 | `reconnection disable-enhanced` | `enhanced_reconnection` | `enabled` |
 | `reconnection signal-threshold rssi` | `reconnection_signal_threshold_rssi` | `-85` |
 | `reconnection signal-threshold rsrp` | `reconnection_signal_threshold_rsrp` | `-105` |

@@ -33,6 +33,7 @@ from vyos.wanloadbalance import health_ping_host
 from vyos.wanloadbalance import health_ping_host_ttl
 from vyos.wanloadbalance import parse_dhcp_nexthop
 from vyos.wanloadbalance import parse_ppp_nexthop
+from vyos.wanloadbalance import wlb_weight_interfaces
 
 from vyos.utils.wwan.wwan_client import (  # noqa: E402
     WWANClientSync,
@@ -43,6 +44,11 @@ nftables_wlb_conf = '/run/nftables_wlb.conf'
 wlb_status_file = '/run/wlb_status.json'
 wlb_pid_file = '/run/wlb_daemon.pid'
 sleep_interval = 5 # Main loop sleep interval
+# TTL for the 'wlb-failover' bearer lease.  WLB re-asserts the lease every
+# main-loop iteration (sleep_interval); the TTL spans a few iterations so a
+# single missed cycle does not drop the bearer, while a dead WLB daemon lets
+# the lease lapse (and the modem FSM idle the metered bearer) within seconds.
+failover_lease_ttl = sleep_interval * 3
 
 def _interface_modem_check(iface):
     """Health check for a dial-on-demand WWAN interface.
@@ -164,6 +170,66 @@ def health_check(ifname, conf, state, test_defaults, lb):
                 return False
 
     return True
+
+def _active_failover_wwans(lb):
+    """Return (managed, active) sets of dial-on-demand WWAN interface names.
+
+    * ``managed`` -- every dial-on-demand WWAN that is a member of some failover
+      rule (WLB is responsible for its bearer-demand lease).
+    * ``active``  -- the subset that is currently the *selected* failover egress
+      (all higher-priority members of its rule are down), so the bearer must be
+      held up.
+
+    Uses the same selection logic (:func:`wlb_weight_interfaces`) the nftables
+    marking is built from, so the lease tracks exactly which link WLB is
+    steering traffic to.
+    """
+    managed = set()
+    active = set()
+    health_state = lb.get('health_state', {})
+    for rule_conf in (lb.get('rule') or {}).values():
+        if 'failover' not in rule_conf:
+            continue
+        members = rule_conf.get('interface') or {}
+        wwan_members = [m for m in members
+                        if m.startswith('wwan') and dial_on_demand_check(m)]
+        if not wwan_members:
+            continue
+        managed.update(wwan_members)
+        selected, _ = wlb_weight_interfaces(rule_conf, health_state)
+        for ifname, _weight in selected:
+            if ifname in wwan_members:
+                active.add(ifname)
+    return managed, active
+
+def reconcile_failover_leases(lb, clients):
+    """Hold a bearer lease on each dial-on-demand WWAN WLB is failing over to.
+
+    Event-driven bearer control: while a dial-on-demand cellular link is the
+    active failover egress, WLB renews a ``wlb-failover`` lease each loop so the
+    modem FSM keeps the bearer up for the whole outage (independent of traffic,
+    so it never flaps mid-outage).  When a higher-priority path recovers the
+    lease is released and the FSM idles the bearer back down.  No-op unless a
+    failover rule actually contains a dial-on-demand WWAN.
+    """
+    managed, active = _active_failover_wwans(lb)
+    for ifname in managed:
+        ifnum = int(ifname[len('wwan'):])
+        client = clients.get(ifname)
+        if client is None:
+            client = WWANClientSync()
+            clients[ifname] = client
+        try:
+            if ifname in active:
+                client.bearer_lease_acquire(
+                    ifnum, 'wlb-failover', ttl=failover_lease_ttl,
+                    reason='active failover target')
+            else:
+                client.bearer_lease_release(ifnum, 'wlb-failover')
+        except Exception as exc:
+            # A transient D-Bus/modem hiccup must not kill the daemon; the lease
+            # TTL makes a missed renewal self-correcting.
+            print(f'WLB: failover lease reconcile failed for {ifname}: {exc}')
 
 def on_state_change(lb, ifname, state):
     # Run hook on state change
@@ -397,6 +463,10 @@ if __name__ == '__main__':
 
     # Main loop
 
+    # Persistent per-interface WWAN D-Bus clients, reused across iterations so
+    # the failover-lease reconcile does not reconnect every loop.
+    wwan_clients = {}
+
     init = True;
     while True:
         try:
@@ -440,13 +510,16 @@ if __name__ == '__main__':
 
                     restore_default_route(lb, ifname)
 
-            # Note: dial-on-demand WWAN bearers are NOT reconciled here. The
-            # dial-on-demand pipeline brings a bearer up only on real traffic
-            # (the nft packet-trigger) and idles it back down on its own when no
-            # traffic is directed at it, so WLB does not need to tear it down on
-            # failback. WLB's only dial-on-demand-specific job is the modem-state
-            # health spoof in health_check(), which keeps a registered WWAN
-            # selectable as a failover target.
+            # Event-driven bearer control for dial-on-demand WWANs used as
+            # failover members: hold the bearer up while cellular is the active
+            # failover egress and drop it on failback.  This is distinct from
+            # the traffic-driven dial-on-demand pipeline (which still handles
+            # the standalone, low-duty-cycle case); here WLB keeps the link up
+            # for the whole outage so it does not flap on traffic gaps.  WLB's
+            # other dial-on-demand-specific job remains the modem-state health
+            # spoof in health_check(), which keeps a registered WWAN selectable
+            # as a failover target even while its bearer is idle.
+            reconcile_failover_leases(lb, wwan_clients)
 
             if any(state['state_changed'] for ifname, state in lb['health_state'].items()):
                 if not nftables_update(lb):

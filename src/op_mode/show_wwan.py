@@ -545,6 +545,58 @@ def show_status(raw: bool, interface: str):
     return _format_status(status, interface)
 
 
+def show_bearer_leases(raw: bool, interface: str):
+    """Show bearer-demand leases: who is currently holding the link up and why.
+
+    Surfaces the event-driven demand model -- operator intent, the WLB failover
+    hold, and the dial-on-demand traffic trigger -- so an operator can answer
+    "why is this metered bearer up right now?".
+    """
+    if_num = _require_interface(interface)
+    try:
+        client = _get_client()
+        data = client.bearer_lease_list(if_num)
+    except Exception as e:
+        raise vyos.opmode.DataUnavailable(
+            f'Cannot read bearer leases for {interface}: {e}'
+        )
+
+    if raw:
+        return data
+
+    lines = []
+    lines.append(f'Interface:        {data.get("interface", interface)}')
+    lines.append(f'Connection mode:  {data.get("connection_mode", "unknown")}')
+    lines.append(f'Bearer demanded:  {"yes" if data.get("demanded") else "no"}')
+    if data.get('vetoed'):
+        why = 'data-limit hold' if data.get('data_limit_hold') else 'airplane/disable'
+        lines.append(f'Lease veto:       yes ({why}) - leases cannot bring the bearer up')
+    lines.append(f'Lease-managed:    {"yes" if data.get("lease_owns_bearer") else "no"}')
+    lines.append(f'Operator request: {"yes" if data.get("operator_requested") else "no"}')
+    lines.append(f'Connect-retry:    {data.get("retry_profile") or "failed-retry schedule"}')
+    leases = data.get('leases') or []
+    if not leases:
+        lines.append('')
+        lines.append('No active bearer-demand leases.')
+        return '\n'.join(lines)
+
+    lines.append('')
+    header = f'{"Owner":<16}{"Reason":<28}{"TTL(s)":<10}{"Expires(s)":<12}{"Age(s)"}'
+    lines.append(header)
+    lines.append('-' * 74)
+    for lease in leases:
+        ttl = lease.get('ttl')
+        ttl_s = 'persistent' if ttl in (None, 0) else f'{int(ttl)}'
+        exp = lease.get('expires_in')
+        exp_s = '-' if exp is None else f'{exp:.0f}'
+        age = lease.get('age') or 0.0
+        lines.append(
+            f'{str(lease.get("owner","")):<16}'
+            f'{str(lease.get("reason","")):<28}'
+            f'{ttl_s:<10}{exp_s:<12}{age:.0f}')
+    return '\n'.join(lines)
+
+
 def show_hardware(raw: bool, interface: str):
     status = _get_full_status(interface)
     if raw:
