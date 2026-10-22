@@ -105,17 +105,6 @@ class Ethtool:
         out, _ = popen(f'ethtool --json {ifname}')
         self._base_settings = loads(out)[0]
 
-        # Active auto-negotiation state. The JSON "auto-negotiation" field is
-        # inverted in ethtool <= 6.10 (netlink/settings.c prints
-        # "autoneg == AUTONEG_DISABLE"), so take it from the text output, whose
-        # "Auto-negotiation: on|off" line is correct. Fall back to JSON only if
-        # that line is missing.
-        self._auto_negotiation = None
-        out, _ = popen(f'ethtool {ifname}')
-        tmp = re.search(r'^\s*Auto-negotiation:\s*(on|off)\b', out, re.MULTILINE)
-        if tmp:
-            self._auto_negotiation = tmp.group(1) == 'on'
-
         # Now populate driver features
         out, _ = popen(f'ethtool --json --show-features {ifname}')
         self._features = loads(out)[0]
@@ -145,11 +134,7 @@ class Ethtool:
         return self._base_settings['supports-auto-negotiation']
 
     def get_auto_negotiation(self):
-        if not self._base_settings['supports-auto-negotiation']:
-            return False
-        if self._auto_negotiation is not None:
-            return self._auto_negotiation
-        return self._base_settings['auto-negotiation']
+        return self._base_settings['supports-auto-negotiation'] and self._base_settings['auto-negotiation']
 
     def get_driver_name(self):
         return self._driver_name
