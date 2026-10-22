@@ -418,6 +418,9 @@ Depends:
 # For apn functionality
   apnscripts,
 # End apn functionality
+# Netfilterqueue
+  python3-netfilterqueue,
+# End netfilterqueue
 ## TPM tools
   cryptsetup,
   tpm2-tools,

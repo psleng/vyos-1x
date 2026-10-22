@@ -34,12 +34,100 @@ from vyos.wanloadbalance import health_ping_host_ttl
 from vyos.wanloadbalance import parse_dhcp_nexthop
 from vyos.wanloadbalance import parse_ppp_nexthop
 
+from vyos.utils.wwan.wwan_client import (  # noqa: E402
+    WWANClientSync,
+)
+
+
 nftables_wlb_conf = '/run/nftables_wlb.conf'
 wlb_status_file = '/run/wlb_status.json'
 wlb_pid_file = '/run/wlb_daemon.pid'
 sleep_interval = 5 # Main loop sleep interval
 
-def health_check(ifname, conf, state, test_defaults):
+def _interface_modem_check(iface):
+    """Health check for a dial-on-demand WWAN interface.
+
+    A dial-on-demand bearer is intentionally DOWN whenever it is idle (that is
+    the whole point), so testing bearer status would mark the interface
+    permanently unhealthy -- WLB would then never select it as the active
+    failover link, never emit a `jump wlb_mangle_isp_<iface>` marking rule, and
+    the on-demand nft trigger would never see a marked packet to dial on. So
+    instead treat the interface as healthy when the modem is REGISTERED on the
+    network (ready to dial on demand) or already connected.
+
+    Uses the ModemManager modem state (8 REGISTERED .. 11 CONNECTED) with the
+    3GPP registration state (1 HOME / 5 ROAMING) as a fallback.
+    """
+    status = None
+    try:
+        client = WWANClientSync()
+        ifnum = int(iface[4:])
+        try:
+            # add_interface is idempotent and just ensures the service has the
+            # interface object so get_status() can resolve it.
+            client.add_interface(ifnum)
+            status = client.get_status(ifnum)
+        finally:
+            client.close()
+    except Exception as exc:
+        print(f'WLB: WWAN health check failed for {iface}: {exc}')
+        return False
+
+    # MMModemState: 8 REGISTERED, 9 DISCONNECTING, 10 CONNECTING, 11 CONNECTED
+    # all mean "on the network and able to carry a bearer".
+    if status is not None:
+        try:
+            modem_state = int(status.get('modem_state', -1))
+            fsm_state = status.get('fsm_state', 'DISCONNECTED')
+            #print(fsm_state)
+        except (TypeError, ValueError):
+            modem_state = -1
+        if modem_state >= 8 and (fsm_state == 'CONNECTED' or fsm_state == "REGISTERED_IDLE" or fsm_state == "CONNECTING"):
+            return True
+
+    # Fallback: 3GPP registration state 1 HOME / 5 ROAMING = registered.
+    return False
+
+def dial_on_demand_check(ifname, conf=None):
+    """
+    Return True if ifname is a WWAN interface configured for dial-on-demand.
+
+    Only wwanX interfaces with dial-on-demand use the modem bearer check; every
+    other interface (ethX, ...) uses the normal IP health check.
+    """
+    if not ifname.startswith('wwan'):
+        return False
+    if conf is None:
+        conf = Config()
+    mode = conf.return_effective_value(
+        ['interfaces', 'wwan', ifname, 'connection-mode'])
+    return mode == 'dial-on-demand'
+
+
+def _in_failover_rule(ifname, lb):
+    """Return True if ifname is a member of any WAN load-balancing failover rule.
+
+    The dial-on-demand daemon behaviour (the modem-state health check) exists
+    only to support failover. When no failover rule governs the interface, the load
+    balancer must behave exactly as it would for any other interface -- normal
+    IP health checks, no bearer management -- regardless of the interface's
+    connection-mode. Gating on failover membership keeps the daemon's behaviour
+    unchanged when failover (or dial-on-demand) is not configured.
+    """
+    for rule_conf in (lb.get('rule') or {}).values():
+        if 'failover' in rule_conf and ifname in (rule_conf.get('interface') or {}):
+            return True
+    return False
+
+
+def health_check(ifname, conf, state, test_defaults, lb):
+    # Intercept with the modem bearer-state check ONLY for a dial-on-demand
+    # WWAN that is governed by a failover rule. Without failover the load
+    # balancer must behave identically to any other interface and use the
+    # normal IP health check, regardless of connection-mode.
+    if _in_failover_rule(ifname, lb) and dial_on_demand_check(ifname):
+        return _interface_modem_check(ifname)
+
     # Run health tests for interface
 
     if get_ipv4_address(ifname) is None:
@@ -54,7 +142,6 @@ def health_check(ifname, conf, state, test_defaults):
 
         if not target:
             return False
-
         return health_ping_host(target, ifname, wait_time=resp_time)
 
     for test_id, test_conf in conf['test'].items():
@@ -311,15 +398,15 @@ if __name__ == '__main__':
     # Main loop
 
     init = True;
-    try:
-        while True:
+    while True:
+        try:
             ip_change = False
 
             if 'interface_health' in lb:
                 for ifname, health_conf in lb['interface_health'].items():
                     state = lb['health_state'][ifname]
 
-                    result = health_check(ifname, health_conf, state=state, test_defaults=lb['test_defaults'])
+                    result = health_check(ifname, health_conf, state=state, test_defaults=lb['test_defaults'], lb=lb)
 
                     state_changed = result != state['state']
                     state['state_changed'] = False
@@ -353,6 +440,14 @@ if __name__ == '__main__':
 
                     restore_default_route(lb, ifname)
 
+            # Note: dial-on-demand WWAN bearers are NOT reconciled here. The
+            # dial-on-demand pipeline brings a bearer up only on real traffic
+            # (the nft packet-trigger) and idles it back down on its own when no
+            # traffic is directed at it, so WLB does not need to tear it down on
+            # failback. WLB's only dial-on-demand-specific job is the modem-state
+            # health spoof in health_check(), which keeps a registered WWAN
+            # selectable as a failover target.
+
             if any(state['state_changed'] for ifname, state in lb['health_state'].items()):
                 if not nftables_update(lb):
                     break
@@ -367,10 +462,16 @@ if __name__ == '__main__':
                     f.write(json.dumps(lb['health_state']))
             elif ip_change:
                 nftables_update(lb)
+        except Exception as e:
+            # A transient error (e.g. a modem/D-Bus hiccup during a WWAN
+            # health check, or ModemManager restarting) must not tear the
+            # daemon down: Restart=always would then respawn it immediately,
+            # flooding the journal with a health-check storm and repeatedly
+            # tearing down the WLB routing/nftables state.  Log it and keep
+            # the normal pacing interval instead of exiting.
+            print('WLB ERROR:', e)
 
-            time.sleep(sleep_interval)
-    except Exception as e:
-        print('WLB ERROR:', e)
+        time.sleep(sleep_interval)
 
     if os.path.exists(wlb_status_file):
         os.unlink(wlb_status_file)
