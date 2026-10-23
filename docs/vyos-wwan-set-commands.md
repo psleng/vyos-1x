@@ -1172,9 +1172,14 @@ is available in every mode.
   The kernel interface stays **carrier-up** (`UP,LOWER_UP`) with its (now stale)
   IP, and the default route is withdrawn, so upstream apps still see the
   interface as "available".  This is the "variant of always-on" behaviour.
-- **connect-on-demand** — at `REGISTERED_IDLE` the kernel interface is
-  **link-down** (no carrier); any stale addresses may linger but the link is
-  not carrier-up, so upstream apps see it as down.
+- **connect-on-demand** — every idle returns the kernel interface to the same
+  baseline as a cold-start `REGISTERED_IDLE`: the carrier address is **flushed**
+  and the link is forced **DOWN** (no carrier), so upstream apps see it as down.
+  This applies whether idle is reached at startup (never dialed) or from
+  `CONNECTED` via a WLB failback / lease release or resting-state divergence
+  enforcement — the on-demand teardown explicitly flushes the address and sets
+  the link down for this mode so a torn-down bearer is never misrepresented as a
+  live, addressed interface.
 - Registration-loss events still propagate normally in both modes (interface
   goes down).
 

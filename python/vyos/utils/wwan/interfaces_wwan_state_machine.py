@@ -3368,7 +3368,11 @@ class ModemStateMachine:
         elif event == ModemEvent.ENTER_IDLE:
             # On-demand disconnect path: drop bearer but keep registration.
             # Treat this as intentional/normal (not a failure path) and stop
-            # connected-state monitoring without forcing Linux link down.
+            # connected-state monitoring.  The teardown helper then returns the
+            # Linux interface to its mode-correct idle baseline: connect-on-
+            # demand goes link DOWN with no address (matching cold-start idle),
+            # while dial-on-demand keeps the link UP with a stale address so a
+            # redial can still be triggered by locally-originated traffic.
             if current_state == ModemState.CONNECTED.value:
                 try:
                     self._safe_create_task(self._stop_network_interface_monitoring())
@@ -3387,7 +3391,7 @@ class ModemStateMachine:
                     if (self._ondemand_disconnect_task is None
                             or self._ondemand_disconnect_task.done()):
                         self._ondemand_disconnect_task = self._safe_create_task(
-                            self._disconnect_bearer(),
+                            self._ondemand_idle_teardown(),
                             name='ondemand_bearer_disconnect')
                     else:
                         logger.info(
@@ -11202,6 +11206,32 @@ class ModemStateMachine:
                         extra={'interface_number': self.interface_number})
             return False
 
+    async def _ondemand_idle_teardown(self):
+        """Tear the bearer down for an on-demand idle, then return the Linux
+        interface to its mode-correct idle baseline.
+
+        connect-on-demand's idle baseline is link DOWN with no global address
+        -- the same state the modem parks in at cold start when it never dials
+        -- so after dropping the bearer we flush the carrier address and set
+        the interface DOWN.  Without this, an idle reached from CONNECTED (a
+        WLB failback / lease release, or resting-state divergence enforcement)
+        would leave the link UP,LOWER_UP with a stale IP, diverging from the
+        cold-start idle and misrepresenting a torn-down connection as live.
+
+        dial-on-demand deliberately keeps the link UP with a stale address so
+        locally-originated traffic still has a route that can trigger a redial,
+        so its interface is left untouched here.
+
+        Returns the ``_disconnect_bearer`` result so a superseding CONNECT
+        serialized behind this task can still detect a failed teardown.
+        """
+        disconnect_ok = await self._disconnect_bearer()
+        if self.connection_mode == 'connect-on-demand':
+            interface_name = f"wwan{self.interface_number}"
+            await self._clear_interface_addresses(interface_name)
+            await self._set_interface_down()
+        return disconnect_ok
+
     async def apply_modem_configuration(self):
         """Apply connection configuration with APN auto-discovery"""
         if not self.proxy or not self.config:
@@ -15635,7 +15665,7 @@ class ModemStateMachine:
                 if (self._ondemand_disconnect_task is None
                         or self._ondemand_disconnect_task.done()):
                     self._ondemand_disconnect_task = self._safe_create_task(
-                        self._disconnect_bearer(),
+                        self._ondemand_idle_teardown(),
                         name='resting_state_bearer_disconnect')
             self._resting_divergence_count = 0
             return

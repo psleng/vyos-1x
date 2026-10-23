@@ -20,6 +20,7 @@ import types
 from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase
 from unittest import TestCase
+from unittest.mock import AsyncMock
 from unittest.mock import Mock
 from unittest.mock import patch
 
@@ -268,6 +269,41 @@ class TestLeaseAwareDisconnectBearer(IsolatedAsyncioTestCase):
         self.assertFalse(fsm.user_disconnected)
         self.assertFalse(fsm.bearer_requested)
         fsm.transition.assert_not_called()
+
+
+class TestOndemandIdleTeardown(IsolatedAsyncioTestCase):
+    """The on-demand idle teardown returns the Linux interface to its
+    mode-correct baseline: connect-on-demand goes link DOWN with no address,
+    dial-on-demand keeps the link UP (interface untouched)."""
+
+    def _fsm(self, mode):
+        fsm = _make_fsm(_Clock(), mode=mode, state=CONNECTED)
+        fsm._disconnect_bearer = AsyncMock(return_value=True)
+        fsm._clear_interface_addresses = AsyncMock()
+        fsm._set_interface_down = AsyncMock()
+        return fsm
+
+    async def test_connect_on_demand_flushes_and_downs_link(self):
+        fsm = self._fsm('connect-on-demand')
+        result = await ModemStateMachine._ondemand_idle_teardown(fsm)
+        self.assertTrue(result)
+        fsm._disconnect_bearer.assert_awaited_once()
+        fsm._clear_interface_addresses.assert_awaited_once_with('wwan0')
+        fsm._set_interface_down.assert_awaited_once()
+
+    async def test_dial_on_demand_leaves_link_untouched(self):
+        fsm = self._fsm('dial-on-demand')
+        result = await ModemStateMachine._ondemand_idle_teardown(fsm)
+        self.assertTrue(result)
+        fsm._disconnect_bearer.assert_awaited_once()
+        fsm._clear_interface_addresses.assert_not_awaited()
+        fsm._set_interface_down.assert_not_awaited()
+
+    async def test_propagates_failed_disconnect_result(self):
+        fsm = self._fsm('connect-on-demand')
+        fsm._disconnect_bearer = AsyncMock(return_value=False)
+        result = await ModemStateMachine._ondemand_idle_teardown(fsm)
+        self.assertFalse(result)
 
 
 def _load_wlb():
