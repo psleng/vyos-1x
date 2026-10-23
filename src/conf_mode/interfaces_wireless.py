@@ -235,15 +235,16 @@ def verify(wifi):
         # Reject a mode whose radio band the selected PHY does not provide
         # (e.g. 802.11g on a 5 GHz-only radio) - otherwise hostapd silently
         # fails to start instead of surfacing a clear configuration error.
-        # 802.11n operates on both 2.4 and 5 GHz, so its band is derived from
-        # the configured channel; 802.11ax (HE) is validated separately below.
+        # 802.11n operates on both 2.4 and 5 GHz; its band mirrors the hw_mode
+        # the template derives from the channel (1-14/ACS = 2.4 GHz, 34-177 =
+        # 5 GHz). 802.11ax (HE) is validated separately below.
         mode = wifi.get('mode')
         # channel 0 selects Automatic Channel Selection (ACS)
         channel = int(wifi.get('channel', 0))
         mode_band = {'b': '2.4', 'g': '2.4', 'a': '5', 'ac': '5'}
         required_band = mode_band.get(mode)
-        if mode == 'n' and channel:
-            required_band = '2.4' if 1 <= channel <= 14 else '5'
+        if mode == 'n':
+            required_band = '5' if channel > 14 else '2.4'
         if required_band is not None:
             supported_bands = wifi_phy_supported_bands(physical_device)
             if supported_bands is not None and required_band not in supported_bands:
