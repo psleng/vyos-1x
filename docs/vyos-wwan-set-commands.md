@@ -1165,12 +1165,18 @@ In `always-on` mode the bearer is FSM-managed, so `connect()`, `disconnect()`,
 `com.igos.IgosModemManager.InvalidConnectionMode` error.  `get_bearer_status()`
 is available in every mode.
 
-**Silent disconnect behaviour (both on-demand modes):**
-- Bearer is released via MM `Simple.Disconnect()`
-- Linux interface stays present (link-layer up, no IP or stale IP)
-- No routing withdrawal — upstream apps see the interface as "available"
-- Next `connect_bearer()` re-establishes the bearer transparently
-- Registration-loss events still propagate normally (interface goes down)
+**Disconnect / idle behaviour differs by mode:**
+- ****** released via MM `Simple.Disconnect()` in both modes; the next
+  `connect_bearer()` (or a WLB failover lease) re-establishes it transparently.
+- **dial-on-demand** — **silent**: Linux is **not** told the bearer went down.
+  The kernel interface stays **carrier-up** (`UP,LOWER_UP`) with its (now stale)
+  IP, and the default route is withdrawn, so upstream apps still see the
+  interface as "available".  This is the "variant of always-on" behaviour.
+- **connect-on-demand** — at `REGISTERED_IDLE` the kernel interface is
+  **link-down** (no carrier); any stale addresses may linger but the link is
+  not carrier-up, so upstream apps see it as down.
+- Registration-loss events still propagate normally in both modes (interface
+  goes down).
 
 ### Bearer-Demand Leases (on-demand modes)
 
@@ -1220,23 +1226,35 @@ override leases.  A failover lease never reconnects a SIM that has hit its data
 limit.  The lease stays recorded, and if the hold lifts while the lease is
 still live, the bearer comes up.
 
-**Event-driven failover.**  When a `dial-on-demand` WWAN is a member of a
-`load-balancing wan rule … failover`, WLB acquires the `wlb-failover` lease as
-soon as the cellular link becomes the selected failover egress.  The bearer
-stays up for the outage regardless of traffic gaps, so tunnels such as
+**Event-driven failover.**  When an **on-demand** WWAN (either `connect-on-demand`
+or `dial-on-demand`) is a member of a `load-balancing wan rule … failover`, WLB
+acquires the `wlb-failover` lease as soon as the cellular link becomes the
+selected failover egress.  The lease is what deterministically brings the bearer
+up: it stays up for the outage regardless of traffic gaps, so tunnels such as
 WireGuard, IPsec or OpenVPN don't flap.  WLB releases the lease when the
-preferred path recovers, and the FSM idles the bearer down.  WLB's
-modem-registration health check is unchanged, so a registered-but-idle modem
-stays selectable as a failover target.  If no failover rule contains a
-dial-on-demand WWAN, WLB never acquires a lease and the lease path stays
-inactive.
+preferred path recovers — but only after it has been stably up for a short
+hold-down (so a flapping better path can't thrash the metered bearer) — and the
+FSM then idles the bearer down.  WLB's modem-registration health check keeps a
+registered-but-idle modem selectable as a failover target.
+
+Both on-demand modes are lease-managed on purpose.  A `dial-on-demand` traffic
+trigger cannot bootstrap an **idle** bearer under WLB's failover: WLB steers
+traffic with fwmark + per-interface policy routing, but an idle bearer has no
+route for that traffic to resolve to, so the trigger never fires.  The lease is
+route-independent (a direct D-Bus demand to the FSM), so it works from a cold
+idle bearer.  dial-on-demand's own data-path trigger still owns the normal,
+non-failover duty cycle — the lease is simply an additional demand source
+(leases are multi-owner; the FSM keeps the bearer up while any is live).  If no
+failover rule contains an on-demand WWAN, WLB never acquires a lease and the
+lease path stays inactive.
 
 **`disconnect_bearer()` is lease-aware.**  With no live lease it behaves
 exactly as before.  If another client holds a live lease, the call still clears
 the operator request, but it skips the teardown and does not suppress
-auto-recovery.  This stops the traffic-driven dial-on-demand idle watcher from
-dropping a bearer that WLB is holding for failover.  To force the link down
-regardless of leases, use airplane mode or `disable`.
+auto-recovery.  This keeps one client (for example WLB holding `wlb-failover`
+on an on-demand link during failover) from having its bearer dropped by
+another client's disconnect — including dial-on-demand's own idle watcher.  To
+force the link down regardless of leases, use airplane mode or `disable`.
 
 **Connect retry while demand is held.**  If the bearer can't be established
 while demand exists, clients don't loop.  The FSM's failed-state retry keeps

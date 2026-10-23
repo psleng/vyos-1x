@@ -75,6 +75,19 @@ SIMPLE_INTERFACE = "org.freedesktop.ModemManager1.Modem.Simple"
 MESSAGING_INTERFACE = "org.freedesktop.ModemManager1.Modem.Messaging"
 SMS_INTERFACE = "org.freedesktop.ModemManager1.Sms"
 
+BEARER_PATH_PREFIX = "/org/freedesktop/ModemManager1/Bearer/"
+
+
+def is_valid_bearer_path(path):
+    """True if ``path`` is a usable ModemManager bearer object path.
+
+    Guards D-Bus introspect/get_proxy_object calls against a stale or cleared
+    bearer path (None, '', the literal 'None', '/', ...) that would otherwise
+    raise "invalid object path" during rapid connect/disconnect churn.
+    """
+    return isinstance(path, str) and path.startswith(BEARER_PATH_PREFIX)
+
+
 # ── SMS flat-file storage ───────────────────────────────────────────────────
 SMS_STORAGE_DIR = "/var/lib/wwan/sms"
 SMS_MAX_MESSAGES = 100
@@ -17507,7 +17520,7 @@ class ModemStateMachine:
     async def _get_bearer_expected_ips(self):
         """Get expected IP addresses from ModemManager bearer configuration"""
         try:
-            if not hasattr(self, 'bearer_path') or not self.bearer_path:
+            if not is_valid_bearer_path(getattr(self, 'bearer_path', None)):
                 return None
 
             introspect = await self.bus.introspect('org.freedesktop.ModemManager1', self.bearer_path)
@@ -17577,14 +17590,14 @@ class ModemStateMachine:
             return result if result else None
 
         except Exception as e:
-            logger.error(f"Error getting bearer expected IPs: {e}",
+            logger.debug(f"Could not get bearer expected IPs: {e}",
                         extra={'interface_number': self.interface_number})
             return None
 
     async def _is_bearer_connected(self):
         """Check if the current bearer is connected"""
         try:
-            if not hasattr(self, 'bearer_path') or not self.bearer_path:
+            if not is_valid_bearer_path(getattr(self, 'bearer_path', None)):
                 return False
 
             introspect = await self.bus.introspect('org.freedesktop.ModemManager1', self.bearer_path)
