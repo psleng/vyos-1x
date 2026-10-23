@@ -18,6 +18,7 @@
 import argparse
 import contextlib
 import datetime
+import glob
 import grp
 import os
 import pwd
@@ -324,6 +325,67 @@ def delete(type: str, path: str) -> None:
 
 
 ## Cloning procedures
+
+# TPM-backed key material lives in OP-TEE secure storage (REE-FS). It is
+# encrypted with a device-bound key, so it is portable between images on the
+# same physical unit but meaningless elsewhere.
+TEE_STORAGE_DIR: str = '/var/lib/tee'
+
+def clone_image_path(image: str, path: str) -> str:
+    """Return the on-disk path to `path` inside `image`, where `image` is an
+    image name or None/'running' for the running system."""
+    name = 'running' if image is None or image == 'running' else image
+    return parse_image_path(f'{name}://{path.lstrip("/")}')
+
+def tpm_keys_present(image: str) -> bool:
+    """True if `image` holds TPM-backed (OP-TEE) secure storage, i.e. the TEE
+    storage directory exists and is non-empty."""
+    tee_path = clone_image_path(image, TEE_STORAGE_DIR)
+    return os.path.isdir(tee_path) and bool(os.listdir(tee_path))
+
+def replace_tree_with_backup(source_path: str, destination_path: str) -> None:
+    """Replace destination_path with a copy of source_path, backing the
+    existing destination up to <destination_path>.preclone and restoring it if
+    the copy fails."""
+    backup_path = destination_path + '.preclone'
+    try:
+        if os.path.isdir(backup_path):
+            print('Removing previous backup...')
+            shutil.rmtree(backup_path)
+        if os.path.isdir(destination_path):
+            print('Making new backup...')
+            shutil.move(destination_path, backup_path)
+    except:
+        print('Something went wrong during the backup process!')
+        print('Cowardly refusing to proceed with cloning.')
+        raise
+    try:
+        shutil.copytree(source_path, destination_path, copy_function=zealous_copy)
+    except:
+        print('Cloning failed! Reverting to backup!')
+        # Delete leftover files from the botched cloning.
+        shutil.rmtree(destination_path, ignore_errors=True)
+        # Restore backup before bailing out.
+        if os.path.isdir(backup_path):
+            shutil.copytree(backup_path, destination_path, copy_function=zealous_copy)
+        raise
+    finally:
+        if os.path.isdir(backup_path):
+            shutil.rmtree(backup_path)
+
+def clone_host_keys(source: str, destination: str, source_label: str) -> None:
+    """Copy the SSH host keys from source to destination image."""
+    source_ssh = clone_image_path(source, '/etc/ssh')
+    destination_ssh = clone_image_path(destination, '/etc/ssh')
+    host_keys = glob.glob(os.path.join(source_ssh, 'ssh_host_*'))
+    if not host_keys:
+        print(f'No SSH host keys found in {source_label} image; skipping.')
+        return
+    os.makedirs(destination_ssh, exist_ok=True)
+    for host_key in host_keys:
+        zealous_copy(host_key, os.path.join(destination_ssh, os.path.basename(host_key)))
+    print(f'Copied {len(host_keys)} SSH host key file(s) from {source_label} to {destination}.')
+
 def clone(source: str, destination: str) -> None:
     if os.geteuid():
         print_error('Only the superuser can run this command.')
@@ -332,50 +394,48 @@ def clone(source: str, destination: str) -> None:
         print_error(f'Cannot clone config to {destination}.')
         sys.exit(1)
     # If `source` is None, then we're going to copy from the running image.
-    if source is None or source == 'running':
-        source_path = '/config'
-        # For the warning message only.
-        source = 'the current'
-    else:
-        source_path = parse_image_path(source + ':/config')
-    destination_path = parse_image_path(destination + ':/config')
-    backup_path = destination_path + '.preclone'
+    # `source_label` is used in user-facing messages only.
+    source_label = 'the current' if source is None or source == 'running' else source
+    source_path = clone_image_path(source, '/config')
+    destination_path = clone_image_path(destination, '/config')
 
     if not os.path.isdir(source_path):
-        print_error(f'Source image {source} does not exist.')
+        print_error(f'Source image {source_label} does not exist.')
         sys.exit(1)
     if not os.path.isdir(destination_path):
         print_error(f'Destination image {destination} does not exist.')
         sys.exit(1)
+
+    # Offer to also carry the device identity alongside /config. Host keys and
+    # TPM-backed (OP-TEE) secure storage are device-bound, so they are portable
+    # between images on the same unit. The TPM option is only offered when such
+    # key material actually exists.
+    copy_host_keys = ask_yes_no(
+        f'Also copy SSH host keys from {source_label} image to {destination}?',
+        default=False)
+    copy_tpm_keys = False
+    if tpm_keys_present(source):
+        copy_tpm_keys = ask_yes_no(
+            f'Also copy TPM-backed secure storage from {source_label} image to {destination}?',
+            default=False)
+
     print(f'WARNING: This operation will erase /config data in image {destination}.')
-    print(f'/config data in {source} image will be copied over in its place.')
+    print(f'/config data in {source_label} image will be copied over in its place.')
     print(f'The existing /config data in {destination} image will be backed up to /config.preclone.')
 
     if ask_yes_no('Are you sure you want to continue?'):
-        try:
-            if os.path.isdir(backup_path):
-                print('Removing previous backup...')
-                shutil.rmtree(backup_path)
-            print('Making new backup...')
-            shutil.move(destination_path, backup_path)
-        except:
-            print('Something went wrong during the backup process!')
-            print('Cowardly refusing to proceed with cloning.')
-            raise
-        # Copy new config from image.
-        try:
-            shutil.copytree(source_path, destination_path, copy_function=zealous_copy)
-        except:
-            print('Cloning failed! Reverting to backup!')
-            # Delete leftover files from the botched cloning.
-            shutil.rmtree(destination_path, ignore_errors=True)
-            # Restore backup before bailing out.
-            shutil.copytree(backup_path, destination_path, copy_function=zealous_copy)
-            raise
-        else:
-            print(f'Successfully cloned config from {source} to {destination}.')
-        finally:
-            shutil.rmtree(backup_path)
+        replace_tree_with_backup(source_path, destination_path)
+        print(f'Successfully cloned config from {source_label} to {destination}.')
+
+        if copy_host_keys:
+            clone_host_keys(source, destination, source_label)
+
+        if copy_tpm_keys:
+            tpm_source = clone_image_path(source, TEE_STORAGE_DIR)
+            tpm_destination = clone_image_path(destination, TEE_STORAGE_DIR)
+            replace_tree_with_backup(tpm_source, tpm_destination)
+            print(f'Successfully cloned TPM-backed secure storage from '
+                  f'{source_label} to {destination}.')
     else:
         print('Operation aborted.')
 
