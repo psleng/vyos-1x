@@ -163,9 +163,9 @@ def get_config(config=None):
 
     return wifi
 
-def wifi_phy_supports_6ghz(phy):
-    # Return True/False if the PHY does (not) provide a 6 GHz band, or None when
-    # the capability cannot be determined (e.g. "iw" unavailable).
+def wifi_phy_supported_bands(phy):
+    # Return the set of radio bands ('2.4', '5', '6') the PHY provides, or None
+    # when the capability cannot be determined (e.g. "iw" unavailable).
     try:
         info = cmd(f'iw phy {phy} info')
     except Exception:
@@ -173,8 +173,17 @@ def wifi_phy_supports_6ghz(phy):
     frequencies = [int(f) for f in findall(r'(\d+)(?:\.\d+)?\s+MHz', info)]
     if not frequencies:
         return None
-    # The 6 GHz band spans 5925-7125 MHz
-    return any(freq >= 5925 for freq in frequencies)
+    bands = set()
+    for freq in frequencies:
+        # 2.4 GHz band: 2400-2500 MHz, 5 GHz band: 4900-5925 MHz,
+        # 6 GHz band: 5925-7125 MHz
+        if 2400 <= freq < 2500:
+            bands.add('2.4')
+        elif 4900 <= freq < 5925:
+            bands.add('5')
+        elif freq >= 5925:
+            bands.add('6')
+    return bands or None
 
 def verify(wifi):
     if 'deleted' in wifi:
@@ -223,6 +232,26 @@ def verify(wifi):
         if 'channel' not in wifi:
             raise ConfigError('Wireless channel must be configured!')
 
+        # Reject a mode whose radio band the selected PHY does not provide
+        # (e.g. 802.11g on a 5 GHz-only radio) - otherwise hostapd silently
+        # fails to start instead of surfacing a clear configuration error.
+        # 802.11n operates on both 2.4 and 5 GHz; its band mirrors the hw_mode
+        # the template derives from the channel (1-14/ACS = 2.4 GHz, 34-177 =
+        # 5 GHz). 802.11ax (HE) is validated separately below.
+        mode = wifi.get('mode')
+        # channel 0 selects Automatic Channel Selection (ACS)
+        channel = int(wifi.get('channel', 0))
+        mode_band = {'b': '2.4', 'g': '2.4', 'a': '5', 'ac': '5'}
+        required_band = mode_band.get(mode)
+        if mode == 'n':
+            required_band = '5' if channel > 14 else '2.4'
+        if required_band is not None:
+            supported_bands = wifi_phy_supported_bands(physical_device)
+            if supported_bands is not None and required_band not in supported_bands:
+                raise ConfigError(
+                    f'Wireless mode "{mode}" requires the {required_band} GHz band, '
+                    f'which physical device "{physical_device}" does not provide!')
+
         if 'capabilities' in wifi and 'he' in wifi['capabilities']:
             if 'channel_set_width' not in wifi['capabilities']['he']:
                 raise ConfigError('Channel width must be configured!')
@@ -254,13 +283,16 @@ def verify(wifi):
                     f'Channel {channel} is not valid for the selected {he_band} GHz '
                     f'802.11ax operating class (channel-set-width {op_class})!')
 
-            # A 6 GHz operating class can only work on a radio that actually
-            # provides a 6 GHz band - reject it otherwise instead of rendering a
+            # An operating class can only work on a radio that actually provides
+            # the corresponding band - reject it otherwise instead of rendering a
             # hostapd configuration the hardware cannot honor.
-            if he_band == '6' and wifi_phy_supports_6ghz(physical_device) is False:
-                raise ConfigError(
-                    f'Physical device "{physical_device}" does not provide a 6 GHz '
-                    f'band required by 802.11ax operating class {op_class}!')
+            if he_band is not None:
+                supported_bands = wifi_phy_supported_bands(physical_device)
+                if supported_bands is not None and he_band not in supported_bands:
+                    raise ConfigError(
+                        f'Physical device "{physical_device}" does not provide a '
+                        f'{he_band} GHz band required by 802.11ax operating class '
+                        f'{op_class}!')
 
             # Management Frame Protection (MFP) is mandatory for WPA3 in 6 GHz
             if dict_search('security.wpa.mode', wifi) == 'wpa3' and he_band == '6':

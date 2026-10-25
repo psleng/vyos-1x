@@ -15,6 +15,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import asyncio
+import json
 import re
 from dbus_next.service import ServiceInterface, method  # pylint: disable=import-error
 from dbus_next.errors import DBusError  # pylint: disable=import-error
@@ -1923,6 +1924,102 @@ class InterfaceConfig(ServiceInterface):
                                'error': str(e)})
             raise DBusError("com.igos.IgosModemManager.StatusError", str(e))
 
+    # Clients allowed to hold a bearer-demand lease.  Gating the owner here is
+    # the metered-link guardrail: a stray caller cannot pin a cellular bearer
+    # up.  Only the operator identities may hold a *persistent* (never-expiring)
+    # lease; machine clients must supply a finite TTL and keep renewing it.
+    _LEASE_OWNER_ALLOWLIST = frozenset({
+        'cli', 'operator', 'wlb-failover', 'dod-traffic',
+    })
+    _LEASE_PERSISTENT_OWNERS = frozenset({'cli', 'operator'})
+
+    @method()
+    async def bearer_lease_acquire(self, owner: 's', ttl: 'd', reason: 's') -> 's':  # type: ignore[name-defined]  # noqa: F821, F722
+        """Acquire or renew a bearer-demand lease for *owner*.
+
+        ``ttl`` is in seconds; a value ``<= 0`` requests a *persistent* lease
+        (never expires, must be released explicitly) and is permitted only for
+        operator identities.  Machine clients (``wlb-failover``, ``dod-traffic``)
+        must pass a positive TTL and keep renewing it, so a crashed client's
+        demand lapses on its own.  Idempotent per owner.  Returns ``"accepted"``.
+
+        Rejected in **always-on** mode, where the bearer is managed end to end
+        by the FSM and there is no on-demand bearer to lease.
+        """
+        if getattr(self.fsm, 'connection_mode', '') == 'always-on':
+            raise DBusError(
+                "com.igos.IgosModemManager.InvalidConnectionMode",
+                f"Interface {self.interface_number} is in always-on mode; the "
+                f"bearer is managed automatically and cannot be leased.")
+        if owner not in self._LEASE_OWNER_ALLOWLIST:
+            raise DBusError(
+                "com.igos.IgosModemManager.InvalidLeaseOwner",
+                f"Lease owner '{owner}' is not permitted.")
+        lease_ttl = None if ttl <= 0 else float(ttl)
+        if lease_ttl is None and owner not in self._LEASE_PERSISTENT_OWNERS:
+            raise DBusError(
+                "com.igos.IgosModemManager.InvalidLeaseTtl",
+                f"Owner '{owner}' must supply a positive TTL.")
+        try:
+            logger.info("Bearer lease acquire",
+                       extra={'interface_number': self.interface_number,
+                              'owner': owner, 'ttl': lease_ttl, 'reason': reason})
+            self.fsm.bearer_lease_acquire(owner, ttl=lease_ttl, reason=reason)
+            return "accepted"
+        except Exception as e:
+            logger.error(f"Bearer lease acquire failed: {e}",
+                        extra={'interface_number': self.interface_number})
+            raise DBusError("com.igos.IgosModemManager.LeaseError", str(e))
+
+    @method()
+    async def bearer_lease_release(self, owner: 's') -> 's':  # type: ignore[name-defined]  # noqa: F821
+        """Release *owner*'s bearer-demand lease.  Harmless no-op if none.
+
+        Means "I no longer need the bearer up", not "force it down": if any
+        other owner still holds a lease the bearer stays up.  Returns
+        ``"accepted"``.
+        """
+        try:
+            logger.info("Bearer lease release",
+                       extra={'interface_number': self.interface_number,
+                              'owner': owner})
+            self.fsm.bearer_lease_release(owner)
+            return "accepted"
+        except Exception as e:
+            logger.error(f"Bearer lease release failed: {e}",
+                        extra={'interface_number': self.interface_number})
+            raise DBusError("com.igos.IgosModemManager.LeaseError", str(e))
+
+    @method()
+    async def bearer_lease_list(self) -> 's':  # type: ignore[name-defined]  # noqa: F821
+        """Return a JSON view of bearer demand for this interface.
+
+        Includes the connection mode, whether the bearer is currently demanded
+        (operator OR any live lease), whether a veto (airplane/disable/data-
+        limit hold) blocks leases, whether the bearer is lease-managed, the
+        operator standing-intent flag, the active connect-retry profile ('' when
+        the failed-retry schedule applies), and the list of live leases (owner,
+        reason, ttl, seconds-to-expiry, age).  Consumed by op-mode ``show``.
+        """
+        try:
+            fsm = self.fsm
+            payload = {
+                'interface': f"wwan{self.interface_number}",
+                'connection_mode': getattr(fsm, 'connection_mode', 'unknown'),
+                'demanded': bool(fsm._bearer_demanded()),
+                'vetoed': bool(fsm._lease_vetoed()),
+                'data_limit_hold': bool(getattr(fsm, '_data_limit_hold', False)),
+                'lease_owns_bearer': bool(getattr(fsm, '_lease_owns_bearer', False)),
+                'operator_requested': bool(getattr(fsm, 'bearer_requested', False)),
+                'retry_profile': getattr(fsm, '_connect_retry_profile', None) or '',
+                'leases': fsm.bearer_leases.snapshot(self.interface_number),
+            }
+            return json.dumps(payload)
+        except Exception as e:
+            logger.error(f"Bearer lease list failed: {e}",
+                        extra={'interface_number': self.interface_number})
+            raise DBusError("com.igos.IgosModemManager.LeaseError", str(e))
+
     @method()
     async def connect_bearer(self) -> 's':  # type: ignore[name-defined]  # noqa: F821
         """Request bearer establishment.  Always returns ``"accepted"``.
@@ -2042,18 +2139,33 @@ class InterfaceConfig(ServiceInterface):
             # The flags are cleared/reset by connect_bearer(), service restart
             # in always-on, or modem reset.  always-on is excluded: there the
             # bearer is meant to self-heal.
+            #
+            # Lease awareness: a disconnect means "*I* no longer need the bearer
+            # up", not "force it down".  If any other client still holds a live
+            # bearer lease (e.g. WLB is holding the link up for failover), the
+            # teardown is suppressed and user_disconnected is NOT set, so the
+            # lease reconciler keeps the bearer up.  This lets the legacy
+            # dial-on-demand idle watcher coexist with event-driven failover.
+            lease_demand = self.fsm.bearer_leases.any_live(self.interface_number)
             if getattr(self.fsm, 'connection_mode', '') in (
                     'connect-on-demand', 'dial-on-demand'):
-                self.fsm.user_disconnected = True
                 self.fsm.bearer_requested = False
-                logger.info("On-demand: bearer held down until connect_bearer()",
-                           extra={'interface_number': self.interface_number,
-                                  'connection_mode': getattr(
-                                      self.fsm, 'connection_mode', 'unknown')})
+                if not lease_demand:
+                    self.fsm.user_disconnected = True
+                    logger.info("On-demand: bearer held down until connect_bearer()",
+                               extra={'interface_number': self.interface_number,
+                                      'connection_mode': getattr(
+                                          self.fsm, 'connection_mode', 'unknown')})
+                else:
+                    logger.info("On-demand disconnect ignored: lease demand holds "
+                                "bearer up",
+                               extra={'interface_number': self.interface_number,
+                                      'owners': self.fsm.bearer_leases.owners(
+                                          self.interface_number)})
                 self._save_runtime_state()
 
             bearer_up = {ModemState.CONNECTED.value}
-            if current_state in bearer_up:
+            if current_state in bearer_up and not lease_demand:
                 self.fsm.transition(ModemEvent.ENTER_IDLE)
             return "accepted"
         except Exception as e:

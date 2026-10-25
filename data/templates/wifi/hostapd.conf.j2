@@ -40,7 +40,15 @@ channel={{ channel }}
 {% endif %}
 {% if mode is vyos_defined %}
 {%     if mode is vyos_defined('n') %}
+{#     802.11n operates on both 2.4 GHz (hw_mode=g) and 5 GHz (hw_mode=a);
+       derive the band from the configured channel (1-14 = 2.4 GHz, 34-177 =
+       5 GHz, 0/ACS defaults to 2.4 GHz). #}
+{%         if channel is vyos_defined and channel | int > 14 %}
+hw_mode=a
+ieee80211h=1
+{%         else %}
 hw_mode=g
+{%         endif %}
 {%     elif mode is vyos_defined('ac') %}
 hw_mode=a
 ieee80211h=1

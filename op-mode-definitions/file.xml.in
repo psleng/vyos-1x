@@ -60,7 +60,7 @@
         <children>
           <tagNode name="config">
             <properties>
-              <help>Clone the current system configuration to an image</help>
+              <help>Clone the current system configuration to an image (optionally also SSH host keys and TPM-backed secure storage)</help>
               <completionHelp>
                 <script>${vyos_completion_dir}/list_images.py --no-running</script>
               </completionHelp>
@@ -69,7 +69,7 @@
             <children>
               <tagNode name="from">
                 <properties>
-                  <help>Clone system configuration from an image to another one</help>
+                  <help>Clone system configuration from an image to another one (optionally also SSH host keys and TPM-backed secure storage)</help>
                   <completionHelp>
                     <list>running</list>
                     <script>${vyos_completion_dir}/list_images.py</script>

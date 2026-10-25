@@ -888,6 +888,13 @@ def build_fsm_config(wwan):
         'primary_sim_slot': _leaf_int(sim_cfg, 'primary_slot', 1),
         'connection_mode': _leaf(wwan, 'connection_mode', 'always-on'),
 
+        # Connect-retry backoff profile (conservative|normal|aggressive).  While
+        # a bearer-demand lease is held but the modem cannot connect, the FSM
+        # keeps retrying on this schedule.  Deliberately has NO default: when
+        # unset ('') the user's `failed-retry` schedule is left untouched, so
+        # configuring connect-retry is the only way it overrides failed-retry.
+        'connect_retry': _leaf(wwan, 'connect_retry', ''),
+
         # MTU
         'mtu': _leaf_int(wwan, 'mtu', 1420),
 

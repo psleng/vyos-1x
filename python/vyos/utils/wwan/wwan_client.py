@@ -503,6 +503,44 @@ class WWANClient:
         except DBusError as exc:
             raise WWANError(f"DisconnectBearer failed: {exc}") from exc
 
+    async def bearer_lease_acquire(self, interface_number: int, owner: str,
+                                   ttl: float = 0.0, reason: str = '') -> str:
+        """Acquire or renew a bearer-demand lease held by *owner*.
+
+        A ``ttl`` of ``0`` (or negative) requests a persistent lease, permitted
+        only for operator identities; machine clients must pass a positive TTL
+        and keep renewing it.  Idempotent per owner.  Returns ``"accepted"``.
+        """
+        iface = await self._get_iface(interface_number)
+        try:
+            return await iface.call_bearer_lease_acquire(owner, float(ttl), reason)
+        except DBusError as exc:
+            raise WWANError(f"BearerLeaseAcquire failed: {exc}") from exc
+
+    async def bearer_lease_release(self, interface_number: int, owner: str) -> str:
+        """Release *owner*'s bearer-demand lease (no-op if none).  ``"accepted"``."""
+        iface = await self._get_iface(interface_number)
+        try:
+            return await iface.call_bearer_lease_release(owner)
+        except DBusError as exc:
+            raise WWANError(f"BearerLeaseRelease failed: {exc}") from exc
+
+    async def bearer_lease_list(self, interface_number: int) -> Dict[str, Any]:
+        """Return the bearer-demand view for the interface as a dict.
+
+        Keys: ``interface``, ``connection_mode``, ``demanded``,
+        ``operator_requested``, ``retry_profile`` and ``leases`` (a list).
+        """
+        iface = await self._get_iface(interface_number)
+        try:
+            raw = await iface.call_bearer_lease_list()
+        except DBusError as exc:
+            raise WWANError(f"BearerLeaseList failed: {exc}") from exc
+        try:
+            return json.loads(raw)
+        except (TypeError, ValueError) as exc:
+            raise WWANError(f"BearerLeaseList bad payload: {exc}") from exc
+
     async def get_bearer_status(self, interface_number: int) -> str:
         """Poll the current bearer state.
 
@@ -1476,6 +1514,21 @@ class WWANClientSync:
     def disconnect_bearer(self, interface_number: int) -> str:
         """Fire-and-forget bearer disconnect.  See :meth:`WWANClient.disconnect_bearer`."""
         return self._run(self._call("disconnect_bearer", interface_number))
+
+    def bearer_lease_acquire(self, interface_number: int, owner: str,
+                             ttl: float = 0.0, reason: str = '') -> str:
+        """Acquire/renew a bearer-demand lease.  See :meth:`WWANClient.bearer_lease_acquire`."""
+        return self._run(self._method(
+            "bearer_lease_acquire", interface_number, owner, ttl=ttl, reason=reason))
+
+    def bearer_lease_release(self, interface_number: int, owner: str) -> str:
+        """Release a bearer-demand lease.  See :meth:`WWANClient.bearer_lease_release`."""
+        return self._run(self._method(
+            "bearer_lease_release", interface_number, owner))
+
+    def bearer_lease_list(self, interface_number: int) -> Dict[str, Any]:
+        """Bearer-demand view dict.  See :meth:`WWANClient.bearer_lease_list`."""
+        return self._run(self._method("bearer_lease_list", interface_number))
 
     def connect_bearer_and_wait(
         self, interface_number: int,

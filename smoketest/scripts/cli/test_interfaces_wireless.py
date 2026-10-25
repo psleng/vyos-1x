@@ -545,7 +545,33 @@ class WirelessInterfaceTest(BasicInterfaceTest.TestCase):
         # Check for running process
         self.assertTrue(process_named_running('hostapd'))
 
-    def test_wireless_access_point_bridge(self):
+    def test_wireless_hostapd_mode_n_5ghz(self):
+        # T6496: 802.11n operates on both 2.4 and 5 GHz. The hw_mode must follow
+        # the configured channel - a 5 GHz channel has to render "hw_mode=a"
+        # (not the historic, hard-coded "hw_mode=g" that fails on 5 GHz radios).
+        interface = self._interfaces[1] # wlan1
+        ssid = 'VyOS-11n-5GHz'
+        channel = '36'
+
+        self.cli_set(self._base_path + [interface, 'type', 'access-point'])
+        self.cli_set(self._base_path + [interface, 'mode', 'n'])
+        self.cli_set(self._base_path + [interface, 'ssid', ssid])
+        self.cli_set(self._base_path + [interface, 'channel', channel])
+
+        self.cli_commit()
+
+        # A 5 GHz channel must map to hw_mode=a with 802.11n enabled
+        tmp = get_config_value(interface, 'hw_mode')
+        self.assertEqual('a', tmp)
+
+        tmp = get_config_value(interface, 'ieee80211n')
+        self.assertEqual('1', tmp)
+
+        tmp = get_config_value(interface, 'channel')
+        self.assertEqual(channel, tmp)
+
+        # Check for running process
+        self.assertTrue(process_named_running('hostapd'))
         interface = self._interfaces[1] # wlan1
         ssid = 'VyOS-Test'
         bridge = 'br42477'

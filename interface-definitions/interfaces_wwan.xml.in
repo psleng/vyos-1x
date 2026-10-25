@@ -176,6 +176,31 @@
             </properties>
             <defaultValue>always-on</defaultValue>
           </leafNode>
+          <!-- ── Connect-retry backoff profile ───────────────────── -->
+          <leafNode name="connect-retry">
+            <properties>
+              <help>Bearer connect-retry aggressiveness while demand is held</help>
+              <completionHelp>
+                <list>conservative normal aggressive</list>
+              </completionHelp>
+              <valueHelp>
+                <format>conservative</format>
+                <description>Gentle retries, long waits (metered/power friendly)</description>
+              </valueHelp>
+              <valueHelp>
+                <format>normal</format>
+                <description>Balanced retry schedule (same as the failed-retry default)</description>
+              </valueHelp>
+              <valueHelp>
+                <format>aggressive</format>
+                <description>Fast retries for failover-critical links</description>
+              </valueHelp>
+              <constraint>
+                <regex>^(conservative|normal|aggressive)$</regex>
+              </constraint>
+              <constraintErrorMessage>Connect-retry profile must be conservative, normal, or aggressive</constraintErrorMessage>
+            </properties>
+          </leafNode>
           <!-- ── Dial-on-Demand Settings ─────────────────────────── -->
           <node name="dial-on-demand">
             <properties>

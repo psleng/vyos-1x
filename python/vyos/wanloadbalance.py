@@ -159,12 +159,15 @@ def wlb_weight_interfaces(rule_conf, health_state):
     return out, total_weight
 
 def health_ping_host(host, ifname, count=1, wait_time=0):
-    cmd_str = f'ping -c {count} -W {wait_time} -I {ifname} {host}'
+    # Probe up to "count" packets 0.2s apart; ping returns 0 if ANY of them is
+    # answered, so a single dropped packet on a lossy link does not fail the
+    # check (which, with failure-count 1, would otherwise flap the interface).
+    cmd_str = f'ping -c {count} -i 0.2 -W {wait_time} -I {ifname} {host}'
     rc = run(cmd_str)
     return rc == 0
 
 def health_ping_host_ttl(host, ifname, count=1, ttl_limit=0):
-    cmd_str = f'ping -c {count} -t {ttl_limit} -I {ifname} {host}'
+    cmd_str = f'ping -c {count} -i 0.2 -t {ttl_limit} -I {ifname} {host}'
     rc = run(cmd_str)
     return rc != 0
 

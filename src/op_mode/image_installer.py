@@ -131,6 +131,7 @@ MSG_INPUT_COPY_DATA: str = 'Would you like to copy data to the new image?'
 MSG_INPUT_CHOOSE_COPY_DATA: str = 'From which image would you like to save config information?'
 MSG_INPUT_COPY_ENC_DATA: str = 'Would you like to copy the encrypted config to the new image?'
 MSG_INPUT_CHOOSE_COPY_ENC_DATA: str = 'From which image would you like to copy the encrypted config?'
+MSG_INPUT_COPY_TPM: str = 'Would you like to copy TPM-backed secure storage to the new image?'
 MSG_WARN_ISO_SIGN_INVALID: str = 'Signature is not valid. Do you want to continue with installation?'
 MSG_WARN_ISO_SIGN_UNAVAL: str = 'Signature is not available. Do you want to continue with installation?'
 MSG_WARN_ROOT_SIZE_TOOBIG: str = 'The size is too big. Try again.'
@@ -823,6 +824,15 @@ def migrate_config() -> bool:
     return False
 
 
+def tpm_secure_storage_present() -> bool:
+    """Return True if the running system holds TPM-backed (OP-TEE) secure
+    storage, i.e. DIR_TPM_REEFS exists and is non-empty. Used to avoid
+    prompting for - or attempting to copy - TPM key material that does not
+    exist (e.g. on platforms without a TEE)."""
+    tpm_path: Path = Path(DIR_TPM_REEFS)
+    return tpm_path.is_dir() and any(tpm_path.iterdir())
+
+
 def copy_ssh_host_keys() -> bool:
     """Ask user to copy SSH host keys
 
@@ -1505,13 +1515,19 @@ def add_image(image_path: str, vrf: str = None, username: str = '',
                 tmp = {'previous_image' : image.get_running_image()}
                 write_file(f'{target_config_dir}/first_boot', dumps(tmp))
 
-                print('Migrating TPM REEFS storage...')
-                # copytree preserves perms but not ownership:
-                Path(target_tpm_dir).mkdir(parents=True)
-                chown(target_tpm_dir, group='root')
-                # chmod_2775(target_tpm_dir)
-                copytree(f'{DIR_TPM_REEFS}/', target_tpm_dir, symlinks=True,
-                        copy_function=copy_preserve_owner, dirs_exist_ok=True)
+                # Only migrate TPM-backed (OP-TEE) secure storage when it both
+                # exists and the operator opts in. This avoids prompting for -
+                # or attempting to copy - key material that is not present
+                # (e.g. on platforms without a TEE).
+                if tpm_secure_storage_present() and (
+                        no_prompt or ask_yes_no(MSG_INPUT_COPY_TPM, default=True)):
+                    print('Migrating TPM REEFS storage...')
+                    # copytree preserves perms but not ownership:
+                    Path(target_tpm_dir).mkdir(parents=True)
+                    chown(target_tpm_dir, group='root')
+                    # chmod_2775(target_tpm_dir)
+                    copytree(f'{DIR_TPM_REEFS}/', target_tpm_dir, symlinks=True,
+                            copy_function=copy_preserve_owner, dirs_exist_ok=True)
         else:
             Path(target_config_dir).mkdir(parents=True)
             chown(target_config_dir, group='vyattacfg')
