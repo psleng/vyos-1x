@@ -130,13 +130,16 @@ def wlb_interface_mark(interface, config):
 
 
 def basic_nft_commands(interface, queue_num):
-    # Drop every IPv6 frame egressing wwanX BEFORE the NFQUEUE rule so IPv6
-    # chatter is discarded instead of being queued (queuing would trigger /
-    # hold a dial-on-demand bring-up).
+    # Drop IPv6 multicast (ff00::/8 -- RA/RS/MLD/ND-solicit/mDNS chatter) BEFORE
+    # the NFQUEUE rule so housekeeping can never wake / hold a dial-on-demand
+    # bring-up. IPv6 *unicast* (global/ULA) falls through to the queue exactly
+    # like IPv4, so real forwarded or locally-originated IPv6 traffic triggers
+    # the dial. Link-local and inbound RAs are already neutralised at the source
+    # by the FSM carrier hardening (accept_ra=0, autoconf=0) + output hygiene.
     return f'''
     add table inet {interface}_raw_{queue_num}
     add chain inet {interface}_raw_{queue_num} output {{ type filter hook output priority raw; policy accept; }}
-    add rule inet {interface}_raw_{queue_num} output oifname {interface} meta nfproto ipv6 drop
+    add rule inet {interface}_raw_{queue_num} output oifname {interface} ip6 daddr ff00::/8 drop
     add rule inet {interface}_raw_{queue_num} output oifname {interface} queue num {queue_num}
     add chain inet {interface}_raw_{queue_num} prerouting {{ type filter hook prerouting priority raw; policy accept; }}
     '''
@@ -151,9 +154,11 @@ async def generate_standalone_nft_rules(interface='wwan0'):
     queue_num = wwan_queue_num(interface)
     physical_interfaces = f"{{ {', '.join(get_inbound_interfaces())} }}"
     commands = basic_nft_commands(interface, queue_num)
-    # NOTE: forwarded IPv6 destined for wwanX is dropped persistently by the
-    # dial-on-demand prerouting guard in src/conf_mode/interfaces_wwan.py
-    # (below `raw` priority, so before this queue), not here.
+    # The prerouting queue is family-agnostic (inet + fib): forwarded IPv4 AND
+    # forwarded IPv6 *unicast* whose FIB egress resolves to wwanX are queued, so
+    # either family triggers a dial. IPv6 *multicast* never FIB-resolves to the
+    # point-to-point wwanX egress, and the dial-on-demand chatter guard in
+    # src/conf_mode/interfaces_wwan.py drops it below `raw` as a backstop.
     commands += (
         f'add rule inet {interface}_raw_{queue_num} prerouting '
         f'iifname {physical_interfaces} fib daddr oifname "{interface}" '

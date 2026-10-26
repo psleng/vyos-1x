@@ -102,3 +102,46 @@ class TestGenerateNftRules(IsolatedAsyncioTestCase):
         # No load-balancing rules at all -> standalone intercept, no WLB mark.
         cmd = await self._run({'interface_health': {'wwan0': {}}})
         self.assertNotIn('wlb_demand', cmd)
+
+
+class TestIpv6TrapParity(IsolatedAsyncioTestCase):
+    """IPv6 unicast must reach the dial trigger (parity with IPv4); only IPv6
+    multicast chatter is dropped."""
+
+    def test_basic_commands_drop_only_multicast(self):
+        cmd = nft.basic_nft_commands('wwan0', 1)
+        # Only IPv6 multicast is dropped before the queue...
+        self.assertIn('ip6 daddr ff00::/8 drop', cmd)
+        # ...NOT all IPv6 (which would also block genuine unicast).
+        self.assertNotIn('meta nfproto ipv6 drop', cmd)
+        # The protocol-agnostic queue rule still follows the drop, so IPv4 and
+        # IPv6 unicast both reach the NFQUEUE trigger.
+        self.assertIn('oifname wwan0 queue num 1', cmd)
+
+    async def _run(self, config):
+        captured = {}
+
+        async def fake_nft(cmd=''):
+            captured['cmd'] = cmd
+
+        with patch.object(nft, 'get_config', return_value=config), \
+             patch.object(nft, 'get_inbound_interfaces', return_value=['eth0']), \
+             patch.object(nft, 'async_run_nft_cmd', AsyncMock(side_effect=fake_nft)):
+            await nft.generate_nft_rules(interface='wwan0')
+        return captured.get('cmd', '')
+
+    async def test_full_ruleset_does_not_blanket_drop_ipv6(self):
+        cfg = {
+            'interface_health': {'eth0': {}, 'wwan0': {}},
+            'rule': {'10': {
+                'interface': {'wwan0': {'weight': '1'}},
+                'inbound_interface': 'any',
+                'failover': {},
+            }},
+        }
+        cmd = await self._run(cfg)
+        self.assertNotIn('meta nfproto ipv6 drop', cmd)
+        self.assertIn('ip6 daddr ff00::/8 drop', cmd)
+        # The forwarded prerouting queue (family-agnostic inet+fib) is present,
+        # so forwarded IPv6 unicast resolving to wwan0 is queued too.
+        self.assertIn('fib daddr oifname "wwan0"', cmd)

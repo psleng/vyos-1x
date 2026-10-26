@@ -1152,6 +1152,18 @@ The other difference from always-on is the **explicit** `disconnect_bearer()`
 notifying Linux and suppresses auto-reconnect until the next `connect_bearer()`.
 A transient/unexpected failure while connected does **not** suppress recovery.
 
+**Traffic trigger is dual-stack.**  The `dial-on-demand@` traffic trigger (the
+NFQUEUE trap that dials when it sees outbound traffic for `wwanN`) queues both
+IPv4 **and** IPv6 *unicast* — so a forwarded or locally-originated IPv6 flow
+raises the bearer exactly like IPv4.  Only IPv6 *multicast* chatter (`ff00::/8`
+— RA/RS/MLD/ND-solicit/mDNS) is dropped before the queue so housekeeping can
+never wake or hold the metered modem; link-local and inbound RAs are already
+neutralised at the source by the FSM's carrier hardening (`accept_ra=0`,
+`autoconf=0`, `addr_gen_mode=3`) and output hygiene.  (IPv6 *failover* itself
+rides ordinary route-distance backup — the FSM's `ipv6 route ::/0 <wwan> …
+distance 220` — not the IPv4-only WAN load-balancer; the trigger just dials the
+cellular bearer when forwarded IPv6 falls to that backup route.)
+
 Unlike connect-on-demand, dial-on-demand does **not** persist the disconnect
 intent across a service crash/restart: because it is a variant of always-on, it
 **always comes up connected at boot**, regardless of whether the bearer was
