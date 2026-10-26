@@ -284,6 +284,7 @@ def _build_dial_on_demand_plan(conf):
             'changed': relevant(proposed, ifname) != relevant(effective, ifname),
             'idle_timeout': conf.return_value(dod_base + ['idle-timeout']) or 30,
             'connect_timeout': conf.return_value(dod_base + ['connect-timeout']) or 30,
+            'flush_timeout': conf.return_value(dod_base + ['flush-timeout']) or 60,
         })
 
     return plan
@@ -302,7 +303,8 @@ def _apply_dial_on_demand_plan():
         if item['run']:
             action = 'restart' if item['changed'] else 'start'
             call(f'systemctl {action} dial-on-demand@{ifname}:'
-                 f'{item["idle_timeout"]}:{item["connect_timeout"]}.service')
+                 f'{item["idle_timeout"]}:{item["connect_timeout"]}:'
+                 f'{item["flush_timeout"]}.service')
         else:
             call(f'systemctl stop dial-on-demand@{ifname}:*.service')
 

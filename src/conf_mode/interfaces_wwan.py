@@ -1388,9 +1388,11 @@ def wwan_on_demand_service(wwan, ifname, checkConfig, action):
     stop_dial_service = True
     connect_timeout = 30
     idle_timeout = 30
+    flush_timeout = 60
     if wwan.get('dial_on_demand') is not None:
         connect_timeout = wwan.get('dial_on_demand').get('connect_timeout', 30)
         idle_timeout = wwan.get('dial_on_demand').get('idle_timeout', 30)
+        flush_timeout = wwan.get('dial_on_demand').get('flush_timeout', 60)
     if checkConfig is True:
         result = subprocess.run(
                 ["systemctl", "list-units", "--type=service", "--all", "--no-legend", "--plain"],
@@ -1403,12 +1405,13 @@ def wwan_on_demand_service(wwan, ifname, checkConfig, action):
             if not service.startswith("dial-on-demand@") or not service.endswith(".service"):
                 continue
             params = service[len("dial-on-demand@"):-len(".service")].split(":")
-            if len(params) != 3:
+            if len(params) != 4:
                 continue
-            param1, param2, param3 = params
+            param1, param2, param3, param4 = params
             if (param1 == ifname
                     and param2 == str(idle_timeout)
-                    and param3 == str(connect_timeout)):
+                    and param3 == str(connect_timeout)
+                    and param4 == str(flush_timeout)):
                 stop_dial_service = False
                 break
     if stop_dial_service is True and action == 'stop':
@@ -1416,7 +1419,7 @@ def wwan_on_demand_service(wwan, ifname, checkConfig, action):
         return
     if action == 'start':
         if wwan.get('_dial_on_demand_active'):
-            call(f'systemctl start dial-on-demand@{ifname}:{idle_timeout}:{connect_timeout}.service')
+            call(f'systemctl start dial-on-demand@{ifname}:{idle_timeout}:{connect_timeout}:{flush_timeout}.service')
         else:
             # Policy says dial-on-demand must not run for this interface (not
             # in dial-on-demand mode, or a non-failover WLB member): make sure

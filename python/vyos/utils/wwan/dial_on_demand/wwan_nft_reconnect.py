@@ -72,9 +72,15 @@ def event_loop(loop=None):
 
 # This acts as the packet producer
 class PacketHandler:
-    def __init__(self, interface='wwan0', connect_timeout=30, loop=None, client=None):
+    def __init__(self, interface='wwan0', connect_timeout=30, loop=None,
+                 client=None, flush_timeout=60):
         self.interface = interface
         self.connect_timeout = connect_timeout
+        # Overall ceiling on how long triggering packets are held waiting for the
+        # bearer before the queue is flushed and the pipeline re-arms.  Clamped
+        # to at least connect_timeout so a small misconfiguration cannot abort a
+        # dial attempt before it has had a chance to complete.
+        self.flush_timeout = max(int(flush_timeout), int(connect_timeout))
         self.client = client
         self.tasks = set()
         self.shutdown = False
@@ -108,12 +114,32 @@ class PacketHandler:
 
     async def packet_consumer(self, queue_num):
 
-        await modem_ready_event.wait()
+        # Per dial-attempt flush: hold the triggering packets only until the
+        # bearer is up, OR until flush_timeout elapses.  Without the bound a
+        # failed/too-slow dial never sets modem_ready_event, so the held packets
+        # would wedge here forever and the pipeline would never exit (and so
+        # never be restarted by systemd to retry).  On timeout we DROP the held
+        # packets (fail-fast: the application's next check-in retransmits and
+        # re-triggers a fresh dial) and fall through to tear the trap down and
+        # exit so systemd re-arms the whole pipeline.
+        try:
+            await asyncio.wait_for(modem_ready_event.wait(),
+                                   timeout=self.flush_timeout)
+            flush_drop = False
+        except asyncio.TimeoutError:
+            logger.info(
+                "Flush timeout (%ss) waiting for bearer on %s; dropping %d "
+                "queued packet(s) and re-arming dial trigger",
+                self.flush_timeout, self.interface, packet_queue.qsize())
+            flush_drop = True
 
         while not packet_queue.empty():
             pkt = await packet_queue.get()
-            logger.info(f"Packet received and accepting from queue: {pkt}")
-            pkt.accept()
+            if flush_drop:
+                pkt.drop()
+            else:
+                logger.info(f"Packet received and accepting from queue: {pkt}")
+                pkt.accept()
 
         await teardown_nftables(queue_num, self.interface)
 
@@ -232,10 +258,12 @@ def start_nfqueue(nfqueue):
     nfqueue.run(block=False)
 
 
-async def main(interface='wwan0', connect_timeout=30, loop=None, client=None):
+async def main(interface='wwan0', connect_timeout=30, loop=None, client=None,
+               flush_timeout=60):
 
     queue_num = get_interface_queue_num(interface)
     logger.info(f"Given timeout to wait for modem connect: {connect_timeout}")
+    logger.info(f"Given flush timeout: {flush_timeout}")
 
     logger.info(f"The nfqueue to listen to: {queue_num}")
     wwan_options = get_all_wwan_options()
@@ -251,7 +279,8 @@ async def main(interface='wwan0', connect_timeout=30, loop=None, client=None):
     loop = event_loop(loop)
 
     try:
-        handler = PacketHandler(interface, connect_timeout, loop=loop, client=client)
+        handler = PacketHandler(interface, connect_timeout, loop=loop,
+                                client=client, flush_timeout=flush_timeout)
         if client is None:
             await handler.setup()
         # Bind to queue number 1
@@ -297,12 +326,15 @@ if __name__ == "__main__":
     args = parser.parse_args()
     params = args.params
     items = params.split(':')
-    if len(items) > 2:
+    if len(items) > 3:
         raise ValueError("Too many arguments for this function")
-    interface, timeout = items
+    interface = items[0]
+    timeout = items[1] if len(items) > 1 else 30
+    flush_timeout = items[2] if len(items) > 2 else 60
 
     loop = event_loop(None)
     try:
-        loop.run_until_complete(main(interface=interface, connect_timeout=timeout, loop=loop))
+        loop.run_until_complete(main(interface=interface, connect_timeout=timeout,
+                                     loop=loop, flush_timeout=flush_timeout))
     finally:
         loop.close()

@@ -34,7 +34,8 @@ interfaces
         ├── connection-mode <always-on|connect-on-demand|dial-on-demand>
         ├── dial-on-demand                                # traffic-trigger settings (used only with connection-mode dial-on-demand)
         │     ├── idle-timeout <10-600>                   #   default: 30  (s with no egress traffic before the bearer is dropped to REGISTERED_IDLE)
-        │     └── connect-timeout <30-600>                #   default: 30  (s to wait for the bearer to come up after traffic triggers a dial)
+        │     ├── connect-timeout <30-600>                #   default: 30  (s to wait for the bearer to come up after traffic triggers a dial)
+        │     └── flush-timeout <30-600>                  #   default: 60  (s to hold triggering packets waiting for the bearer before dropping them and re-arming; clamped to >= connect-timeout)
         ├── connect-retry <conservative|normal|aggressive>  # bearer connect-retry backoff while demand is held (unset: failed-retry schedule applies)
         ├── network-mode <auto|lte|5g|5g-only|3g|2g>      # modem-level RAT selection
         ├── network-time                                  # NITZ → system clock (opt-in; presence enables; NAS signaling, no data traffic)
@@ -1232,34 +1233,46 @@ limit.  The lease stays recorded, and if the hold lifts while the lease is
 still live, the bearer comes up.
 
 **Event-driven failover.**  When an **on-demand** WWAN (either `connect-on-demand`
-or `dial-on-demand`) is a member of a `load-balancing wan rule … failover`, WLB
-acquires the `wlb-failover` lease as soon as the cellular link becomes the
-selected failover egress.  The lease is what deterministically brings the bearer
-up: it stays up for the outage regardless of traffic gaps, so tunnels such as
-WireGuard, IPsec or OpenVPN don't flap.  WLB releases the lease when the
-preferred path recovers — but only after it has been stably up for a short
-hold-down (so a flapping better path can't thrash the metered bearer) — and the
-FSM then idles the bearer down.  WLB's modem-registration health check keeps a
-registered-but-idle modem selectable as a failover target.
+or `dial-on-demand`) is a member of a `load-balancing wan rule … failover`, WLB's
+modem-registration health check keeps a registered-but-idle modem selectable as
+a failover target and steers traffic to it (fwmark + per-interface policy
+routing) as soon as the cellular link becomes the selected failover egress.  How
+the bearer is then *raised* differs by connection-mode:
 
-Both on-demand modes are lease-managed on purpose.  A `dial-on-demand` traffic
-trigger cannot bootstrap an **idle** bearer under WLB's failover: WLB steers
-traffic with fwmark + per-interface policy routing, but an idle bearer has no
-route for that traffic to resolve to, so the trigger never fires.  The lease is
-route-independent (a direct D-Bus demand to the FSM), so it works from a cold
-idle bearer.  dial-on-demand's own data-path trigger still owns the normal,
-non-failover duty cycle — the lease is simply an additional demand source
-(leases are multi-owner; the FSM keeps the bearer up while any is live).  If no
-failover rule contains an on-demand WWAN, WLB never acquires a lease and the
-lease path stays inactive.
+- **`connect-on-demand` is lease-pinned.**  WLB acquires the `wlb-failover`
+  lease as soon as the link becomes the selected egress.  The lease
+  deterministically brings the bearer up and keeps it up for the whole outage
+  regardless of traffic gaps, so tunnels such as WireGuard, IPsec or OpenVPN
+  don't flap.  WLB releases the lease when the preferred path recovers — but
+  only after it has been stably up for a short hold-down (so a flapping better
+  path can't thrash the metered bearer) — and the FSM then idles the bearer
+  down.  This is required because an idle `connect-on-demand` link is fully
+  link-down with no route, so nothing on the data path can bootstrap it; the
+  lease is route-independent (a direct D-Bus demand to the FSM).
+
+- **`dial-on-demand` keeps its traffic-triggered duty cycle.**  WLB does **not**
+  lease a `dial-on-demand` link, so a metered cellular backup idles down between
+  flows and dials up only on real traffic even while it is the active failover
+  egress.  The bootstrap problem is solved in the data path instead of with a
+  lease: the `dial-on-demand@` service installs an nftables trigger keyed on the
+  WLB fwmark, placed **after** WLB's marking, so the first packet WLB steers to
+  the idle link is queued, the modem dials on demand, and the held packets are
+  released once connected.  If that dial fails or is too slow, the queued
+  packets are flushed after `flush-timeout` and the trigger re-arms (see
+  `dial-on-demand flush-timeout`).
+
+If no failover rule contains an on-demand WWAN, WLB never acquires a lease and
+the lease path stays inactive.
 
 **`disconnect_bearer()` is lease-aware.**  With no live lease it behaves
 exactly as before.  If another client holds a live lease, the call still clears
 the operator request, but it skips the teardown and does not suppress
 auto-recovery.  This keeps one client (for example WLB holding `wlb-failover`
-on an on-demand link during failover) from having its bearer dropped by
-another client's disconnect — including dial-on-demand's own idle watcher.  To
-force the link down regardless of leases, use airplane mode or `disable`.
+on a `connect-on-demand` link during failover) from having its bearer dropped
+by another client's disconnect.  (A `dial-on-demand` link under failover is
+**not** leased, so its own idle watcher is free to drop the bearer between
+flows.)  To force the link down regardless of leases, use airplane mode or
+`disable`.
 
 **Connect retry while demand is held.**  If the bearer can't be established
 while demand exists, clients don't loop.  The FSM's failed-state retry keeps
