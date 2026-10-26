@@ -40,9 +40,13 @@ def _interface_modem_check(iface):
     would mark the interface permanently unhealthy -- failover would then never
     select it as a backup nexthop and the on-demand trigger would never get the
     traffic it needs to dial. Instead treat the interface as healthy when the
-    modem is REGISTERED on the network (ready to dial on demand) or already
-    connected, using the ModemManager modem state (8 REGISTERED .. 11 CONNECTED)
-    combined with the FSM state.
+    FSM reports the link is on the network (registered-and-idle, connecting, or
+    already connected).
+
+    The FSM owns the interface, so its published ``fsm_state`` is the sole
+    source of truth here -- we deliberately do NOT consult the
+    ModemManager-derived ``modem_state`` field, to avoid coupling failover health
+    to a second, lower-level signal the FSM already subsumes.
 
     NB: this runs on every failover poll from the long-lived daemon loop, so the
     client MUST be closed each time. A leaked WWANClientSync keeps its D-Bus
@@ -67,16 +71,13 @@ def _interface_modem_check(iface):
         print_debug(f'    [ MODEM_CHECK ] health check failed for {iface}: {exc}')
         return False
 
-    # MMModemState: 8 REGISTERED, 9 DISCONNECTING, 10 CONNECTING, 11 CONNECTED
-    # all mean "on the network and able to carry a bearer".
+    # The FSM is the authoritative owner of the interface; a dial-on-demand
+    # link is usable as a backup next-hop whenever the FSM reports it on the
+    # network. REGISTERED_IDLE (parked, ready to dial), CONNECTING (bringing the
+    # bearer up) and CONNECTED all qualify.
     if status is not None:
-        try:
-            modem_state = int(status.get('modem_state', -1))
-            fsm_state = status.get('fsm_state', 'DISCONNECTED')
-        except (TypeError, ValueError):
-            modem_state = -1
-            fsm_state = 'DISCONNECTED'
-        if modem_state >= 8 and fsm_state in ('CONNECTED', 'REGISTERED_IDLE', 'CONNECTING'):
+        fsm_state = status.get('fsm_state', 'DISCONNECTED')
+        if fsm_state in ('CONNECTED', 'REGISTERED_IDLE', 'CONNECTING'):
             return True
 
     return False
