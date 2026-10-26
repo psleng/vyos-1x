@@ -107,28 +107,6 @@ def wwan_queue_num(interface):
         return 1
 
 
-# WLB (src/helpers/vyos-load-balancer.py) assigns every interface-health member
-# a policy-routing table and matching fwmark starting at this offset.
-WLB_MARK_OFFSET = 0xc8
-
-
-def wlb_interface_mark(interface, config):
-    """Return the hex fwmark WLB marks packets with for ``interface``, or None.
-
-    Must mirror src/helpers/vyos-load-balancer.py exactly: each
-    ``interface-health`` member, in config order, is assigned
-    ``table/mark = WLB_MARK_OFFSET + its 1-based position``.  The dial-on-demand
-    trigger uses this to fire on precisely the traffic WLB has steered to the
-    interface (see generate_nft_rules), so producer and consumer agree without a
-    runtime handshake.  Returns None when the interface is not an
-    interface-health member (no WLB mark exists).
-    """
-    for index, ifname in enumerate(config.get('interface_health') or {}, start=1):
-        if ifname == interface:
-            return hex(WLB_MARK_OFFSET + index)
-    return None
-
-
 def basic_nft_commands(interface, queue_num):
     # Drop IPv6 multicast (ff00::/8 -- RA/RS/MLD/ND-solicit/mDNS chatter) BEFORE
     # the NFQUEUE rule so housekeeping can never wake / hold a dial-on-demand
@@ -201,10 +179,6 @@ async def generate_nft_rules(interface='wwan0'):
     # interface add their prerouting diversions into that one table/queue.
     queue_num = wwan_queue_num(interface)
     commands = basic_nft_commands(interface, queue_num)
-    # fwmark WLB steers to this interface; drives the failover trigger below.
-    mark = wlb_interface_mark(interface, config)
-    demand_chain_added = False
-
     failover = False
     for rule_num in matching:
         rule_conf = config.get('rule', {}).get(rule_num, {})
@@ -221,34 +195,6 @@ async def generate_nft_rules(interface='wwan0'):
             f'iifname {scope} fib daddr oifname "{interface}" '
             f'queue num {queue_num}\n'
         )
-
-        # Under WLB the FIB rule above cannot bootstrap an idle on-demand bearer.
-        # WLB steers traffic to a failover member by fwmark + policy routing, but
-        # that RAW-hook (priority raw, -300) FIB lookup runs BEFORE WLB sets the
-        # mark (mangle, -150) and so resolves against the main table -- which
-        # does not point at the idle failover WWAN. So forwarded traffic is never
-        # queued and dial-on-demand can never raise the link; the old design
-        # worked around this by pinning the bearer up with a continuous lease.
-        #
-        # Instead, add a second trigger at a priority AFTER WLB marking that
-        # fires on exactly the traffic WLB marked for this interface. Now when
-        # WLB selects an idle dial-on-demand WWAN as the active egress, the first
-        # marked packet is queued, the modem dials on demand, and the metered
-        # bearer idles back down between flows (vyos-load-balancer.py no longer
-        # leases dial-on-demand). The whole '{interface}_raw_{queue}' table is
-        # torn down once connected (wwan_nft_reconnect), so established traffic
-        # is never queued.
-        if 'failover' in rule_conf and mark is not None:
-            if not demand_chain_added:
-                commands += (
-                    f'add chain inet {interface}_raw_{queue_num} wlb_demand '
-                    f'{{ type filter hook prerouting priority -140; policy accept; }}\n'
-                )
-                demand_chain_added = True
-            commands += (
-                f'add rule inet {interface}_raw_{queue_num} wlb_demand '
-                f'iifname {scope} meta mark {mark} queue num {queue_num}\n'
-            )
 
     try:
         logger.info("Command to install: %s", commands)

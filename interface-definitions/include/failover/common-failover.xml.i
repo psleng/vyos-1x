@@ -31,10 +31,15 @@
           <help>Check target address</help>
           <valueHelp>
             <format>ipv4</format>
-            <description>Address to check</description>
+            <description>IPv4 address to check</description>
+          </valueHelp>
+          <valueHelp>
+            <format>ipv6</format>
+            <description>IPv6 address to check</description>
           </valueHelp>
           <constraint>
             <validator name="ipv4-address"/>
+            <validator name="ipv6-address"/>
           </constraint>
         </properties>
         <children>

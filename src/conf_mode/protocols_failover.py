@@ -77,7 +77,7 @@ def get_config(config=None):
                                     get_first_key=True)
 
     # Set default values only if we set config
-    if failover.get('route') is not None:
+    if failover.get('route') is not None or failover.get('route6') is not None:
         failover = conf.merge_defaults(failover, recursive=True)
 
     if failover:
@@ -107,8 +107,8 @@ def verify(failover):
     if not failover:
         return None
 
-    if 'route' not in failover:
-        raise ConfigError(f'Failover "route" is mandatory!')
+    if 'route' not in failover and 'route6' not in failover:
+        raise ConfigError('Failover "route" or "route6" is mandatory!')
 
     def _verify_route_item(item_config, item_description, interface_mandatory):
         if interface_mandatory and 'interface' not in item_config:
@@ -143,27 +143,42 @@ def verify(failover):
                 if key in target_config:
                     raise ConfigError(msg)
 
-    for route, route_config in failover['route'].items():
-        if not route_config.get('next_hop') and not route_config.get('dhcp_interface'):
-            raise ConfigError(
-                f'Either next-hop or dhcp-interface for "{route}" is mandatory!'
-            )
-
-        if route_config.get('next_hop'):
-            for next_hop, next_hop_config in route_config.get('next_hop').items():
-                _verify_route_item(
-                    next_hop_config, f'next-hop "{next_hop}"', interface_mandatory=True
+    for family in ('route', 'route6'):
+        for route, route_config in (failover.get(family) or {}).items():
+            if (not route_config.get('next_hop')
+                    and not route_config.get('dhcp_interface')
+                    and not route_config.get('interface')):
+                raise ConfigError(
+                    f'A next-hop, dhcp-interface or interface for "{route}" is mandatory!'
                 )
 
-        if route_config.get('dhcp_interface'):
-            for dhcp_interface, dhcp_interface_config in route_config.get(
-                'dhcp_interface'
-            ).items():
-                _verify_route_item(
-                    dhcp_interface_config,
-                    f'dhcp-interface "{dhcp_interface}"',
-                    interface_mandatory=False,
-                )
+            if route_config.get('next_hop'):
+                for next_hop, next_hop_config in route_config.get('next_hop').items():
+                    _verify_route_item(
+                        next_hop_config, f'next-hop "{next_hop}"', interface_mandatory=True
+                    )
+
+            if route_config.get('dhcp_interface'):
+                for dhcp_interface, dhcp_interface_config in route_config.get(
+                    'dhcp_interface'
+                ).items():
+                    _verify_route_item(
+                        dhcp_interface_config,
+                        f'dhcp-interface "{dhcp_interface}"',
+                        interface_mandatory=False,
+                    )
+
+            if route_config.get('interface'):
+                # Via-less interface route: the egress interface is the tag
+                # value itself, so no 'interface' child is required.
+                for interface, interface_config in route_config.get(
+                    'interface'
+                ).items():
+                    _verify_route_item(
+                        interface_config,
+                        f'interface "{interface}"',
+                        interface_mandatory=False,
+                    )
 
     return None
 
@@ -200,17 +215,21 @@ def generate(failover):
 def _failover_interfaces(failover):
     """Set of interfaces participating in a parsed failover dict.
 
-    Both `dhcp-interface <if>` (tag key) and `next-hop <ip> interface <if>`
-    (child leaf) forms.
+    Covers `dhcp-interface <if>` (tag key), `interface <if>` (via-less route tag
+    key) and `next-hop <ip> interface <if>` (child leaf), for both IPv4 (`route`)
+    and IPv6 (`route6`).
     """
     ifaces = set()
-    for route_conf in (failover.get('route') or {}).values():
-        for ifname in (route_conf.get('dhcp_interface') or {}):
-            ifaces.add(ifname)
-        for nh_conf in (route_conf.get('next_hop') or {}).values():
-            iface = nh_conf.get('interface')
-            if iface:
-                ifaces.add(iface)
+    for family in ('route', 'route6'):
+        for route_conf in (failover.get(family) or {}).values():
+            for ifname in (route_conf.get('dhcp_interface') or {}):
+                ifaces.add(ifname)
+            for ifname in (route_conf.get('interface') or {}):
+                ifaces.add(ifname)
+            for nh_conf in (route_conf.get('next_hop') or {}).values():
+                iface = nh_conf.get('interface')
+                if iface:
+                    ifaces.add(iface)
     return ifaces
 
 def _restart_dial_on_demand(failover):

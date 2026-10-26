@@ -159,7 +159,7 @@ igos@igos:~$ show interfaces wwan wwan0 status
 
 Shows who is currently holding the cellular bearer up and why.  Use it to
 answer "why is this metered link up right now?".  It lists the bearer-demand
-leases held by clients such as the WAN load-balancing failover daemon.  See
+leases held by clients such as the `protocols failover` daemon.  See
 *Bearer-Demand Leases* in the `set` command reference.
 
 ```
@@ -173,7 +173,7 @@ Connect-retry:    failed-retry schedule
 
 Owner           Reason                      TTL(s)    Expires(s)  Age(s)
 --------------------------------------------------------------------------
-wlb-failover    active failover target      15        12          184
+failover        active failover target      120       117         184
 ```
 
 | Field | Description |
@@ -183,7 +183,7 @@ wlb-failover    active failover target      15        12          184
 | Lease-managed | `yes` while the bearer is up because of lease demand; the FSM idles it ~5 s after the last lease ends |
 | Operator request | Persistent operator intent from `connect_bearer()` (cleared by `disconnect_bearer()`) |
 | Connect-retry | The configured `connect-retry` profile, or `failed-retry schedule` when unset |
-| Owner / Reason | Lease holder (`wlb-failover`, `cli`, `operator`, …) and its annotation |
+| Owner / Reason | Lease holder (`failover`, `cli`, `operator`, …) and its annotation |
 | TTL / Expires / Age | Renewal budget, seconds until the lease lapses if not renewed (`-` = persistent), and seconds since it was first acquired |
 
 With no live leases the table is replaced by `No active bearer-demand leases.`
@@ -553,7 +553,7 @@ igos@igos:~$ disconnect interface wwan0
 > `disconnect_bearer()` D-Bus method can also be used programmatically.
 > In those modes, the bearer is released but the modem stays registered
 > on the network (SMS available, no data).  If another client holds a live
-> bearer-demand lease (for example, WLB is holding the link up for failover),
+> bearer-demand lease (for example, `protocols failover` is holding the link up),
 > `disconnect_bearer()` only withdraws the operator request and the bearer
 > stays up.  Check `show interfaces wwan <wwanN> bearer-leases` to see who is
 > holding it.
@@ -773,7 +773,7 @@ scripts use the `WWANClientSync` client library from
 | `disconnect()` | — | `"accepted"` | Terminate bearer connection |
 | `connect_bearer()` | — | `"accepted"` | Establish data bearer (on-demand modes) |
 | `disconnect_bearer()` | — | `"accepted"` | Release data bearer (on-demand modes); teardown skipped while another client holds a live lease |
-| `bearer_lease_acquire(owner, ttl, reason)` | string, double, string | `"accepted"` | Acquire/renew a bearer-demand lease (on-demand modes).  `owner` must be `cli`, `operator`, `wlb-failover` or `dod-traffic`; `ttl <= 0` = persistent (operator owners only); finite TTL capped at 3600 s |
+| `bearer_lease_acquire(owner, ttl, reason)` | string, double, string | `"accepted"` | Acquire/renew a bearer-demand lease (on-demand modes).  `owner` must be `cli`, `operator`, `failover` or `dod-traffic`; `ttl <= 0` = persistent (operator owners only); finite TTL capped at 3600 s |
 | `bearer_lease_release(owner)` | string | `"accepted"` | Release a lease (no-op if none); bearer stays up if other leases remain |
 | `bearer_lease_list()` | — | JSON string | Lease/demand view used by `show … bearer-leases` |
 | `send_sms(recipient, message)` | number, text | `{"message_id": N}` | Send SMS |
@@ -894,7 +894,7 @@ an HTTPS POST body, use `syslog-identifier igos-wwan-alertbus-json` and parse
 | `python/vyos/utils/wwan/interfaces_wwan_service_manager.py` | Python: D-Bus service — control plane |
 | `python/vyos/utils/wwan/bearer_lease.py` | Python: bearer-demand lease registry (TTL leases per interface/owner) |
 | `python/vyos/utils/wwan/bearer_retry.py` | Python: `connect-retry` backoff profiles |
-| `src/helpers/vyos-load-balancer.py` | Python: WLB daemon — holds the `wlb-failover` lease while a dial-on-demand WWAN is the active failover egress |
+| `src/helpers/vyos-failover.py` | Python: `protocols failover` daemon — holds the `failover` lease while a connect-on-demand WWAN is the active failover egress |
 
 ---
 

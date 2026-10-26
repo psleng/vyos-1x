@@ -410,47 +410,12 @@ def _passthrough_user_eth_addresses(conf, pt_iface):
 def _dial_on_demand_active(conf, ifname, wwan):
     """Decide whether the dial-on-demand service should run for ``ifname``.
 
-    At commit time this script reaches across into the WAN load-balancing
-    config (``conf`` is its live Config instance, so the read reflects the
-    configuration being committed) and applies the policy:
-
-    * ``connection-mode`` must be ``dial-on-demand`` -- otherwise the service
-      never runs.
-    * When the interface is governed by WAN load-balancing -- it is both an
-      ``interface-health`` target AND a weighted member of a balancing
-      ``rule`` -- the service runs ONLY when that rule has ``failover``
-      enabled.  A plain weighted load-balance member is expected to stay
-      continuously up, so dial-on-demand does not apply.
-    * A standalone dial-on-demand interface (not referenced by WAN
-      load-balancing) always runs.
-
-    load-balancing_wan applies the identical check from its own file so both
-    commit paths agree regardless of which section changes.
+    The service runs for any interface in ``connection-mode dial-on-demand``.
+    Cellular failover is handled by ``protocols failover`` (route-based), not by
+    the WAN load-balancer, so the dial-on-demand duty cycle is no longer gated on
+    WLB membership.
     """
-    if wwan.get('connection_mode', 'always-on') != 'dial-on-demand':
-        return False
-
-    lb = conf.get_config_dict(['load-balancing', 'wan'],
-                              key_mangling=('-', '_'),
-                              no_tag_node_value_mangle=True,
-                              get_first_key=True)
-
-    in_interface_health = ifname in (lb.get('interface_health') or {})
-
-    weighted_member = False
-    failover_rule = False
-    for rule_conf in (lb.get('rule') or {}).values():
-        if ifname in (rule_conf.get('interface') or {}):
-            weighted_member = True
-            if 'failover' in rule_conf:
-                failover_rule = True
-
-    if in_interface_health and weighted_member:
-        # Governed by WLB: only dial on demand for a failover rule.
-        return failover_rule
-
-    # Standalone dial-on-demand: always run.
-    return True
+    return wwan.get('connection_mode', 'always-on') == 'dial-on-demand'
 
 
 def get_config(config=None):
