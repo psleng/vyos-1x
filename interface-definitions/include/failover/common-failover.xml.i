@@ -5,6 +5,32 @@
       <help>Check target options</help>
     </properties>
     <children>
+      <leafNode name="failure-count">
+        <properties>
+          <help>Number of consecutive failed checks before the route is withdrawn</help>
+          <valueHelp>
+            <format>u32:1-10</format>
+            <description>Consecutive failures required to mark the next-hop down</description>
+          </valueHelp>
+          <constraint>
+            <validator name="numeric" argument="--range 1-10"/>
+          </constraint>
+        </properties>
+        <defaultValue>1</defaultValue>
+      </leafNode>
+      <leafNode name="success-count">
+        <properties>
+          <help>Number of consecutive successful checks before the route is (re)installed</help>
+          <valueHelp>
+            <format>u32:1-10</format>
+            <description>Consecutive successes required to mark the next-hop up</description>
+          </valueHelp>
+          <constraint>
+            <validator name="numeric" argument="--range 1-10"/>
+          </constraint>
+        </properties>
+        <defaultValue>1</defaultValue>
+      </leafNode>
       <leafNode name="policy">
         <properties>
           <help>Policy for check targets</help>

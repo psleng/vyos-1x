@@ -403,6 +403,8 @@ NextHopNamedTuple = namedtuple(
         'pretty_targets',
         'timeout',
         'onlink',
+        'failure_count',
+        'success_count',
     ],
 )
 
@@ -455,6 +457,14 @@ def get_nexthop_config_vars(
         pretty_targets=pretty_targets,
         timeout=nexthop_config.get('check').get('timeout'),
         onlink='onlink' if 'onlink' in nexthop_config else '',
+        # Hysteresis: a next-hop must fail the check for this many consecutive
+        # polls before its route is withdrawn, and pass for this many
+        # consecutive polls before its route is (re)installed. Defaults to 1
+        # (immediate transition) so behaviour is unchanged unless configured --
+        # mainly useful to stop a lossy link (e.g. Wi-Fi) from flapping on a
+        # single dropped probe.
+        failure_count=int(nexthop_config.get('check').get('failure_count') or 1),
+        success_count=int(nexthop_config.get('check').get('success_count') or 1),
     )
 
 
@@ -744,6 +754,13 @@ if __name__ == '__main__':
     # connect-on-demand bearer-lease release hold-down across loop iterations.
     wwan_lease_hold_state = {}
 
+    # Per-next-hop health hysteresis counters, persisted across loop iterations.
+    # key -> {'fail': consecutive failed polls, 'success': consecutive OK polls}.
+    # A route is only withdrawn after `failure_count` consecutive failures and
+    # only (re)installed after `success_count` consecutive successes, so a lossy
+    # link does not flap on a single dropped probe.
+    nexthop_health_state = {}
+
     had_sleeps = True
     while not kill_called:
         # Check in case daemon was launched without routes
@@ -790,17 +807,42 @@ if __name__ == '__main__':
                     # Perle change end
                 )
 
-                # Record this next-hop's health for the connect-on-demand lease
-                # reconcile at the end of the iteration (which next-hop is the
-                # active egress is decided from this snapshot).
+                # Update this next-hop's consecutive fail/success counters so a
+                # single dropped probe on a lossy link does not flip the route.
+                state_key = (vrf or '', route, nhc.conf_iface or '',
+                             nhc.conf_metric, nhc.next_hop or '')
+                hstate = nexthop_health_state.setdefault(
+                    state_key, {'fail': 0, 'success': 0})
+                if is_alive:
+                    hstate['success'] += 1
+                    hstate['fail'] = 0
+                else:
+                    hstate['fail'] += 1
+                    hstate['success'] = 0
+
+                route_present = is_route_exists(ip_args)
+
+                # Effective (hysteresis-smoothed) health: bring a route up only
+                # after success_count consecutive OK polls, take it down only
+                # after failure_count consecutive failed polls, and otherwise
+                # keep whatever state the route is already in.
+                if route_present:
+                    effective_alive = hstate['fail'] < nhc.failure_count
+                else:
+                    effective_alive = hstate['success'] >= nhc.success_count
+
+                # Record this next-hop's (smoothed) health for the
+                # connect-on-demand lease reconcile at the end of the iteration
+                # (which next-hop is the active egress is decided from this
+                # snapshot).
                 if nhc.conf_iface:
-                    alive_by_iface[nhc.conf_iface] = is_alive
+                    alive_by_iface[nhc.conf_iface] = effective_alive
 
                 # Route not found in the current routing table
-                if not is_route_exists(ip_args):
+                if not route_present:
                     print_debug(f"    [NEW_ROUTE_DETECTED] route: [{route} {vrf_opt}]")
-                    # Add route if check-target alive
-                    if is_alive:
+                    # Add route once the success threshold is met
+                    if effective_alive:
                         print_debug(f'    [ ADD ] -- ip route add {ip_args}\n###')
                         rc, command = rc_cmd(f'ip route add {ip_args}')
                         # If something is wrong and gateway not added
@@ -816,7 +858,8 @@ if __name__ == '__main__':
                             )
                     else:
                         print_debug(
-                            f'    [ TARGET_FAIL ] target checks fails for [{nhc.pretty_targets}], do nothing'
+                            f'    [ TARGET_FAIL ] target checks fails for [{nhc.pretty_targets}] '
+                            f'(fail {hstate["fail"]}, success {hstate["success"]}/{nhc.success_count}), do nothing'
                         )
                         journal.send(
                             f'Check fail for route {route} interface "{nhc.conf_iface}" target {nhc.pretty_targets} proto {nhc.proto} '
@@ -824,11 +867,12 @@ if __name__ == '__main__':
                             SYSLOG_IDENTIFIER=my_name,
                         )
                 else:
-                    # Route was added, check if the target is alive
-                    # We should delete route if check fails only if route exists in the routing table
-                    if not is_alive:
+                    # Route is installed; withdraw it only once the failure
+                    # threshold is reached (failure_count consecutive failures).
+                    if not effective_alive:
                         print_debug(
-                            f"Next_hop {next_hop} fail, target check didn't pass"
+                            f"Next_hop {next_hop} fail, target check didn't pass "
+                            f"({hstate['fail']}/{nhc.failure_count} consecutive failures)"
                         )
                         delete_route(ip_args)
 
