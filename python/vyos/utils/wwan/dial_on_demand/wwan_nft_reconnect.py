@@ -6,6 +6,7 @@
 # this script uses ModemManager to bring it up on demand.
 
 from netfilterqueue import NetfilterQueue
+import os
 import subprocess
 import re
 import asyncio
@@ -24,24 +25,23 @@ shutdown_event = asyncio.Event()
 packet_queue = asyncio.Queue(maxsize=1024)
 modem_ready_event = asyncio.Event()
 
-# returns dict {interface: modem_id}
+# returns dict {interface: interface_number}
 
 def get_modem_mapping():
-    result = subprocess.run(["mmcli", "-L"], capture_output=True, text=True)
-    modems = re.findall(r'Modem/(\d+)', result.stdout)
-
+    # Enumerate WWAN netdevs from the kernel instead of shelling out to
+    # ModemManager (mmcli). The FSM (igos-wwan-manager) is the single owner of
+    # ModemManager; this helper only needs the set of WWAN interfaces, keyed by
+    # the FSM interface number (wwanN -> N) that every FSM D-Bus call uses.
     mapping = {}
+    try:
+        entries = os.listdir('/sys/class/net')
+    except OSError:
+        return mapping
 
-    for modem_index in modems:
-        info = subprocess.run(
-            ["mmcli", "-m", modem_index],
-            capture_output=True,
-            text=True
-        ).stdout
-
-        ports = re.findall(r'(wwan\d+)\s+\(net\)', info)
-        for port in ports:
-            mapping[port] = int(modem_index)
+    for entry in entries:
+        m = re.fullmatch(r'wwan(\d+)', entry)
+        if m:
+            mapping[entry] = int(m.group(1))
 
     return mapping
 
