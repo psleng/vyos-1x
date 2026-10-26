@@ -330,8 +330,8 @@ class TestWlbFailoverLeases(TestCase):
                              'wwan0': {'state': wwan_up}},
         }
 
-    def _active(self, lb, dod=True):
-        with patch.object(self.wlb, 'on_demand_check', return_value=dod):
+    def _active(self, lb, managed=True):
+        with patch.object(self.wlb, 'lease_managed_check', return_value=managed):
             return self.wlb._active_failover_wwans(lb)
 
     def test_primary_up_wwan_managed_not_active(self):
@@ -348,14 +348,16 @@ class TestWlbFailoverLeases(TestCase):
         self.assertEqual(managed, set())
         self.assertEqual(active, set())
 
-    def test_non_on_demand_wwan_not_managed(self):
-        managed, active = self._active(self._lb(eth_up=False), dod=False)
+    def test_non_lease_managed_wwan_not_managed(self):
+        # dial-on-demand (and always-on) are not lease-managed: WLB leaves their
+        # bearer to the dial-on-demand duty cycle rather than pinning it up.
+        managed, active = self._active(self._lb(eth_up=False), managed=False)
         self.assertEqual(managed, set())
 
     def test_reconcile_acquires_and_releases(self):
         client = Mock()
         clients = {'wwan0': client}
-        with patch.object(self.wlb, 'on_demand_check', return_value=True):
+        with patch.object(self.wlb, 'lease_managed_check', return_value=True):
             self.wlb.reconcile_failover_leases(self._lb(eth_up=False), clients)
             client.bearer_lease_acquire.assert_called_once_with(
                 0, 'wlb-failover', ttl=self.wlb.failover_lease_ttl,
@@ -366,7 +368,7 @@ class TestWlbFailoverLeases(TestCase):
     def test_reconcile_survives_client_error(self):
         client = Mock()
         client.bearer_lease_acquire.side_effect = RuntimeError('dbus down')
-        with patch.object(self.wlb, 'on_demand_check', return_value=True):
+        with patch.object(self.wlb, 'lease_managed_check', return_value=True):
             self.wlb.reconcile_failover_leases(self._lb(eth_up=False),
                                                {'wwan0': client})
 
@@ -378,7 +380,7 @@ class TestWlbFailoverLeases(TestCase):
         clients = {'wwan0': client}
         hold = {}
         hd = self.wlb.failover_release_holddown
-        with patch.object(self.wlb, 'on_demand_check', return_value=True):
+        with patch.object(self.wlb, 'lease_managed_check', return_value=True):
             # t0: wwan0 is the active egress -> acquire + record last-active
             self.wlb.reconcile_failover_leases(self._lb(eth_up=False),
                                                clients, hold, now=1000)
@@ -399,7 +401,7 @@ class TestWlbFailoverLeases(TestCase):
         clients = {'wwan0': client}
         hold = {}
         hd = self.wlb.failover_release_holddown
-        with patch.object(self.wlb, 'on_demand_check', return_value=True):
+        with patch.object(self.wlb, 'lease_managed_check', return_value=True):
             self.wlb.reconcile_failover_leases(self._lb(eth_up=False),
                                                clients, hold, now=1000)
             self.wlb.reconcile_failover_leases(self._lb(eth_up=True),
@@ -448,12 +450,23 @@ class TestWlbOnDemandPredicates(TestCase):
         self.assertFalse(
             self.wlb.on_demand_check('eth0', conf=self._conf('dial-on-demand')))
 
-    def test_both_on_demand_modes_are_lease_managed(self):
-        # Both on-demand modes get the lease: a dial-on-demand traffic trigger
-        # cannot bootstrap an idle bearer under WLB's policy routing, so the
-        # route-independent lease raises it for both.
-        for mode in ('connect-on-demand', 'dial-on-demand'):
-            self.assertTrue(
-                self.wlb.on_demand_check('wwan0', conf=self._conf(mode)), mode)
+    def test_lease_managed_only_connect_on_demand(self):
+        # Only connect-on-demand is pinned up by the WLB failover lease. An idle
+        # connect-on-demand bearer goes fully link-down with no route, so the
+        # route-independent lease is the only way to bootstrap it.
+        self.assertTrue(
+            self.wlb.lease_managed_check(
+                'wwan0', conf=self._conf('connect-on-demand')))
+        # dial-on-demand is NOT lease-managed: its dial-on-demand@ service owns a
+        # traffic-triggered duty cycle so a metered cellular backup idles down
+        # between flows instead of being pinned up for the whole outage.
         self.assertFalse(
-            self.wlb.on_demand_check('wwan0', conf=self._conf('always-on')))
+            self.wlb.lease_managed_check(
+                'wwan0', conf=self._conf('dial-on-demand')))
+        # always-on and non-WWAN are never lease-managed.
+        self.assertFalse(
+            self.wlb.lease_managed_check(
+                'wwan0', conf=self._conf('always-on')))
+        self.assertFalse(
+            self.wlb.lease_managed_check(
+                'eth0', conf=self._conf('dial-on-demand')))

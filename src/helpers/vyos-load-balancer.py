@@ -117,18 +117,38 @@ def on_demand_check(ifname, conf=None):
     """True for a WWAN in either on-demand mode (connect-on-demand or
     dial-on-demand).
 
-    Both modes park the bearer idle (no IP), so WLB manages them for failover:
-    the modem-registration health spoof keeps them selectable while idle, and
-    the ``wlb-failover`` lease deterministically raises the bearer when the WWAN
-    becomes the active egress and drops it on failback.  The lease is used for
-    both modes on purpose: an idle bearer has no route, so a dial-on-demand
-    traffic trigger cannot bootstrap it under WLB's policy routing -- the lease
-    (a direct D-Bus demand to the FSM) is route-independent and deterministic.
-    dial-on-demand's own data-path trigger still owns the normal, non-failover
-    duty cycle; the lease is just an additional demand source.
+    Both modes park the bearer idle (no IP), so WLB applies the
+    modem-registration health spoof to keep them *selectable* as a failover
+    target while idle (see :func:`health_check`); otherwise the normal IP health
+    check would mark an idle bearer permanently down and WLB would never steer
+    to it.  How the bearer is then *raised* differs by mode and is decided by
+    :func:`lease_managed_check`: connect-on-demand is pinned up with a continuous
+    ``wlb-failover`` lease, while dial-on-demand keeps its own traffic-triggered
+    duty cycle.
     """
     return _wwan_connection_mode(ifname, conf) in ('connect-on-demand',
                                                    'dial-on-demand')
+
+
+def lease_managed_check(ifname, conf=None):
+    """True for a WWAN whose failover bearer WLB pins up with a continuous
+    ``wlb-failover`` lease.
+
+    Only ``connect-on-demand`` is lease-pinned: once it becomes the active
+    failover egress WLB holds the bearer up for the whole outage.  An idle
+    connect-on-demand interface goes fully link-down with no route, so nothing
+    on the data path can bootstrap it -- the route-independent lease (a direct
+    D-Bus demand to the FSM) is the only deterministic way to raise it.
+
+    ``dial-on-demand`` is deliberately NOT lease-managed.  Its ``dial-on-demand@``
+    service owns a traffic-triggered duty cycle so a metered cellular backup
+    idles down between flows and dials up only on real traffic.  WLB keeps it
+    selectable via the health spoof and marks traffic to it when it is the
+    active egress; the dial-on-demand nftables trigger (keyed on that WLB mark,
+    see install_wwan_nft_rules) then raises the bearer on demand instead of a
+    continuous lease pinning it up for the whole outage.
+    """
+    return _wwan_connection_mode(ifname, conf) == 'connect-on-demand'
 
 
 def _in_failover_rule(ifname, lb):
@@ -197,17 +217,21 @@ def health_check(ifname, conf, state, test_defaults, lb):
     return True
 
 def _active_failover_wwans(lb):
-    """Return (managed, active) sets of on-demand WWAN interface names.
+    """Return (managed, active) sets of lease-managed WWAN interface names.
 
-    * ``managed`` -- every on-demand WWAN (connect-on-demand or dial-on-demand)
-      that is a member of some failover rule (WLB holds its bearer lease).
+    * ``managed`` -- every lease-managed WWAN (connect-on-demand only; see
+      :func:`lease_managed_check`) that is a member of some failover rule (WLB
+      holds its bearer lease).
     * ``active``  -- the subset that is currently the *selected* failover egress
       (all higher-priority members of its rule are down), so the bearer must be
       held up.
 
-    Both on-demand modes are lease-managed: the lease deterministically raises
-    the bearer on failover regardless of routing/traffic (an idle bearer has no
-    route, so a traffic trigger cannot bootstrap it).  Uses the same selection
+    Only connect-on-demand is lease-managed: the lease deterministically raises
+    the bearer on failover regardless of routing/traffic (an idle
+    connect-on-demand bearer has no route, so a traffic trigger cannot bootstrap
+    it).  dial-on-demand is intentionally excluded -- it keeps its own
+    traffic-triggered duty cycle (its nftables trigger is keyed on the WLB
+    mark), so WLB must not pin its metered bearer up.  Uses the same selection
     logic (:func:`wlb_weight_interfaces`) the nftables marking is built from, so
     the lease tracks exactly which link WLB is steering traffic to.
     """
@@ -219,7 +243,7 @@ def _active_failover_wwans(lb):
             continue
         members = rule_conf.get('interface') or {}
         wwan_members = [m for m in members
-                        if m.startswith('wwan') and on_demand_check(m)]
+                        if m.startswith('wwan') and lease_managed_check(m)]
         if not wwan_members:
             continue
         managed.update(wwan_members)
@@ -230,15 +254,19 @@ def _active_failover_wwans(lb):
     return managed, active
 
 def reconcile_failover_leases(lb, clients, hold_state=None, now=None):
-    """Hold a bearer lease on each on-demand WWAN WLB is failing over to.
+    """Hold a bearer lease on each lease-managed WWAN WLB is failing over to.
 
-    Event-driven bearer control: while an on-demand (connect-on-demand or
-    dial-on-demand) cellular link is the active failover egress, WLB renews a
-    ``wlb-failover`` lease each loop so the modem FSM raises and keeps the bearer
-    up for the whole outage.  When a higher-priority path recovers the lease is
-    released - but only after it has stayed up for ``failover_release_holddown``
-    seconds, so a flapping better path cannot thrash the metered bearer.  No-op
-    unless a failover rule actually contains an on-demand WWAN.
+    Event-driven bearer control: while a lease-managed (connect-on-demand)
+    cellular link is the active failover egress, WLB renews a ``wlb-failover``
+    lease each loop so the modem FSM raises and keeps the bearer up for the whole
+    outage.  When a higher-priority path recovers the lease is released - but
+    only after it has stayed up for ``failover_release_holddown`` seconds, so a
+    flapping better path cannot thrash the metered bearer.  No-op unless a
+    failover rule actually contains a lease-managed WWAN.
+
+    dial-on-demand WWANs are deliberately not lease-managed (see
+    :func:`lease_managed_check`): their ``dial-on-demand@`` service owns the
+    bearer duty cycle, so WLB never holds a lease for them here.
 
     ``hold_state`` (ifname -> last time the WWAN was the active egress) and
     ``now`` are injectable for testing; the daemon passes a persistent dict.
