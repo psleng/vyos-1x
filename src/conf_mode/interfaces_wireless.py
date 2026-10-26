@@ -247,10 +247,11 @@ def verify(wifi):
             required_band = '5' if channel > 14 else '2.4'
         if required_band is not None:
             supported_bands = wifi_phy_supported_bands(physical_device)
-            if supported_bands is not None and required_band not in supported_bands:
-                raise ConfigError(
-                    f'Wireless mode "{mode}" requires the {required_band} GHz band, '
-                    f'which physical device "{physical_device}" does not provide!')
+            if supported_bands is not None:
+                if required_band not in supported_bands:
+                    raise ConfigError(
+                        f'Wireless mode "{mode}" requires the {required_band} GHz band, '
+                        f'which physical device "{physical_device}" does not provide!')
 
         if 'capabilities' in wifi and 'he' in wifi['capabilities']:
             if 'channel_set_width' not in wifi['capabilities']['he']:
@@ -288,11 +289,12 @@ def verify(wifi):
             # hostapd configuration the hardware cannot honor.
             if he_band is not None:
                 supported_bands = wifi_phy_supported_bands(physical_device)
-                if supported_bands is not None and he_band not in supported_bands:
-                    raise ConfigError(
-                        f'Physical device "{physical_device}" does not provide a '
-                        f'{he_band} GHz band required by 802.11ax operating class '
-                        f'{op_class}!')
+                if supported_bands is not None:
+                    if he_band not in supported_bands:
+                        raise ConfigError(
+                            f'Physical device "{physical_device}" does not provide a '
+                            f'{he_band} GHz band required by 802.11ax operating class '
+                            f'{op_class}!')
 
             # Management Frame Protection (MFP) is mandatory for WPA3 in 6 GHz
             if dict_search('security.wpa.mode', wifi) == 'wpa3' and he_band == '6':
