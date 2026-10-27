@@ -226,18 +226,8 @@ class PacketHandler:
 
 
 def get_all_wwan_options():
-    "Map each WWAN interface to its modem index, excluding LAN-side (inbound) WWANs"
-    result = subprocess.run(["cli-shell-api", "showConfig", "--show-active-only", "--show-commands"], capture_output=True, text=True)
-    config = result.stdout.replace("'", "")
-    wwan_to_check = get_modem_mapping()
-
-    if "load-balancing" not in config:
-        return wwan_to_check
-
-    # A WWAN used as an 'inbound-interface' is LAN-facing, so it must not be
-    # dialed on demand. Exclude any such interface from the mapping.
-    inbound_interfaces = set(re.findall(r"inbound-interface\s+(\S+)", config))
-    return {k: v for k, v in wwan_to_check.items() if k not in inbound_interfaces}
+    "Map each WWAN interface to its modem index"
+    return get_modem_mapping()
 
 # for the interface, get the netfilter queue number
 def get_interface_queue_num(interface):

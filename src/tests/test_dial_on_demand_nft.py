@@ -8,11 +8,11 @@
 
 """Tests for the dial-on-demand nftables trigger generation.
 
-The key behaviour under test: when a dial-on-demand WWAN is governed by a WAN
-load-balancing failover rule, the generated rules include a trigger keyed on the
-WLB fwmark (fired AFTER WLB marking), so traffic WLB steers to the idle link can
-bootstrap a dial. Without it the RAW-hook FIB rule cannot match WLB-steered
-traffic and the bearer would have to be pinned up with a continuous lease.
+The key behaviour under test: the generated rules intercept router-originated
+traffic leaving the WWAN (RAW output hook) and LAN->WAN forwarded traffic whose
+FIB egress resolves to the WWAN (RAW prerouting hook), queueing both so an idle
+dial-on-demand bearer can be bootstrapped. IPv4 and IPv6 unicast must both reach
+the trigger; only IPv6 multicast chatter is dropped first.
 """
 
 import sys
@@ -45,30 +45,23 @@ class TestIpv6TrapParity(IsolatedAsyncioTestCase):
         # IPv6 unicast both reach the NFQUEUE trigger.
         self.assertIn('oifname wwan0 queue num 1', cmd)
 
-    async def _run(self, config):
+    async def _run(self):
         captured = {}
 
         async def fake_nft(cmd=''):
             captured['cmd'] = cmd
 
-        with patch.object(nft, 'get_config', return_value=config), \
-             patch.object(nft, 'get_inbound_interfaces', return_value=['eth0']), \
+        with patch.object(nft, 'get_inbound_interfaces', return_value=['eth0']), \
              patch.object(nft, 'async_run_nft_cmd', AsyncMock(side_effect=fake_nft)):
             await nft.generate_nft_rules(interface='wwan0')
         return captured.get('cmd', '')
 
     async def test_full_ruleset_does_not_blanket_drop_ipv6(self):
-        cfg = {
-            'interface_health': {'eth0': {}, 'wwan0': {}},
-            'rule': {'10': {
-                'interface': {'wwan0': {'weight': '1'}},
-                'inbound_interface': 'any',
-                'failover': {},
-            }},
-        }
-        cmd = await self._run(cfg)
+        cmd = await self._run()
         self.assertNotIn('meta nfproto ipv6 drop', cmd)
         self.assertIn('ip6 daddr ff00::/8 drop', cmd)
         # The forwarded prerouting queue (family-agnostic inet+fib) is present,
         # so forwarded IPv6 unicast resolving to wwan0 is queued too.
         self.assertIn('fib daddr oifname "wwan0"', cmd)
+        # LAN-side forwarded traffic (eth0) is the trigger source.
+        self.assertIn('iifname { eth0 }', cmd)
