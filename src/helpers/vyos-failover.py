@@ -40,9 +40,13 @@ def _interface_modem_check(iface):
     would mark the interface permanently unhealthy -- failover would then never
     select it as a backup nexthop and the on-demand trigger would never get the
     traffic it needs to dial. Instead treat the interface as healthy when the
-    modem is REGISTERED on the network (ready to dial on demand) or already
-    connected, using the ModemManager modem state (8 REGISTERED .. 11 CONNECTED)
-    combined with the FSM state.
+    FSM reports the link is on the network (registered-and-idle, connecting, or
+    already connected).
+
+    The FSM owns the interface, so its published ``fsm_state`` is the sole
+    source of truth here -- we deliberately do NOT consult the
+    ModemManager-derived ``modem_state`` field, to avoid coupling failover health
+    to a second, lower-level signal the FSM already subsumes.
 
     NB: this runs on every failover poll from the long-lived daemon loop, so the
     client MUST be closed each time. A leaked WWANClientSync keeps its D-Bus
@@ -67,16 +71,13 @@ def _interface_modem_check(iface):
         print_debug(f'    [ MODEM_CHECK ] health check failed for {iface}: {exc}')
         return False
 
-    # MMModemState: 8 REGISTERED, 9 DISCONNECTING, 10 CONNECTING, 11 CONNECTED
-    # all mean "on the network and able to carry a bearer".
+    # The FSM is the authoritative owner of the interface; a dial-on-demand
+    # link is usable as a backup next-hop whenever the FSM reports it on the
+    # network. REGISTERED_IDLE (parked, ready to dial), CONNECTING (bringing the
+    # bearer up) and CONNECTED all qualify.
     if status is not None:
-        try:
-            modem_state = int(status.get('modem_state', -1))
-            fsm_state = status.get('fsm_state', 'DISCONNECTED')
-        except (TypeError, ValueError):
-            modem_state = -1
-            fsm_state = 'DISCONNECTED'
-        if modem_state >= 8 and fsm_state in ('CONNECTED', 'REGISTERED_IDLE', 'CONNECTING'):
+        fsm_state = status.get('fsm_state', 'DISCONNECTED')
+        if fsm_state in ('CONNECTED', 'REGISTERED_IDLE', 'CONNECTING'):
             return True
 
     return False
@@ -95,6 +96,39 @@ debug = False
 debug_output_journal = False
 debug_output_print = True
 
+def _wwan_connection_mode(ifname):
+    """Return the effective connection-mode of a WWAN interface, or None for a
+    non-WWAN interface / unset mode."""
+    if not ifname.startswith('wwan'):
+        return None
+    return Config().return_effective_value(
+        ['interfaces', 'wwan', ifname, 'connection-mode'])
+
+
+def on_demand_check(ifname):
+    """True for a WWAN in either on-demand mode (connect-on-demand or
+    dial-on-demand).
+
+    Both modes park the bearer idle, so failover must use the
+    modem-registration spoof (:func:`_interface_modem_check`) to keep the link
+    selectable as a backup next-hop while idle; a normal IP probe would mark it
+    permanently down.  How the bearer is then raised differs by mode:
+    dial-on-demand relies on its own traffic trigger once the route is installed
+    via it, while connect-on-demand is raised deterministically by the failover
+    bearer lease (:func:`reconcile_failover_leases`).
+    """
+    return _wwan_connection_mode(ifname) in ('connect-on-demand',
+                                             'dial-on-demand')
+
+
+def connect_on_demand_check(ifname):
+    """True only for a connect-on-demand WWAN -- the mode that needs the
+    failover bearer lease (it parks fully link-down with no route, so nothing on
+    the data path can bootstrap it; dial-on-demand uses its traffic trigger
+    instead)."""
+    return _wwan_connection_mode(ifname) == 'connect-on-demand'
+
+
 def dial_on_demand_check(ifname):
     """
     Return True if ifname is a WWAN interface configured for dial-on-demand.
@@ -102,11 +136,105 @@ def dial_on_demand_check(ifname):
     Only wwanX interfaces with dial-on-demand use the modem bearer check; every
     other interface (ethX, ...) uses the normal IP health check.
     """
-    if not ifname.startswith('wwan'):
-        return False
-    conf = Config()
-    return bool(conf.exists_effective(
-        ['interfaces', 'wwan', ifname, 'connection-mode', 'dial-on-demand']))
+    return _wwan_connection_mode(ifname) == 'dial-on-demand'
+
+
+# ── connect-on-demand failover bearer lease ─────────────────────────────────
+# A connect-on-demand WWAN parks fully link-down with no route, so when it
+# becomes the active (lowest-metric healthy) failover next-hop nothing on the
+# data path can bootstrap it. Hold a TTL-bounded bearer lease on the modem FSM
+# so it raises the bearer deterministically for the whole outage, and release it
+# (after a hold-down) when a higher-priority path recovers. dial-on-demand WWANs
+# are NOT leased -- their own traffic trigger dials once the route is installed
+# via them.
+failover_lease_owner = 'failover'
+failover_lease_ttl = 120        # spans several main-loop iterations
+failover_release_holddown = 30  # keep the metered bearer up briefly on failback
+
+
+def _bearer_lease(iface, acquire, ttl=None, reason=''):
+    """Acquire or release the connect-on-demand failover bearer lease for iface.
+
+    Uses a short-lived WWANClientSync (create-use-close) to avoid leaking D-Bus
+    connections across the long-lived daemon loop -- the same discipline as
+    _interface_modem_check. The lease lives in the modem FSM (TTL-bounded), so it
+    persists after the client closes.
+    """
+    ifnum = int(iface[len('wwan'):])
+    client = WWANClientSync()
+    try:
+        client.add_interface(ifnum)
+        if acquire:
+            client.bearer_lease_acquire(ifnum, failover_lease_owner, ttl=ttl,
+                                        reason=reason)
+        else:
+            client.bearer_lease_release(ifnum, failover_lease_owner)
+    finally:
+        client.close()
+
+
+def active_connect_on_demand_wwans(nexthops, alive_by_iface):
+    """Return (managed, active) sets of connect-on-demand WWAN interfaces for one
+    route's next-hops.
+
+    * managed -- every connect-on-demand WWAN next-hop (lease-managed).
+    * active  -- the connect-on-demand WWAN that is the lowest-metric ALIVE
+      next-hop (all higher-priority next-hops are down), so its bearer must be
+      raised. This mirrors the kernel's metric-based selection that the installed
+      routes produce, so the lease tracks exactly the link failover steers to.
+    """
+    managed = set()
+    for nhc in nexthops:
+        iface = nhc.conf_iface
+        if iface and iface.startswith('wwan') and connect_on_demand_check(iface):
+            managed.add(iface)
+    active = set()
+    alive = [nhc for nhc in nexthops if alive_by_iface.get(nhc.conf_iface)]
+    if alive:
+        winner = min(alive, key=lambda n: int(n.conf_metric))
+        if winner.conf_iface in managed:
+            active.add(winner.conf_iface)
+    return managed, active
+
+
+def reconcile_failover_leases(all_routes, alive_by_iface, hold_state, now=None):
+    """Hold a bearer lease on each connect-on-demand WWAN failover is failing
+    over to, releasing it (after a hold-down) when a better path recovers.
+
+    ``hold_state`` (iface -> last time it was the active egress) and ``now`` are
+    injectable for testing; the daemon passes a persistent dict.
+    """
+    if now is None:
+        now = time.time()
+    managed = set()
+    active = set()
+    for route_config in all_routes:
+        m, a = active_connect_on_demand_wwans(route_config.nexthops,
+                                              alive_by_iface)
+        managed |= m
+        active |= a
+    for iface in managed:
+        try:
+            if iface in active:
+                hold_state[iface] = now
+                _bearer_lease(iface, acquire=True, ttl=failover_lease_ttl,
+                              reason='active failover target')
+            else:
+                last_active = hold_state.get(iface)
+                if (last_active is not None
+                        and now - last_active < failover_release_holddown):
+                    # Better path recovered but not yet stable: keep the bearer
+                    # up through the hold-down so a flapping link does not drop
+                    # the metered cellular connection.
+                    _bearer_lease(iface, acquire=True, ttl=failover_lease_ttl,
+                                  reason='failover release hold-down')
+                else:
+                    hold_state.pop(iface, None)
+                    _bearer_lease(iface, acquire=False)
+        except Exception as exc:
+            # A transient D-Bus/modem hiccup must not kill the daemon; the lease
+            # TTL makes a missed renewal self-correcting.
+            print_debug(f'    [ LEASE ] reconcile failed for {iface}: {exc}')
 
 
 def print_debug(*args, **kwargs):
@@ -205,7 +333,7 @@ def is_target_alive(
         if options.interface:
             iface_opt = f'-I {options.interface}'
 
-        if dial_on_demand_check(target_iface):
+        if on_demand_check(target_iface):
             return _interface_modem_check(target_iface)
 
         match proto:
@@ -275,12 +403,15 @@ NextHopNamedTuple = namedtuple(
         'pretty_targets',
         'timeout',
         'onlink',
+        'failure_count',
+        'success_count',
     ],
 )
 
 
 def get_nexthop_config_vars(
-    destination, vrf, vrf_opt, nexthop_config, next_hop, dhcp_interface
+    destination, vrf, vrf_opt, nexthop_config, next_hop, dhcp_interface,
+    device_interface=None
 ):
     port = nexthop_config.get('check').get('port')
 
@@ -315,7 +446,8 @@ def get_nexthop_config_vars(
         vrf_opt=vrf_opt,
         # For next-hop interface is mandatory
         # For dhcp-interface it may be not given, then dhcp-interface is used
-        conf_iface=nexthop_config.get('interface', dhcp_interface),
+        conf_iface=(nexthop_config.get('interface') or dhcp_interface
+                    or device_interface),
         conf_metric=int(nexthop_config.get('metric')),
         port=port,
         port_opt=f'port {port}' if port else '',
@@ -325,6 +457,14 @@ def get_nexthop_config_vars(
         pretty_targets=pretty_targets,
         timeout=nexthop_config.get('check').get('timeout'),
         onlink='onlink' if 'onlink' in nexthop_config else '',
+        # Hysteresis: a next-hop must fail the check for this many consecutive
+        # polls before its route is withdrawn, and pass for this many
+        # consecutive polls before its route is (re)installed. Defaults to 1
+        # (immediate transition) so behaviour is unchanged unless configured --
+        # mainly useful to stop a lossy link (e.g. Wi-Fi) from flapping on a
+        # single dropped probe.
+        failure_count=int(nexthop_config.get('check').get('failure_count') or 1),
+        success_count=int(nexthop_config.get('check').get('success_count') or 1),
     )
 
 
@@ -357,6 +497,17 @@ def get_route_config(route, route_config, config_path, vrf):
                 'dhcp_interface'
             ).items()
         )
+    if route_config.get('interface'):
+        # Via-less interface routes (e.g. a point-to-point cellular WWAN with no
+        # gateway): installed as `<route> dev <iface>`. The tag value is the
+        # egress interface; there is no next-hop to resolve.
+        nexthops.extend(
+            get_nexthop_config_vars(
+                route, vrf, vrf_opt, if_config, None, None,
+                device_interface=interface
+            )
+            for interface, if_config in route_config.get('interface').items()
+        )
     nexthops = tuple(nexthops)
     return RouteNamedTuple(
         destination=route,
@@ -370,19 +521,25 @@ def get_route_config(route, route_config, config_path, vrf):
 def parse_config(config, path):
     parsed = []
     vrf = config.get('vrf_context', '')
-    for route, route_config in config.get('route').items():
-        parsed.append(get_route_config(route, route_config, path, vrf))
+    # route (IPv4) and route6 (IPv6) share the same next-hop/check model; the
+    # route prefix and next-hop values carry the family, which `ip route`
+    # auto-detects, so both are parsed into the same RouteNamedTuple list.
+    for key in ('route', 'route6'):
+        for route, route_config in (config.get(key) or {}).items():
+            parsed.append(get_route_config(route, route_config, path, vrf))
     return parsed
 
 
 def flush_all_routes():
     print_debug("flush_all_routes called")
-    flush_cmd = 'ip route flush protocol failover table all'
-    run(flush_cmd)
-    journal.send(
-        flush_cmd,
-        SYSLOG_IDENTIFIER=my_name,
-    )
+    # Flush both families' failover routes (IPv4 and IPv6 are separate tables).
+    for flush_cmd in ('ip route flush protocol failover table all',
+                      'ip -6 route flush protocol failover table all'):
+        run(flush_cmd)
+        journal.send(
+            flush_cmd,
+            SYSLOG_IDENTIFIER=my_name,
+        )
 
 
 kill_called = False
@@ -397,8 +554,12 @@ def kill_handler(*args):
 
 
 def get_ip_command_args(nhc):
+    # A via-less interface route (e.g. a point-to-point cellular WWAN with no
+    # gateway) is installed as `<route> dev <iface>`; a gateway next-hop keeps
+    # the `via <next-hop>` form.
+    via = f'via {nhc.next_hop} ' if nhc.next_hop else ''
     return (
-        f'{nhc.route} via {nhc.next_hop} dev {nhc.conf_iface} '
+        f'{nhc.route} {via}dev {nhc.conf_iface} '
         f'{nhc.onlink} metric {nhc.conf_metric} {nhc.vrf_opt} proto failover'
     )
 
@@ -589,6 +750,17 @@ if __name__ == '__main__':
     # Translates nexthop with dhcp_interface to usual nexthop
     nexthop_by_dhcp_nexthop = {}
 
+    # iface -> last time it was the active (selected) failover egress; drives the
+    # connect-on-demand bearer-lease release hold-down across loop iterations.
+    wwan_lease_hold_state = {}
+
+    # Per-next-hop health hysteresis counters, persisted across loop iterations.
+    # key -> {'fail': consecutive failed polls, 'success': consecutive OK polls}.
+    # A route is only withdrawn after `failure_count` consecutive failures and
+    # only (re)installed after `success_count` consecutive successes, so a lossy
+    # link does not flap on a single dropped probe.
+    nexthop_health_state = {}
+
     had_sleeps = True
     while not kill_called:
         # Check in case daemon was launched without routes
@@ -597,6 +769,11 @@ if __name__ == '__main__':
 
         update_configuration(last_modification_times, all_routes, config_dir)
         had_sleeps = False
+
+        # Per-iteration health snapshot (iface -> alive bool), collected as each
+        # next-hop is checked below and consumed by the connect-on-demand lease
+        # reconcile at the end of the iteration.
+        alive_by_iface = {}
 
         for route_config in all_routes:
             if kill_called:
@@ -630,11 +807,42 @@ if __name__ == '__main__':
                     # Perle change end
                 )
 
+                # Update this next-hop's consecutive fail/success counters so a
+                # single dropped probe on a lossy link does not flip the route.
+                state_key = (vrf or '', route, nhc.conf_iface or '',
+                             nhc.conf_metric, nhc.next_hop or '')
+                hstate = nexthop_health_state.setdefault(
+                    state_key, {'fail': 0, 'success': 0})
+                if is_alive:
+                    hstate['success'] += 1
+                    hstate['fail'] = 0
+                else:
+                    hstate['fail'] += 1
+                    hstate['success'] = 0
+
+                route_present = is_route_exists(ip_args)
+
+                # Effective (hysteresis-smoothed) health: bring a route up only
+                # after success_count consecutive OK polls, take it down only
+                # after failure_count consecutive failed polls, and otherwise
+                # keep whatever state the route is already in.
+                if route_present:
+                    effective_alive = hstate['fail'] < nhc.failure_count
+                else:
+                    effective_alive = hstate['success'] >= nhc.success_count
+
+                # Record this next-hop's (smoothed) health for the
+                # connect-on-demand lease reconcile at the end of the iteration
+                # (which next-hop is the active egress is decided from this
+                # snapshot).
+                if nhc.conf_iface:
+                    alive_by_iface[nhc.conf_iface] = effective_alive
+
                 # Route not found in the current routing table
-                if not is_route_exists(ip_args):
+                if not route_present:
                     print_debug(f"    [NEW_ROUTE_DETECTED] route: [{route} {vrf_opt}]")
-                    # Add route if check-target alive
-                    if is_alive:
+                    # Add route once the success threshold is met
+                    if effective_alive:
                         print_debug(f'    [ ADD ] -- ip route add {ip_args}\n###')
                         rc, command = rc_cmd(f'ip route add {ip_args}')
                         # If something is wrong and gateway not added
@@ -650,7 +858,8 @@ if __name__ == '__main__':
                             )
                     else:
                         print_debug(
-                            f'    [ TARGET_FAIL ] target checks fails for [{nhc.pretty_targets}], do nothing'
+                            f'    [ TARGET_FAIL ] target checks fails for [{nhc.pretty_targets}] '
+                            f'(fail {hstate["fail"]}, success {hstate["success"]}/{nhc.success_count}), do nothing'
                         )
                         journal.send(
                             f'Check fail for route {route} interface "{nhc.conf_iface}" target {nhc.pretty_targets} proto {nhc.proto} '
@@ -658,11 +867,12 @@ if __name__ == '__main__':
                             SYSLOG_IDENTIFIER=my_name,
                         )
                 else:
-                    # Route was added, check if the target is alive
-                    # We should delete route if check fails only if route exists in the routing table
-                    if not is_alive:
+                    # Route is installed; withdraw it only once the failure
+                    # threshold is reached (failure_count consecutive failures).
+                    if not effective_alive:
                         print_debug(
-                            f"Next_hop {next_hop} fail, target check didn't pass"
+                            f"Next_hop {next_hop} fail, target check didn't pass "
+                            f"({hstate['fail']}/{nhc.failure_count} consecutive failures)"
                         )
                         delete_route(ip_args)
 
@@ -674,5 +884,13 @@ if __name__ == '__main__':
             # Note: a dial-on-demand WWAN bearer is NOT torn down on failback
             # here. Dial-on-demand idles its own bearer down when no traffic is
             # directed at it, so vyos-failover does not need to disconnect it.
+
+        # End of iteration: raise/hold a bearer lease on any connect-on-demand
+        # WWAN that is now the active (lowest-metric healthy) failover egress,
+        # and release it (after a hold-down) once a better path recovers. No-op
+        # unless a connect-on-demand WWAN is actually a failover next-hop.
+        if not kill_called:
+            reconcile_failover_leases(all_routes, alive_by_iface,
+                                      wwan_lease_hold_state)
 
     print_debug(f"Out of main loop, {kill_called=}")

@@ -34,7 +34,8 @@ interfaces
         ├── connection-mode <always-on|connect-on-demand|dial-on-demand>
         ├── dial-on-demand                                # traffic-trigger settings (used only with connection-mode dial-on-demand)
         │     ├── idle-timeout <10-600>                   #   default: 30  (s with no egress traffic before the bearer is dropped to REGISTERED_IDLE)
-        │     └── connect-timeout <30-600>                #   default: 30  (s to wait for the bearer to come up after traffic triggers a dial)
+        │     ├── connect-timeout <30-600>                #   default: 30  (s to wait for the bearer to come up after traffic triggers a dial)
+        │     └── flush-timeout <30-600>                  #   default: 60  (s to hold triggering packets waiting for the bearer before dropping them and re-arming; clamped to >= connect-timeout)
         ├── connect-retry <conservative|normal|aggressive>  # bearer connect-retry backoff while demand is held (unset: failed-retry schedule applies)
         ├── network-mode <auto|lte|5g|5g-only|3g|2g>      # modem-level RAT selection
         ├── network-time                                  # NITZ → system clock (opt-in; presence enables; NAS signaling, no data traffic)
@@ -1151,6 +1152,19 @@ The other difference from always-on is the **explicit** `disconnect_bearer()`
 notifying Linux and suppresses auto-reconnect until the next `connect_bearer()`.
 A transient/unexpected failure while connected does **not** suppress recovery.
 
+**Traffic trigger is dual-stack.**  The `dial-on-demand@` traffic trigger (the
+NFQUEUE trap that dials when it sees outbound traffic for `wwanN`) queues both
+IPv4 **and** IPv6 *unicast* — so a forwarded or locally-originated IPv6 flow
+raises the bearer exactly like IPv4.  Only IPv6 *multicast* chatter (`ff00::/8`
+— RA/RS/MLD/ND-solicit/mDNS) is dropped before the queue so housekeeping can
+never wake or hold the metered modem; link-local and inbound RAs are already
+neutralised at the source by the FSM's carrier hardening (`accept_ra=0`,
+`autoconf=0`, `addr_gen_mode=3`) and output hygiene.  (Cellular *failover* for
+both families is driven by the route-based `protocols failover` engine, not the
+IPv4-only WAN load-balancer; the traffic trigger just dials the cellular bearer
+when forwarded traffic falls to the WWAN's failover route — see **Cellular
+failover** below.)
+
 Unlike connect-on-demand, dial-on-demand does **not** persist the disconnect
 intent across a service crash/restart: because it is a variant of always-on, it
 **always comes up connected at boot**, regardless of whether the bearer was
@@ -1167,7 +1181,7 @@ is available in every mode.
 
 **Disconnect / idle behaviour differs by mode:**
 - ****** released via MM `Simple.Disconnect()` in both modes; the next
-  `connect_bearer()` (or a WLB failover lease) re-establishes it transparently.
+  `connect_bearer()` (or a failover lease) re-establishes it transparently.
 - **dial-on-demand** — **silent**: Linux is **not** told the bearer went down.
   The kernel interface stays **carrier-up** (`UP,LOWER_UP`) with its (now stale)
   IP, and the default route is withdrawn, so upstream apps still see the
@@ -1176,7 +1190,7 @@ is available in every mode.
   baseline as a cold-start `REGISTERED_IDLE`: the carrier address is **flushed**
   and the link is forced **DOWN** (no carrier), so upstream apps see it as down.
   This applies whether idle is reached at startup (never dialed) or from
-  `CONNECTED` via a WLB failback / lease release or resting-state divergence
+  `CONNECTED` via a failover failback / lease release or resting-state divergence
   enforcement — the on-demand teardown explicitly flushes the address and sets
   the link down for this mode so a torn-down bearer is never misrepresented as a
   live, addressed interface.
@@ -1206,7 +1220,7 @@ rejected in that mode.
 
 | Lease owner | Held by | TTL | Purpose |
 |---|---|---|---|
-| `wlb-failover` | WAN load-balancing daemon | 15 s, renewed every 5 s | Holds the cellular bearer up for the **whole** outage while this WWAN is the active failover egress; released when a higher-priority path recovers |
+| `failover` | `protocols failover` daemon | 120 s, renewed each loop | Holds the cellular bearer up for the **whole** outage while a connect-on-demand WWAN is the active failover egress; released (after a hold-down) when a higher-priority path recovers |
 | `dod-traffic` | *(reserved)* | positive TTL, renewed | Reserved for a lease-driven dial-on-demand trigger; the current traffic trigger still uses `connect_bearer()` / `disconnect_bearer()` |
 | `cli` / `operator` | operator tooling | may be persistent | Explicit operator demand |
 
@@ -1231,35 +1245,75 @@ override leases.  A failover lease never reconnects a SIM that has hit its data
 limit.  The lease stays recorded, and if the hold lifts while the lease is
 still live, the bearer comes up.
 
-**Event-driven failover.**  When an **on-demand** WWAN (either `connect-on-demand`
-or `dial-on-demand`) is a member of a `load-balancing wan rule … failover`, WLB
-acquires the `wlb-failover` lease as soon as the cellular link becomes the
-selected failover egress.  The lease is what deterministically brings the bearer
-up: it stays up for the outage regardless of traffic gaps, so tunnels such as
-WireGuard, IPsec or OpenVPN don't flap.  WLB releases the lease when the
-preferred path recovers — but only after it has been stably up for a short
-hold-down (so a flapping better path can't thrash the metered bearer) — and the
-FSM then idles the bearer down.  WLB's modem-registration health check keeps a
-registered-but-idle modem selectable as a failover target.
+**Cellular failover (`protocols failover`).**  Cellular failover is driven by
+the route-based `protocols failover` engine — **not** the WAN load-balancer,
+which is IPv4-only load-sharing.  A WWAN is added as a failover next-hop with the
+via-less **`interface`** form, because a point-to-point cellular link has no
+gateway (the route is installed as `… dev wwanN`).  The daemon installs/withdraws
+each next-hop's route by `metric`, so the lowest-metric healthy next-hop wins;
+each next-hop's `check` keeps a registered-but-idle modem selectable via the
+modem-registration spoof (you can't ping through an idle bearer).  How the bearer
+is *raised* when the WWAN becomes the active (lowest-metric healthy) egress
+differs by connection-mode:
 
-Both on-demand modes are lease-managed on purpose.  A `dial-on-demand` traffic
-trigger cannot bootstrap an **idle** bearer under WLB's failover: WLB steers
-traffic with fwmark + per-interface policy routing, but an idle bearer has no
-route for that traffic to resolve to, so the trigger never fires.  The lease is
-route-independent (a direct D-Bus demand to the FSM), so it works from a cold
-idle bearer.  dial-on-demand's own data-path trigger still owns the normal,
-non-failover duty cycle — the lease is simply an additional demand source
-(leases are multi-owner; the FSM keeps the bearer up while any is live).  If no
-failover rule contains an on-demand WWAN, WLB never acquires a lease and the
-lease path stays inactive.
+- **`connect-on-demand` is lease-pinned.**  The failover daemon acquires the
+  `failover` lease while the WWAN is the active egress, deterministically raising
+  the bearer and holding it up for the whole outage (so tunnels such as
+  WireGuard, IPsec or OpenVPN don't flap), and releasing it after a hold-down
+  once a higher-priority path recovers.  This is required because an idle
+  connect-on-demand link is fully link-down with no route, so nothing on the
+  data path can bootstrap it; the lease is a route-independent D-Bus demand to
+  the FSM.
+
+- **`dial-on-demand` keeps its traffic-triggered duty cycle.**  The daemon does
+  **not** lease a dial-on-demand link.  Its failover route is installed via the
+  WWAN, so when the higher-priority paths fail, forwarded traffic falls to the
+  WWAN, hits the `dial-on-demand@` nftables trigger, and dials the modem on
+  demand; the metered bearer idles back down between flows.  A failed/too-slow
+  dial flushes the held packets after `flush-timeout` and re-arms (see
+  `dial-on-demand flush-timeout`).
+
+If no failover next-hop is a connect-on-demand WWAN, the daemon never acquires a
+lease and the lease path stays inactive.
+
+**Example — prioritized dual-stack failover to a cellular backup.**
+eth0 (primary) → eth1 (secondary) → wwan0 (cellular backup), for IPv4 **and**
+IPv6.  Use `connect-on-demand` to pin the bearer up for the whole outage, or
+`dial-on-demand` for a metered, traffic-triggered backup:
+
+```
+# Cellular interface: on-demand so the bearer stays idle until failover.
+set interfaces wwan wwan0 connection-mode 'connect-on-demand'
+
+# IPv4 default failover: eth0 (metric 1) > eth1 (metric 2) > wwan0 (metric 220).
+set protocols failover route 0.0.0.0/0 next-hop <eth0-gw> interface eth0 metric 1 check target '8.8.8.8' type icmp
+set protocols failover route 0.0.0.0/0 next-hop <eth1-gw> interface eth1 metric 2 check target '8.8.8.8' type icmp
+set protocols failover route 0.0.0.0/0 interface wwan0 metric 220 check target '8.8.8.8' type icmp
+
+# IPv6 default failover: same priority order, via route6.
+set protocols failover route6 ::/0 next-hop <eth0-gw6> interface eth0 metric 1 check target '2606:4700:4700::1111' type icmp
+set protocols failover route6 ::/0 next-hop <eth1-gw6> interface eth1 metric 2 check target '2606:4700:4700::1111' type icmp
+set protocols failover route6 ::/0 interface wwan0 metric 220 check target '2606:4700:4700::1111' type icmp
+```
+
+Note the via-less **`interface wwan0`** next-hop for the cellular link (no
+gateway → installed as `… dev wwan0`), versus `next-hop <gw> interface ethN` for
+the wired links.  While the bearer is idle its `check` is answered by the
+modem-registration spoof so the link stays selectable; once it is raised, a real
+ICMP probe through the bearer confirms reachability.  When eth0 and eth1 both
+fail their checks, wwan0 becomes the active egress: `connect-on-demand` dials via
+the `failover` lease, `dial-on-demand` dials when the first forwarded packet hits
+its trigger.  IPv6-only deployments configure `route6` alone.
 
 **`disconnect_bearer()` is lease-aware.**  With no live lease it behaves
 exactly as before.  If another client holds a live lease, the call still clears
 the operator request, but it skips the teardown and does not suppress
-auto-recovery.  This keeps one client (for example WLB holding `wlb-failover`
-on an on-demand link during failover) from having its bearer dropped by
-another client's disconnect — including dial-on-demand's own idle watcher.  To
-force the link down regardless of leases, use airplane mode or `disable`.
+auto-recovery.  This keeps one client (for example `protocols failover` holding
+the `failover` lease on a `connect-on-demand` link during an outage) from having
+its bearer dropped by another client's disconnect.  (A `dial-on-demand` link
+under failover is **not** leased, so its own idle watcher is free to drop the
+bearer between flows.)  To force the link down regardless of leases, use
+airplane mode or `disable`.
 
 **Connect retry while demand is held.**  If the bearer can't be established
 while demand exists, clients don't loop.  The FSM's failed-state retry keeps

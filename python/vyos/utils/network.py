@@ -232,29 +232,6 @@ def is_ipv6_tentative(iface: str, ipv6_address: str) -> bool:
     return False
 
 
-def is_wwan_connected(interface):
-    """Determine if a given WWAN interface, e.g. wwan0 is connected to the
-    carrier network or not"""
-    from vyos.utils.dict import dict_search
-    from vyos.utils.process import is_systemd_service_active
-
-    if not interface.startswith('wwan'):
-        raise ValueError(f'Specified interface "{interface}" is not a WWAN interface')
-
-    # ModemManager is required for connection(s) - if service is not running,
-    # there won't be any connection at all!
-    if not is_systemd_service_active('ModemManager.service'):
-        return False
-
-    modem = interface.lstrip('wwan')
-
-    tmp = cmd(f'mmcli --modem {modem} --output-json')
-    tmp = loads(tmp)
-
-    # return True/False if interface is in connected state
-    return dict_search('modem.generic.state', tmp) == 'connected'
-
-
 def get_bridge_fdb(interface):
     """Returns the forwarding database entries for a given interface"""
     if not interface_exists(interface):

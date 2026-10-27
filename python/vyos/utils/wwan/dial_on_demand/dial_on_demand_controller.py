@@ -36,7 +36,7 @@ def cleanup(interface='wwan0'):
             check=True
         )
 
-async def run(interface='wwan0', timeout=30, connect_timeout=30):
+async def run(interface='wwan0', timeout=30, connect_timeout=30, flush_timeout=60):
     # Open ONE WWAN D-Bus client for the whole pipeline and hand it to every
     # stage, instead of each stage opening and closing its own. open_client_with_
     # retry() waits for the FSM manager (igos-wwan-manager) to claim its bus name,
@@ -58,7 +58,8 @@ async def run(interface='wwan0', timeout=30, connect_timeout=30):
         logger.info("Starting nfqueue monitor.")
         await wwan_nft_reconnect.main(interface=interface,
                                      connect_timeout=connect_timeout,
-                                     client=client)
+                                     client=client,
+                                     flush_timeout=flush_timeout)
         logger.info("Finished nfqueue monitor.")
     except asyncio.CancelledError:
         raise
@@ -67,11 +68,14 @@ async def run(interface='wwan0', timeout=30, connect_timeout=30):
         logger.info("Finished service successfully!")
 
 
-async def main(interface='wwan0', timeout=30, connect_timeout=30, loop=None):
+async def main(interface='wwan0', timeout=30, connect_timeout=30, loop=None,
+               flush_timeout=60):
     """Run the dial-on-demand pipeline and clean up nft state on stop."""
     if loop is None:
         loop = asyncio.get_event_loop()
-    current_task = asyncio.create_task(run(interface=interface, timeout=timeout, connect_timeout=connect_timeout))
+    current_task = asyncio.create_task(run(interface=interface, timeout=timeout,
+                                           connect_timeout=connect_timeout,
+                                           flush_timeout=flush_timeout))
     def handle_sigterm():
         logger.info("Received signal termination. Stopping service...")
         current_task.cancel()
@@ -95,12 +99,18 @@ if __name__ == "__main__":
     args = parser.parse_args()
     params = args.params
     items = params.split(':')
-    if len(items) > 3:
+    if len(items) > 4:
         raise ValueError("Too many arguments for this function")
-    interface, timeout, connect_timeout = items
+    interface = items[0]
+    timeout = items[1] if len(items) > 1 else 30
+    connect_timeout = items[2] if len(items) > 2 else 30
+    # flush-timeout is optional so an older 3-field instance name still starts.
+    flush_timeout = items[3] if len(items) > 3 else 60
 
     loop = asyncio.get_event_loop()
     try:
-        loop.run_until_complete(main(interface=interface,timeout=timeout,connect_timeout=connect_timeout, loop=loop))
+        loop.run_until_complete(main(interface=interface, timeout=timeout,
+                                     connect_timeout=connect_timeout, loop=loop,
+                                     flush_timeout=flush_timeout))
     finally:
         loop.close()

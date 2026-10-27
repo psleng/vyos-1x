@@ -235,6 +235,20 @@
                 </properties>
                 <defaultValue>30</defaultValue>
               </leafNode>
+              <leafNode name="flush-timeout">
+                <properties>
+                    <help>Maximum time to hold triggering packets waiting for the bearer before flushing them and re-arming the dial trigger (should be at least connect-timeout)</help>
+                    <valueHelp>
+                      <format>u32:30-600</format>
+                      <description>Timeout in seconds</description>
+                    </valueHelp>
+                    <constraint>
+                      <validator name="numeric" argument="--range 30-600"/>
+                    </constraint>
+                    <constraintErrorMessage>Max wait must be 30-600 seconds</constraintErrorMessage>
+                </properties>
+                <defaultValue>60</defaultValue>
+              </leafNode>
             </children>
           </node>
           <!-- ── Network mode ────────────────────────────────────── -->

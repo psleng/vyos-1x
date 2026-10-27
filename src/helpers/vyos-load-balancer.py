@@ -33,130 +33,13 @@ from vyos.wanloadbalance import health_ping_host
 from vyos.wanloadbalance import health_ping_host_ttl
 from vyos.wanloadbalance import parse_dhcp_nexthop
 from vyos.wanloadbalance import parse_ppp_nexthop
-from vyos.wanloadbalance import wlb_weight_interfaces
-
-from vyos.utils.wwan.wwan_client import (  # noqa: E402
-    WWANClientSync,
-)
-
 
 nftables_wlb_conf = '/run/nftables_wlb.conf'
 wlb_status_file = '/run/wlb_status.json'
 wlb_pid_file = '/run/wlb_daemon.pid'
 sleep_interval = 5 # Main loop sleep interval
-# TTL for the 'wlb-failover' bearer lease.  WLB re-asserts the lease every
-# main-loop iteration (sleep_interval); the TTL spans a few iterations so a
-# single missed cycle does not drop the bearer, while a dead WLB daemon lets
-# the lease lapse (and the modem FSM idle the metered bearer) within seconds.
-failover_lease_ttl = sleep_interval * 3
-# Hold-down before releasing the 'wlb-failover' lease after a higher-priority
-# path recovers.  Without it, a *flapping* primary/secondary WAN would thrash
-# the metered cellular bearer up/down in lockstep.  While a WWAN is no longer
-# the selected egress but was within this window, WLB keeps renewing its lease
-# (holding the bearer up) and only releases once the better path has been
-# stably up for the whole window.
-failover_release_holddown = 30
 
-def _interface_modem_check(iface):
-    """Health check for an on-demand WWAN interface (connect-on-demand or
-    dial-on-demand).
-
-    An on-demand bearer is intentionally DOWN whenever it is idle (that is the
-    whole point), so testing bearer status would mark the interface permanently
-    unhealthy -- WLB would then never select it as the active failover link,
-    never emit a `jump wlb_mangle_isp_<iface>` marking rule, and never acquire
-    the `wlb-failover` lease that raises the bearer.  So instead treat the
-    interface as healthy when the modem is REGISTERED on the network (ready to
-    be raised) or already connected.
-
-    Uses the ModemManager modem state (8 REGISTERED .. 11 CONNECTED) with the
-    3GPP registration state (1 HOME / 5 ROAMING) as a fallback.
-    """
-    status = None
-    try:
-        client = WWANClientSync()
-        ifnum = int(iface[4:])
-        try:
-            # add_interface is idempotent and just ensures the service has the
-            # interface object so get_status() can resolve it.
-            client.add_interface(ifnum)
-            status = client.get_status(ifnum)
-        finally:
-            client.close()
-    except Exception as exc:
-        print(f'WLB: WWAN health check failed for {iface}: {exc}')
-        return False
-
-    # MMModemState: 8 REGISTERED, 9 DISCONNECTING, 10 CONNECTING, 11 CONNECTED
-    # all mean "on the network and able to carry a bearer".
-    if status is not None:
-        try:
-            modem_state = int(status.get('modem_state', -1))
-            fsm_state = status.get('fsm_state', 'DISCONNECTED')
-            #print(fsm_state)
-        except (TypeError, ValueError):
-            modem_state = -1
-        if modem_state >= 8 and (fsm_state == 'CONNECTED' or fsm_state == "REGISTERED_IDLE" or fsm_state == "CONNECTING"):
-            return True
-
-    # Fallback: 3GPP registration state 1 HOME / 5 ROAMING = registered.
-    return False
-
-def _wwan_connection_mode(ifname, conf=None):
-    """Return the configured connection-mode of a WWAN interface, or None for a
-    non-WWAN interface / unset mode."""
-    if not ifname.startswith('wwan'):
-        return None
-    if conf is None:
-        conf = Config()
-    return conf.return_effective_value(
-        ['interfaces', 'wwan', ifname, 'connection-mode'])
-
-
-def on_demand_check(ifname, conf=None):
-    """True for a WWAN in either on-demand mode (connect-on-demand or
-    dial-on-demand).
-
-    Both modes park the bearer idle (no IP), so WLB manages them for failover:
-    the modem-registration health spoof keeps them selectable while idle, and
-    the ``wlb-failover`` lease deterministically raises the bearer when the WWAN
-    becomes the active egress and drops it on failback.  The lease is used for
-    both modes on purpose: an idle bearer has no route, so a dial-on-demand
-    traffic trigger cannot bootstrap it under WLB's policy routing -- the lease
-    (a direct D-Bus demand to the FSM) is route-independent and deterministic.
-    dial-on-demand's own data-path trigger still owns the normal, non-failover
-    duty cycle; the lease is just an additional demand source.
-    """
-    return _wwan_connection_mode(ifname, conf) in ('connect-on-demand',
-                                                   'dial-on-demand')
-
-
-def _in_failover_rule(ifname, lb):
-    """Return True if ifname is a member of any WAN load-balancing failover rule.
-
-    The dial-on-demand daemon behaviour (the modem-state health check) exists
-    only to support failover. When no failover rule governs the interface, the load
-    balancer must behave exactly as it would for any other interface -- normal
-    IP health checks, no bearer management -- regardless of the interface's
-    connection-mode. Gating on failover membership keeps the daemon's behaviour
-    unchanged when failover (or dial-on-demand) is not configured.
-    """
-    for rule_conf in (lb.get('rule') or {}).values():
-        if 'failover' in rule_conf and ifname in (rule_conf.get('interface') or {}):
-            return True
-    return False
-
-
-def health_check(ifname, conf, state, test_defaults, lb):
-    # Intercept with the modem-registration health spoof for any on-demand WWAN
-    # (connect-on-demand or dial-on-demand) governed by a failover rule: its
-    # bearer parks idle with no IP, so the normal IP health check would mark it
-    # permanently down and it would never be selectable as a failover target.
-    # Without failover the load balancer behaves identically to any other
-    # interface (normal IP health check), regardless of connection-mode.
-    if _in_failover_rule(ifname, lb) and on_demand_check(ifname):
-        return _interface_modem_check(ifname)
-
+def health_check(ifname, conf, state, test_defaults):
     # Run health tests for interface
 
     if get_ipv4_address(ifname) is None:
@@ -171,6 +54,7 @@ def health_check(ifname, conf, state, test_defaults, lb):
 
         if not target:
             return False
+
         return health_ping_host(target, ifname, wait_time=resp_time)
 
     for test_id, test_conf in conf['test'].items():
@@ -179,14 +63,12 @@ def health_check(ifname, conf, state, test_defaults, lb):
         if check_type == 'ping':
             resp_time = test_conf['resp_time']
             target = test_conf['target']
-            count = int(test_conf.get('count', 1))
-            if not health_ping_host(target, ifname, count=count, wait_time=resp_time):
+            if not health_ping_host(target, ifname, wait_time=resp_time):
                 return False
         elif check_type == 'ttl':
             target = test_conf['target']
             ttl_limit = test_conf['ttl_limit']
-            count = int(test_conf.get('count', 1))
-            if not health_ping_host_ttl(target, ifname, count=count, ttl_limit=ttl_limit):
+            if not health_ping_host_ttl(target, ifname, ttl_limit=ttl_limit):
                 return False
         elif check_type == 'user-defined':
             script = test_conf['test_script']
@@ -195,88 +77,6 @@ def health_check(ifname, conf, state, test_defaults, lb):
                 return False
 
     return True
-
-def _active_failover_wwans(lb):
-    """Return (managed, active) sets of on-demand WWAN interface names.
-
-    * ``managed`` -- every on-demand WWAN (connect-on-demand or dial-on-demand)
-      that is a member of some failover rule (WLB holds its bearer lease).
-    * ``active``  -- the subset that is currently the *selected* failover egress
-      (all higher-priority members of its rule are down), so the bearer must be
-      held up.
-
-    Both on-demand modes are lease-managed: the lease deterministically raises
-    the bearer on failover regardless of routing/traffic (an idle bearer has no
-    route, so a traffic trigger cannot bootstrap it).  Uses the same selection
-    logic (:func:`wlb_weight_interfaces`) the nftables marking is built from, so
-    the lease tracks exactly which link WLB is steering traffic to.
-    """
-    managed = set()
-    active = set()
-    health_state = lb.get('health_state', {})
-    for rule_conf in (lb.get('rule') or {}).values():
-        if 'failover' not in rule_conf:
-            continue
-        members = rule_conf.get('interface') or {}
-        wwan_members = [m for m in members
-                        if m.startswith('wwan') and on_demand_check(m)]
-        if not wwan_members:
-            continue
-        managed.update(wwan_members)
-        selected, _ = wlb_weight_interfaces(rule_conf, health_state)
-        for ifname, _weight in selected:
-            if ifname in wwan_members:
-                active.add(ifname)
-    return managed, active
-
-def reconcile_failover_leases(lb, clients, hold_state=None, now=None):
-    """Hold a bearer lease on each on-demand WWAN WLB is failing over to.
-
-    Event-driven bearer control: while an on-demand (connect-on-demand or
-    dial-on-demand) cellular link is the active failover egress, WLB renews a
-    ``wlb-failover`` lease each loop so the modem FSM raises and keeps the bearer
-    up for the whole outage.  When a higher-priority path recovers the lease is
-    released - but only after it has stayed up for ``failover_release_holddown``
-    seconds, so a flapping better path cannot thrash the metered bearer.  No-op
-    unless a failover rule actually contains an on-demand WWAN.
-
-    ``hold_state`` (ifname -> last time the WWAN was the active egress) and
-    ``now`` are injectable for testing; the daemon passes a persistent dict.
-    """
-    if hold_state is None:
-        hold_state = {}
-    if now is None:
-        now = time.time()
-    managed, active = _active_failover_wwans(lb)
-    for ifname in managed:
-        ifnum = int(ifname[len('wwan'):])
-        client = clients.get(ifname)
-        if client is None:
-            client = WWANClientSync()
-            clients[ifname] = client
-        try:
-            if ifname in active:
-                hold_state[ifname] = now
-                client.bearer_lease_acquire(
-                    ifnum, 'wlb-failover', ttl=failover_lease_ttl,
-                    reason='active failover target')
-            else:
-                last_active = hold_state.get(ifname)
-                if (last_active is not None
-                        and now - last_active < failover_release_holddown):
-                    # Better path recovered but not yet stable: keep the bearer
-                    # up through the hold-down so a flapping link does not drop
-                    # the metered cellular connection.
-                    client.bearer_lease_acquire(
-                        ifnum, 'wlb-failover', ttl=failover_lease_ttl,
-                        reason='failover release hold-down')
-                else:
-                    hold_state.pop(ifname, None)
-                    client.bearer_lease_release(ifnum, 'wlb-failover')
-        except Exception as exc:
-            # A transient D-Bus/modem hiccup must not kill the daemon; the lease
-            # TTL makes a missed renewal self-correcting.
-            print(f'WLB: failover lease reconcile failed for {ifname}: {exc}')
 
 def on_state_change(lb, ifname, state):
     # Run hook on state change
@@ -510,25 +310,16 @@ if __name__ == '__main__':
 
     # Main loop
 
-    # Persistent per-interface WWAN D-Bus clients, reused across iterations so
-    # the failover-lease reconcile does not reconnect every loop.
-    wwan_clients = {}
-
-    # Persistent per-interface hold-down state (ifname -> last time it was the
-    # active failover egress), so reconcile_failover_leases can debounce lease
-    # release across iterations.
-    wwan_lease_holddown = {}
-
     init = True;
-    while True:
-        try:
+    try:
+        while True:
             ip_change = False
 
             if 'interface_health' in lb:
                 for ifname, health_conf in lb['interface_health'].items():
                     state = lb['health_state'][ifname]
 
-                    result = health_check(ifname, health_conf, state=state, test_defaults=lb['test_defaults'], lb=lb)
+                    result = health_check(ifname, health_conf, state=state, test_defaults=lb['test_defaults'])
 
                     state_changed = result != state['state']
                     state['state_changed'] = False
@@ -562,18 +353,6 @@ if __name__ == '__main__':
 
                     restore_default_route(lb, ifname)
 
-            # Event-driven bearer control for on-demand WWANs used as failover
-            # members: hold the bearer up while cellular is the active failover
-            # egress and drop it on failback.  Both connect-on-demand and
-            # dial-on-demand are lease-managed here: an idle bearer has no route,
-            # so a traffic trigger cannot bootstrap it under WLB's policy
-            # routing -- the lease (a direct D-Bus demand to the FSM) raises it
-            # deterministically.  dial-on-demand's own data-path trigger still
-            # owns the normal, non-failover duty cycle.  health_check() applies
-            # the modem-registration spoof so an idle on-demand WWAN stays
-            # selectable as a failover target.
-            reconcile_failover_leases(lb, wwan_clients, wwan_lease_holddown)
-
             if any(state['state_changed'] for ifname, state in lb['health_state'].items()):
                 if not nftables_update(lb):
                     break
@@ -588,16 +367,10 @@ if __name__ == '__main__':
                     f.write(json.dumps(lb['health_state']))
             elif ip_change:
                 nftables_update(lb)
-        except Exception as e:
-            # A transient error (e.g. a modem/D-Bus hiccup during a WWAN
-            # health check, or ModemManager restarting) must not tear the
-            # daemon down: Restart=always would then respawn it immediately,
-            # flooding the journal with a health-check storm and repeatedly
-            # tearing down the WLB routing/nftables state.  Log it and keep
-            # the normal pacing interval instead of exiting.
-            print('WLB ERROR:', e)
 
-        time.sleep(sleep_interval)
+            time.sleep(sleep_interval)
+    except Exception as e:
+        print('WLB ERROR:', e)
 
     if os.path.exists(wlb_status_file):
         os.unlink(wlb_status_file)

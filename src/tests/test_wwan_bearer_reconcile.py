@@ -13,8 +13,6 @@ lease-aware D-Bus disconnect_bearer(), and WLB's failover-lease selection.
 The core invariant under test: with no leases, existing behaviour is unchanged.
 """
 
-import importlib.util
-import os
 import sys
 import types
 from types import SimpleNamespace
@@ -306,113 +304,6 @@ class TestOndemandIdleTeardown(IsolatedAsyncioTestCase):
         self.assertFalse(result)
 
 
-def _load_wlb():
-    path = os.path.join(os.path.dirname(__file__), '..', 'helpers',
-                        'vyos-load-balancer.py')
-    spec = importlib.util.spec_from_file_location('vyos_load_balancer', path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-class TestWlbFailoverLeases(TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.wlb = _load_wlb()
-
-    def _lb(self, eth_up, wwan_up=True, failover=True):
-        rule = {'interface': {'eth0': {'weight': '10'}, 'wwan0': {'weight': '1'}}}
-        if failover:
-            rule['failover'] = {}
-        return {
-            'rule': {'10': rule},
-            'health_state': {'eth0': {'state': eth_up},
-                             'wwan0': {'state': wwan_up}},
-        }
-
-    def _active(self, lb, dod=True):
-        with patch.object(self.wlb, 'on_demand_check', return_value=dod):
-            return self.wlb._active_failover_wwans(lb)
-
-    def test_primary_up_wwan_managed_not_active(self):
-        managed, active = self._active(self._lb(eth_up=True))
-        self.assertEqual(managed, {'wwan0'})
-        self.assertEqual(active, set())
-
-    def test_primary_down_wwan_active(self):
-        managed, active = self._active(self._lb(eth_up=False))
-        self.assertEqual(active, {'wwan0'})
-
-    def test_non_failover_rule_not_managed(self):
-        managed, active = self._active(self._lb(eth_up=False, failover=False))
-        self.assertEqual(managed, set())
-        self.assertEqual(active, set())
-
-    def test_non_on_demand_wwan_not_managed(self):
-        managed, active = self._active(self._lb(eth_up=False), dod=False)
-        self.assertEqual(managed, set())
-
-    def test_reconcile_acquires_and_releases(self):
-        client = Mock()
-        clients = {'wwan0': client}
-        with patch.object(self.wlb, 'on_demand_check', return_value=True):
-            self.wlb.reconcile_failover_leases(self._lb(eth_up=False), clients)
-            client.bearer_lease_acquire.assert_called_once_with(
-                0, 'wlb-failover', ttl=self.wlb.failover_lease_ttl,
-                reason='active failover target')
-            self.wlb.reconcile_failover_leases(self._lb(eth_up=True), clients)
-            client.bearer_lease_release.assert_called_once_with(0, 'wlb-failover')
-
-    def test_reconcile_survives_client_error(self):
-        client = Mock()
-        client.bearer_lease_acquire.side_effect = RuntimeError('dbus down')
-        with patch.object(self.wlb, 'on_demand_check', return_value=True):
-            self.wlb.reconcile_failover_leases(self._lb(eth_up=False),
-                                               {'wwan0': client})
-
-    def test_release_holddown_holds_then_releases(self):
-        # A persistent hold_state + injected clock exercises the release
-        # hold-down: a recovered primary must be stably up for the whole window
-        # before the metered cellular lease is released.
-        client = Mock()
-        clients = {'wwan0': client}
-        hold = {}
-        hd = self.wlb.failover_release_holddown
-        with patch.object(self.wlb, 'on_demand_check', return_value=True):
-            # t0: wwan0 is the active egress -> acquire + record last-active
-            self.wlb.reconcile_failover_leases(self._lb(eth_up=False),
-                                               clients, hold, now=1000)
-            # within the hold-down, primary recovers -> keep renewing, no release
-            self.wlb.reconcile_failover_leases(self._lb(eth_up=True),
-                                               clients, hold, now=1000 + hd - 1)
-            client.bearer_lease_release.assert_not_called()
-            self.assertEqual(client.bearer_lease_acquire.call_count, 2)
-            # past the hold-down with primary still up -> release
-            self.wlb.reconcile_failover_leases(self._lb(eth_up=True),
-                                               clients, hold, now=1000 + hd + 1)
-            client.bearer_lease_release.assert_called_once_with(0, 'wlb-failover')
-
-    def test_holddown_resets_when_active_again(self):
-        # A flap back to active during the hold-down restarts the timer, so the
-        # bearer is never dropped while the better path keeps flapping.
-        client = Mock()
-        clients = {'wwan0': client}
-        hold = {}
-        hd = self.wlb.failover_release_holddown
-        with patch.object(self.wlb, 'on_demand_check', return_value=True):
-            self.wlb.reconcile_failover_leases(self._lb(eth_up=False),
-                                               clients, hold, now=1000)
-            self.wlb.reconcile_failover_leases(self._lb(eth_up=True),
-                                               clients, hold, now=1010)
-            # active again: last-active moves to 1020
-            self.wlb.reconcile_failover_leases(self._lb(eth_up=False),
-                                               clients, hold, now=1020)
-            # would have passed the ORIGINAL window (1000+hd) but not the reset
-            self.wlb.reconcile_failover_leases(self._lb(eth_up=True),
-                                               clients, hold, now=1020 + hd - 1)
-            client.bearer_lease_release.assert_not_called()
-
-
 class TestBearerPathValidation(TestCase):
     def test_valid_bearer_path(self):
         self.assertTrue(state_machine.is_valid_bearer_path(
@@ -423,37 +314,3 @@ class TestBearerPathValidation(TestCase):
                     '/org/freedesktop/ModemManager1/Modem/0'):
             self.assertFalse(state_machine.is_valid_bearer_path(bad),
                              msg=f'{bad!r} should be invalid')
-
-
-class TestWlbOnDemandPredicates(TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.wlb = _load_wlb()
-
-    @staticmethod
-    def _conf(mode):
-        conf = Mock()
-        conf.return_effective_value.return_value = mode
-        return conf
-
-    def test_on_demand_matches_both_on_demand_modes(self):
-        for mode in ('connect-on-demand', 'dial-on-demand'):
-            self.assertTrue(
-                self.wlb.on_demand_check('wwan0', conf=self._conf(mode)), mode)
-
-    def test_on_demand_excludes_always_on_and_non_wwan(self):
-        self.assertFalse(
-            self.wlb.on_demand_check('wwan0', conf=self._conf('always-on')))
-        # eth* is never a WWAN regardless of the (irrelevant) mode value
-        self.assertFalse(
-            self.wlb.on_demand_check('eth0', conf=self._conf('dial-on-demand')))
-
-    def test_both_on_demand_modes_are_lease_managed(self):
-        # Both on-demand modes get the lease: a dial-on-demand traffic trigger
-        # cannot bootstrap an idle bearer under WLB's policy routing, so the
-        # route-independent lease raises it for both.
-        for mode in ('connect-on-demand', 'dial-on-demand'):
-            self.assertTrue(
-                self.wlb.on_demand_check('wwan0', conf=self._conf(mode)), mode)
-        self.assertFalse(
-            self.wlb.on_demand_check('wwan0', conf=self._conf('always-on')))

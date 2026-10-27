@@ -141,18 +141,39 @@ DOD_NFT_BELOW_RAW_PRIORITY = -350
 
 def _dod_input_matches(ifname):
     """Match fragments identifying the per-interface IPv6 input-drop rule."""
-    return [f'iifname "{ifname}"', 'meta nfproto ipv6', 'drop']
+    return [f'iifname "{ifname}"', 'ip6 daddr ff00::/8', 'drop']
 
 
 def _dod_output_matches(ifname):
     """Match fragments identifying the per-interface IPv6 output-drop rule."""
-    return [f'oifname "{ifname}"', 'meta nfproto ipv6', 'drop']
+    return [f'oifname "{ifname}"', 'ip6 daddr ff00::/8', 'drop']
 
 
 def _dod_prerouting_matches(ifname):
     """Match fragments identifying the per-interface IPv6 prerouting-drop
     rule."""
-    return [f'fib daddr oifname "{ifname}"', 'meta nfproto ipv6', 'drop']
+    return [f'fib daddr oifname "{ifname}"', 'ip6 daddr ff00::/8', 'drop']
+
+
+def _dod_legacy_matches(ifname):
+    """Match fragments for the pre-IPv6-parity *blanket* drops.
+
+    Earlier revisions dropped ALL IPv6 (``meta nfproto ipv6``) on wwanN while
+    dial-on-demand was active, which also blocked genuine forwarded IPv6
+    unicast.  These are superseded by the multicast-only chatter guards above.
+    Returned as (chain, fragments) so a live upgrade can purge the old rules
+    before installing the narrowed ones (a reboot clears runtime nft state, but
+    a config reload on a running image would otherwise leave the blanket drops
+    in place and keep IPv6 blocked).
+    """
+    return (
+        (DOD_NFT_INPUT_CHAIN,
+         [f'iifname "{ifname}"', 'meta nfproto ipv6', 'drop']),
+        (DOD_NFT_OUTPUT_CHAIN,
+         [f'oifname "{ifname}"', 'meta nfproto ipv6', 'drop']),
+        (DOD_NFT_PREROUTING_CHAIN,
+         [f'fib daddr oifname "{ifname}"', 'meta nfproto ipv6', 'drop']),
+    )
 
 
 def _find_dod_handle(ifname, chain, matches):
@@ -166,59 +187,75 @@ def _find_dod_handle(ifname, chain, matches):
 
 
 def _install_dod_ipv6_drop(ifname):
-    """Idempotently install the dial-on-demand IPv6 drops for *ifname*.
+    """Idempotently install the dial-on-demand IPv6 *chatter* drops for *ifname*.
 
-    Three persistent rules are installed, present the whole time dial-on-demand
-    is active for the interface so no IPv6 traffic -- background chatter or
-    genuine unicast -- can wake or hold up the modem; only IPv4 raises the
-    bearer:
+    These guard against IPv6 multicast housekeeping (RA/RS/MLD/ND-solicit, mDNS,
+    ...) waking or holding the metered modem, WITHOUT blocking genuine IPv6
+    unicast -- so forwarded IPv6 unicast can both traverse the link and trigger a
+    dial-on-demand bring-up, just like IPv4.  Only ``ff00::/8`` (all IPv6
+    multicast) is dropped; global/ULA unicast passes.  Link-local and inbound
+    RAs are already neutralised at the source by the FSM's mode-independent
+    carrier hardening (accept_ra=0, autoconf=0, addr_gen_mode=3) and output
+    hygiene, so these rules are a narrow, defensive backstop:
 
-      * input hook  -- drops IPv6 received on wwanN (e.g. carrier RAs) so the
-        kernel never runs SLAAC on the interface and never emits the outbound
-        ND that the dial trigger would otherwise dial on;
-      * output hook  -- drops router-originated IPv6 egressing wwanN, below
-        `raw` priority so it runs before the dial-on-demand NFQUEUE trigger;
-      * prerouting hook -- drops forwarded IPv6 whose FIB egress resolves to
-        wwanN, below `raw` priority so it runs before the dial-on-demand
-        NFQUEUE trigger.
+      * input hook  -- drops inbound IPv6 multicast on wwanN (carrier RAs are
+        multicast ff02::1; the kernel ignores them anyway via accept_ra=0);
+      * output hook  -- drops router-originated IPv6 multicast egressing wwanN,
+        below `raw` priority so it runs before the dial-on-demand NFQUEUE
+        trigger;
+      * prerouting hook -- defensive guard for forwarded IPv6 multicast toward
+        wwanN (below `raw`); forwarded unicast is intentionally NOT dropped so
+        it reaches the dial trigger.
 
-    Rules are added only when absent so repeated commits never stack
-    duplicates.
+    Rules are added only when absent so repeated commits never stack duplicates.
+    Any legacy blanket ``meta nfproto ipv6`` drop from an earlier revision is
+    purged first so it can no longer block IPv6 unicast.
     """
     call(f'nft add table {DOD_NFT_TABLE}')
-    # input: IPv6 received on wwanN (carrier RAs etc.) -> stop SLAAC at source
+    # input: IPv6 multicast received on wwanN (carrier RAs etc.)
     call(f'nft add chain {DOD_NFT_TABLE} {DOD_NFT_INPUT_CHAIN} '
          "'{ type filter hook input priority 0 ; }'")
-    if _find_dod_handle(ifname, DOD_NFT_INPUT_CHAIN,
-                        _dod_input_matches(ifname)) is None:
-        call(f'nft add rule {DOD_NFT_TABLE} {DOD_NFT_INPUT_CHAIN} '
-             f'iifname "{ifname}" meta nfproto ipv6 drop')
-    # output: router-originated IPv6.  Created below `raw` (-300) so it runs
-    # BEFORE the dial-on-demand NFQUEUE trigger (install_wwan_nft_rules.py
+    # output: router-originated IPv6 multicast.  Created below `raw` (-300) so it
+    # runs BEFORE the dial-on-demand NFQUEUE trigger (install_wwan_nft_rules.py
     # installs its output chain at `priority raw`).
     call(f'nft add chain {DOD_NFT_TABLE} {DOD_NFT_OUTPUT_CHAIN} '
          f"'{{ type filter hook output priority {DOD_NFT_BELOW_RAW_PRIORITY} ; }}'")
+    # prerouting: forwarded IPv6 multicast toward wwanN (before the DoD trigger)
+    call(f'nft add chain {DOD_NFT_TABLE} {DOD_NFT_PREROUTING_CHAIN} '
+         f"'{{ type filter hook prerouting priority {DOD_NFT_BELOW_RAW_PRIORITY} ; }}'")
+
+    # Purge any legacy blanket (all-IPv6) drops so they can no longer block
+    # forwarded IPv6 unicast once this revision narrows the guard to multicast.
+    for chain, matches in _dod_legacy_matches(ifname):
+        handle = _find_dod_handle(ifname, chain, matches)
+        while handle is not None:
+            remove_nftables_rule(DOD_NFT_TABLE, chain, handle)
+            handle = _find_dod_handle(ifname, chain, matches)
+
+    if _find_dod_handle(ifname, DOD_NFT_INPUT_CHAIN,
+                        _dod_input_matches(ifname)) is None:
+        call(f'nft add rule {DOD_NFT_TABLE} {DOD_NFT_INPUT_CHAIN} '
+             f'iifname "{ifname}" ip6 daddr ff00::/8 drop')
     if _find_dod_handle(ifname, DOD_NFT_OUTPUT_CHAIN,
                         _dod_output_matches(ifname)) is None:
         call(f'nft add rule {DOD_NFT_TABLE} {DOD_NFT_OUTPUT_CHAIN} '
-             f'oifname "{ifname}" meta nfproto ipv6 drop')
-    # prerouting: forwarded IPv6 destined for wwanN (before the DoD trigger)
-    call(f'nft add chain {DOD_NFT_TABLE} {DOD_NFT_PREROUTING_CHAIN} '
-         f"'{{ type filter hook prerouting priority {DOD_NFT_BELOW_RAW_PRIORITY} ; }}'")
+             f'oifname "{ifname}" ip6 daddr ff00::/8 drop')
     if _find_dod_handle(ifname, DOD_NFT_PREROUTING_CHAIN,
                         _dod_prerouting_matches(ifname)) is None:
         call(f'nft add rule {DOD_NFT_TABLE} {DOD_NFT_PREROUTING_CHAIN} '
-             f'meta nfproto ipv6 fib daddr oifname "{ifname}" drop')
+             f'fib daddr oifname "{ifname}" ip6 daddr ff00::/8 drop')
 
 
 def _remove_dod_ipv6_drop(ifname):
-    """Remove the dial-on-demand IPv6 input, output and prerouting drops for
-    *ifname*, if present."""
-    for chain, matches in (
+    """Remove the dial-on-demand IPv6 chatter drops (and any legacy blanket
+    drops) for *ifname*, if present."""
+    rules = [
         (DOD_NFT_INPUT_CHAIN, _dod_input_matches(ifname)),
         (DOD_NFT_OUTPUT_CHAIN, _dod_output_matches(ifname)),
         (DOD_NFT_PREROUTING_CHAIN, _dod_prerouting_matches(ifname)),
-    ):
+    ]
+    rules.extend(_dod_legacy_matches(ifname))
+    for chain, matches in rules:
         handle = _find_dod_handle(ifname, chain, matches)
         while handle is not None:
             remove_nftables_rule(DOD_NFT_TABLE, chain, handle)
@@ -373,47 +410,12 @@ def _passthrough_user_eth_addresses(conf, pt_iface):
 def _dial_on_demand_active(conf, ifname, wwan):
     """Decide whether the dial-on-demand service should run for ``ifname``.
 
-    At commit time this script reaches across into the WAN load-balancing
-    config (``conf`` is its live Config instance, so the read reflects the
-    configuration being committed) and applies the policy:
-
-    * ``connection-mode`` must be ``dial-on-demand`` -- otherwise the service
-      never runs.
-    * When the interface is governed by WAN load-balancing -- it is both an
-      ``interface-health`` target AND a weighted member of a balancing
-      ``rule`` -- the service runs ONLY when that rule has ``failover``
-      enabled.  A plain weighted load-balance member is expected to stay
-      continuously up, so dial-on-demand does not apply.
-    * A standalone dial-on-demand interface (not referenced by WAN
-      load-balancing) always runs.
-
-    load-balancing_wan applies the identical check from its own file so both
-    commit paths agree regardless of which section changes.
+    The service runs for any interface in ``connection-mode dial-on-demand``.
+    Cellular failover is handled by ``protocols failover`` (route-based), not by
+    the WAN load-balancer, so the dial-on-demand duty cycle is no longer gated on
+    WLB membership.
     """
-    if wwan.get('connection_mode', 'always-on') != 'dial-on-demand':
-        return False
-
-    lb = conf.get_config_dict(['load-balancing', 'wan'],
-                              key_mangling=('-', '_'),
-                              no_tag_node_value_mangle=True,
-                              get_first_key=True)
-
-    in_interface_health = ifname in (lb.get('interface_health') or {})
-
-    weighted_member = False
-    failover_rule = False
-    for rule_conf in (lb.get('rule') or {}).values():
-        if ifname in (rule_conf.get('interface') or {}):
-            weighted_member = True
-            if 'failover' in rule_conf:
-                failover_rule = True
-
-    if in_interface_health and weighted_member:
-        # Governed by WLB: only dial on demand for a failover rule.
-        return failover_rule
-
-    # Standalone dial-on-demand: always run.
-    return True
+    return wwan.get('connection_mode', 'always-on') == 'dial-on-demand'
 
 
 def get_config(config=None):
@@ -1388,9 +1390,11 @@ def wwan_on_demand_service(wwan, ifname, checkConfig, action):
     stop_dial_service = True
     connect_timeout = 30
     idle_timeout = 30
+    flush_timeout = 60
     if wwan.get('dial_on_demand') is not None:
         connect_timeout = wwan.get('dial_on_demand').get('connect_timeout', 30)
         idle_timeout = wwan.get('dial_on_demand').get('idle_timeout', 30)
+        flush_timeout = wwan.get('dial_on_demand').get('flush_timeout', 60)
     if checkConfig is True:
         result = subprocess.run(
                 ["systemctl", "list-units", "--type=service", "--all", "--no-legend", "--plain"],
@@ -1403,12 +1407,13 @@ def wwan_on_demand_service(wwan, ifname, checkConfig, action):
             if not service.startswith("dial-on-demand@") or not service.endswith(".service"):
                 continue
             params = service[len("dial-on-demand@"):-len(".service")].split(":")
-            if len(params) != 3:
+            if len(params) != 4:
                 continue
-            param1, param2, param3 = params
+            param1, param2, param3, param4 = params
             if (param1 == ifname
                     and param2 == str(idle_timeout)
-                    and param3 == str(connect_timeout)):
+                    and param3 == str(connect_timeout)
+                    and param4 == str(flush_timeout)):
                 stop_dial_service = False
                 break
     if stop_dial_service is True and action == 'stop':
@@ -1416,7 +1421,7 @@ def wwan_on_demand_service(wwan, ifname, checkConfig, action):
         return
     if action == 'start':
         if wwan.get('_dial_on_demand_active'):
-            call(f'systemctl start dial-on-demand@{ifname}:{idle_timeout}:{connect_timeout}.service')
+            call(f'systemctl start dial-on-demand@{ifname}:{idle_timeout}:{connect_timeout}:{flush_timeout}.service')
         else:
             # Policy says dial-on-demand must not run for this interface (not
             # in dial-on-demand mode, or a non-failover WLB member): make sure

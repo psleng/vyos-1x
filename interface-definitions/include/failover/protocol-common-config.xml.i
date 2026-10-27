@@ -30,6 +30,35 @@
       </properties>
       #include <include/failover/common-failover.xml.i>
     </tagNode>
+    #include <include/failover/interface-failover.xml.i>
+  </children>
+</tagNode>
+<tagNode name="route6">
+  <properties>
+    <help>Failover IPv6 route</help>
+    <valueHelp>
+      <format>ipv6net</format>
+      <description>IPv6 failover route</description>
+    </valueHelp>
+    <constraint>
+      <validator name="ipv6-prefix"/>
+    </constraint>
+  </properties>
+  <children>
+    <tagNode name="next-hop">
+      <properties>
+        <help>Next-hop IPv6 router address</help>
+        <valueHelp>
+          <format>ipv6</format>
+          <description>Next-hop router address</description>
+        </valueHelp>
+        <constraint>
+          <validator name="ipv6-address"/>
+        </constraint>
+      </properties>
+      #include <include/failover/common-failover.xml.i>
+    </tagNode>
+    #include <include/failover/interface-failover.xml.i>
   </children>
 </tagNode>
 <!-- include end -->

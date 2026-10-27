@@ -1929,7 +1929,7 @@ class InterfaceConfig(ServiceInterface):
     # up.  Only the operator identities may hold a *persistent* (never-expiring)
     # lease; machine clients must supply a finite TTL and keep renewing it.
     _LEASE_OWNER_ALLOWLIST = frozenset({
-        'cli', 'operator', 'wlb-failover', 'dod-traffic',
+        'cli', 'operator', 'failover', 'wlb-failover', 'dod-traffic',
     })
     _LEASE_PERSISTENT_OWNERS = frozenset({'cli', 'operator'})
 
