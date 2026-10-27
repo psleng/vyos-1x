@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+"""igos-wwan-sms-command wrapper.
+
+Runs the WWAN SMS command daemon implemented in
+vyos.utils.wwan.sms_command_service.
+"""
+
+from vyos.utils.wwan.sms_command_service import main
+
+if __name__ == '__main__':
+    raise SystemExit(main())
