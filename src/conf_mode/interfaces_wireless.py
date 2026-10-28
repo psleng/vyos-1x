@@ -163,7 +163,7 @@ def get_config(config=None):
 
     return wifi
 
-def wifi_phy_supported_bands(phy):
+def wifi_phy_supported_bands(phy: str) -> set[str] | None:
     # Return the set of radio bands ('2.4', '5', '6') the PHY provides, or None
     # when the capability cannot be determined (e.g. "iw" unavailable).
     try:
@@ -246,8 +246,8 @@ def verify(wifi):
         if mode == 'n':
             required_band = '5' if channel > 14 else '2.4'
         if required_band is not None:
-            supported_bands = wifi_phy_supported_bands(physical_device)
-            if supported_bands is not None and required_band not in supported_bands:
+            supported_bands = list(wifi_phy_supported_bands(physical_device) or ())
+            if supported_bands and required_band not in supported_bands:
                 raise ConfigError(
                     f'Wireless mode "{mode}" requires the {required_band} GHz band, '
                     f'which physical device "{physical_device}" does not provide!')
@@ -287,8 +287,8 @@ def verify(wifi):
             # the corresponding band - reject it otherwise instead of rendering a
             # hostapd configuration the hardware cannot honor.
             if he_band is not None:
-                supported_bands = wifi_phy_supported_bands(physical_device)
-                if supported_bands is not None and he_band not in supported_bands:
+                supported_bands = list(wifi_phy_supported_bands(physical_device) or ())
+                if supported_bands and he_band not in supported_bands:
                     raise ConfigError(
                         f'Physical device "{physical_device}" does not provide a '
                         f'{he_band} GHz band required by 802.11ax operating class '

@@ -1,0 +1,99 @@
+<?xml version="1.0"?>
+<interfaceDefinition>
+  <node name="set">
+    <children>
+      <node name="interfaces">
+        <properties>
+          <help>Set interface parameters</help>
+        </properties>
+        <children>
+          <node name="wwan">
+            <properties>
+              <help>Set Wireless Modem (WWAN) interface parameters</help>
+            </properties>
+            <children>
+              <virtualTagNode>
+                <properties>
+                  <help>Target WWAN interface</help>
+                  <completionHelp>
+                    <path>interfaces wwan</path>
+                    <script>cd /sys/class/net; ls -d wwan* 2>/dev/null</script>
+                  </completionHelp>
+                </properties>
+                <children>
+                  <tagNode name="firmware">
+                    <properties>
+                      <help>Install available WWAN firmware version</help>
+                      <completionHelp>
+                        <script>sudo ${vyos_op_scripts_dir}/wwan_firmware.py show_firmware --interface="${COMP_WORDS[3]}" --quiet</script>
+                      </completionHelp>
+                    </properties>
+                    <command>sudo ${vyos_op_scripts_dir}/wwan_firmware.py set_firmware --interface="$4" --version="$6"</command>
+                  </tagNode>
+                </children>
+              </virtualTagNode>
+            </children>
+          </node>
+        </children>
+      </node>
+    </children>
+  </node>
+  <node name="execute">
+    <properties>
+      <help>Execute operational commands</help>
+    </properties>
+    <children>
+      <node name="wwan">
+        <properties>
+          <help>Execute wwan operations</help>
+        </properties>
+        <children>
+          <leafNode name="stop-manager">
+            <properties>
+              <help>Stop the wwan manager service</help>
+            </properties>
+            <command>${vyos_op_scripts_dir}/wwan_firmware.py execute_stop_manager</command>
+          </leafNode>
+        </children>
+      </node>
+    </children>
+  </node>
+  <node name="delete">
+    <children>
+      <node name="interfaces">
+        <properties>
+          <help>Delete interface components</help>
+        </properties>
+        <children>
+          <node name="wwan">
+            <properties>
+              <help>Delete Wireless Modem (WWAN) components</help>
+            </properties>
+            <children>
+              <virtualTagNode>
+                <properties>
+                  <help>Target WWAN interface</help>
+                  <completionHelp>
+                    <path>interfaces wwan</path>
+                    <script>cd /sys/class/net; ls -d wwan* 2>/dev/null</script>
+                  </completionHelp>
+                </properties>
+                <children>
+                  <tagNode name="firmware">
+                    <properties>
+                      <help>Delete downloaded WWAN firmware version</help>
+                      <completionHelp>
+                        <script>sudo ${vyos_op_scripts_dir}/wwan_firmware.py show_firmware --interface="${COMP_WORDS[3]}" --quiet --downloaded-only</script>
+                      </completionHelp>
+                    </properties>
+                    <command>sudo ${vyos_op_scripts_dir}/wwan_firmware.py delete_firmware --interface="$4" --version="$6"</command>
+                  </tagNode>
+                </children>
+              </virtualTagNode>
+            </children>
+          </node>
+        </children>
+      </node>
+    </children>
+  </node>
+</interfaceDefinition>
