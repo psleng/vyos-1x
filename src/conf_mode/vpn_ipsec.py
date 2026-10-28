@@ -56,6 +56,8 @@ from vyos.utils.vti_updown_db import remove_vti_updown_db
 from vyos import ConfigError
 from vyos.base import Warning
 from vyos import airbag
+from vyos import tpm
+from vyos.ipsec import vici_load_key, vici_initiate_all_child_sa_by_ike, get_vici_connections
 airbag.enable()
 
 dhcp_wait_attempts = 2
@@ -721,6 +723,8 @@ def cleanup_pki_files():
                 os.unlink(file_path)
 
 def generate_pki_files_x509(pki, x509_conf):
+    # Return tpm file if necessary; will load these specially via vici
+    tpm_data = None
     for ca_cert_name in x509_conf['ca_certificate']:
         ca_cert_data = dict_search_args(pki, 'ca', ca_cert_name, 'certificate')
         ca_cert_crls = dict_search_args(pki, 'ca', ca_cert_name, 'crl') or []
@@ -742,10 +746,21 @@ def generate_pki_files_x509(pki, x509_conf):
     with open(os.path.join(CERT_PATH, f'{cert_name}.pem'), 'w') as f:
         f.write(wrap_certificate(cert_data))
 
-    with open(os.path.join(KEY_PATH, f'x509_{cert_name}.pem'), 'w') as f:
-        f.write(wrap_private_key(key_data, protected))
+    # We do not want tpm files present; swanctl may throw failures attempting to read them
+    if tpm.tpm_enabled():
+        if os.path.exists(f"{tpm.tpm_key_save_dir}{key_data}"):
+            tpm_data = key_data
+        else:
+            print(f"Could not find tpm files related to key {key_data}")
+    else:
+        with open(os.path.join(KEY_PATH, f'x509_{cert_name}.pem'), 'w') as f:
+            f.write(wrap_private_key(key_data, protected))
+
+    return tpm_data
 
 def generate_pki_files_rsa(pki, rsa_conf):
+    # Return tpm file if necessary; will load these specially via vici
+    tpm_data = None
     local_key_name = rsa_conf['local_key']
     local_key_data = dict_search_args(pki, 'key_pair', local_key_name, 'private', 'key')
     protected = 'passphrase' in rsa_conf
@@ -754,17 +769,39 @@ def generate_pki_files_rsa(pki, rsa_conf):
 
     local_key = load_private_key(local_key_data, rsa_conf['passphrase'] if protected else None)
 
-    with open(os.path.join(KEY_PATH, f'rsa_{local_key_name}.pem'), 'w') as f:
-        f.write(wrap_private_key(local_key_data, protected))
+    if tpm.tpm_enabled():
+        if os.path.exists(f"{tpm.tpm_key_save_dir}{local_key_data}"):
+            tpm_data = local_key_data
+            # Ideally we want to minimize number of times we unseal and amount of time the key spends in RAM
+            # Can try to read from pubkey, but since it's not mandatory, may need to unseal private key to determine the public one
+            local_pub_data = dict_search_args(pki, 'key_pair', local_key_name, 'public', 'key')
+            if local_pub_data:
+                with open(os.path.join(PUBKEY_PATH, f'{local_key_name}.pem'), 'w') as f:
+                    f.write(wrap_public_key(local_pub_data))
+            else:
+                local_private_key = tpm.read_tpm_key_file(tpm_data)
+                local_key = load_private_key(local_private_key, rsa_conf['passphrase'] if protected else None)
+                with open(os.path.join(PUBKEY_PATH, f'{local_key_name}.pem'), 'w') as f:
+                    f.write(encode_public_key(local_key.public_key()))
 
-    with open(os.path.join(PUBKEY_PATH, f'{local_key_name}.pem'), 'w') as f:
-        f.write(encode_public_key(local_key.public_key()))
+        else:
+            print(f"Could not find tpm files related to key {local_key_data}")
+    else:
+        with open(os.path.join(KEY_PATH, f'rsa_{local_key_name}.pem'), 'w') as f:
+            f.write(wrap_private_key(local_key_data, protected))
+
+        with open(os.path.join(PUBKEY_PATH, f'{local_key_name}.pem'), 'w') as f:
+            f.write(encode_public_key(local_key.public_key()))
 
     with open(os.path.join(PUBKEY_PATH, f'{remote_key_name}.pem'), 'w') as f:
         f.write(wrap_public_key(remote_key_data))
 
+    return tpm_data
+
 def generate(ipsec):
     cleanup_pki_files()
+    # List all tpm sealed files, since they will need to be loaded
+    ipsec['tpm_list'] = {'l2tp': [], 'remote_access': [], 'site_to_site': []}
 
     if not ipsec or 'deleted' in ipsec:
         for config_file in [charon_dhcp_conf, charon_radius_conf, interface_conf, swanctl_conf]:
@@ -788,7 +825,9 @@ def generate(ipsec):
 
     if 'l2tp' in ipsec:
         if 'authentication' in ipsec['l2tp'] and 'x509' in ipsec['l2tp']['authentication']:
-            generate_pki_files_x509(ipsec['pki'], ipsec['l2tp']['authentication']['x509'])
+            tpm_data = generate_pki_files_x509(ipsec['pki'], ipsec['l2tp']['authentication']['x509'])
+            if tpm_data:
+                ipsec['tpm_list']['l2tp'].append(tpm_data)
 
     if 'remote_access' in ipsec and 'connection' in ipsec['remote_access']:
         for rw, rw_conf in ipsec['remote_access']['connection'].items():
@@ -804,7 +843,9 @@ def generate(ipsec):
             ipsec['remote_access']['connection'][rw]['local_address'] = local_ip
 
             if 'authentication' in rw_conf and 'x509' in rw_conf['authentication']:
-                generate_pki_files_x509(ipsec['pki'], rw_conf['authentication']['x509'])
+                tpm_data = generate_pki_files_x509(ipsec['pki'], rw_conf['authentication']['x509'])
+                if tpm_data:
+                    ipsec['tpm_list']['remote_access'].append(tpm_data)
 
     if 'site_to_site' in ipsec and 'peer' in ipsec['site_to_site']:
         DEFAULT_TS_PREFIX = 'dynamic'
@@ -814,9 +855,13 @@ def generate(ipsec):
                 continue
 
             if peer_conf['authentication']['mode'] == 'x509':
-                generate_pki_files_x509(ipsec['pki'], peer_conf['authentication']['x509'])
+                tpm_data = generate_pki_files_x509(ipsec['pki'], peer_conf['authentication']['x509'])
+                if tpm_data:
+                    ipsec['tpm_list']['site_to_site'].append(tpm_data)
             elif peer_conf['authentication']['mode'] == 'rsa':
-                generate_pki_files_rsa(ipsec['pki'], peer_conf['authentication']['rsa'])
+                tpm_data = generate_pki_files_rsa(ipsec['pki'], peer_conf['authentication']['rsa'])
+                if tpm_data:
+                    ipsec['tpm_list']['site_to_site'].append(tpm_data)
 
             local_ip = ''
             if 'local_address' in peer_conf:
@@ -878,6 +923,31 @@ def apply(ipsec):
             remove_vti_updown_db()
     else:
         call(f'systemctl reload-or-restart {systemd_service}')
+        if tpm.tpm_enabled():
+            # The vici related functions can handle the connections when given the keys
+            for connection_type in ipsec['tpm_list']:
+                for tpm_file_to_read in ipsec['tpm_list'][connection_type]:
+                    try:
+                        key_value = tpm.read_tpm_key_file(tpm_file_to_read)
+                    except Exception:
+                        key_value = tpm_file_to_read
+                        print(f"Failed to read from: {key_value}")
+                        continue
+                    vici_load_key(key_value)
+                # We initiate a connection only if we are site-to-site; it will fail for remote
+                if connection_type == 'site_to_site':
+                    conns = get_vici_connections()
+                    for c in conns:
+                        for peer in c:
+                            # Skip any 'children' with any% as remote-id; those are not ips and will fail to initiate
+                            remote_addr = c[peer].get('remote_addrs', [])
+                            if not remote_addr or b'%any' in remote_addr:
+                                print(f'Skipping initiation of connection for {peer}')
+                                continue
+                            if 'children' in c[peer]:
+                                vici_initiate_all_child_sa_by_ike(peer, c[peer]['children'].keys())
+
+
         if ipsec['enabled_vti_interfaces']:
             with open_vti_updown_db_for_create_or_update() as db:
                 db.removeAllOtherInterfaces(ipsec['enabled_vti_interfaces'])

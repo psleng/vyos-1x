@@ -213,7 +213,7 @@ def get_revoked_by_serial_numbers(serial_numbers=[]):
 
 
 def install_certificate(
-    name, cert='', private_key=None, key_type=None, key_passphrase=None, is_ca=False
+    name, cert='', private_key=None, key_type=None, key_passphrase=None, is_ca=False, tpm_file=None
 ):
     # Show/install conf commands for certificate
     prefix = 'ca' if is_ca else 'certificate'
@@ -224,17 +224,24 @@ def install_certificate(
         cert_pem = ''.join(encode_certificate(cert).strip().split('\n')[1:-1])
         config_paths.append(f"{base} certificate '{cert_pem}'")
 
-    if private_key:
-        key_pem = ''.join(
-            encode_private_key(private_key, passphrase=key_passphrase)
-            .strip()
-            .split('\n')[1:-1]
-        )
-        config_paths.append(f"{base} private key '{key_pem}'")
-        if key_passphrase:
-            config_paths.append(f'{base} private password-protected')
+    if not tpm_file:
+        if private_key:
+            key_pem = ''.join(
+                encode_private_key(private_key, passphrase=key_passphrase)
+                .strip()
+                .split('\n')[1:-1]
+            )
+            config_paths.append(f"{base} private key '{key_pem}'")
+            if key_passphrase:
+                config_paths.append(f'{base} private password-protected')
 
-    install_into_config(conf, config_paths)
+        install_into_config(conf, config_paths)
+    else:
+        if private_key:
+            config_paths.append(f"{base} private key '{tpm_file}'")
+            print(f"File created: '{auth_dir}/{tpm_file}'")
+
+        install_into_config(conf, config_paths)
 
 
 def install_crl(ca_name, crl):
@@ -270,7 +277,7 @@ def install_ssh_key(name, public_key, private_key, passphrase=None):
 
 
 def install_keypair(
-    name, key_type, private_key=None, public_key=None, passphrase=None, prompt=True
+    name, key_type, private_key=None, public_key=None, passphrase=None, prompt=True, tpm_file=None
 ):
     # Show/install conf commands for key-pair
 
@@ -295,16 +302,21 @@ def install_keypair(
         install_private_key = not prompt or ask_yes_no(
             'Do you want to install the private key?', default=True
         )
-        private_key_pem = encode_private_key(private_key, passphrase=passphrase)
+        private_key_pem = encode_private_key(private_key, passphrase=passphrase) if not tpm_file else ''
 
         if install_private_key:
-            install_private_pem = ''.join(private_key_pem.strip().split('\n')[1:-1])
-            config_paths.append(
-                f"pki key-pair {name} private key '{install_private_pem}'"
-            )
-            if passphrase:
-                config_paths.append(f'pki key-pair {name} private password-protected')
-        else:
+            if not tpm_file:
+                install_private_pem = ''.join(private_key_pem.strip().split('\n')[1:-1])
+                config_paths.append(
+                    f"pki key-pair {name} private key '{install_private_pem}'"
+                )
+                if passphrase:
+                    config_paths.append(f'pki key-pair {name} private password-protected')
+            else:
+                config_paths.append(
+                    f"pki key-pair {name} private key '{tpm_file}'"
+                )
+        elif not tpm_file:
             print('Private key:')
             print(private_key_pem)
 
@@ -329,7 +341,7 @@ def install_wireguard_key(interface, private_key, public_key, tpm_enabled=None):
 
     # Check if we are running in a config session - if yes, we can directly write to the CLI
     if tpm_enabled:
-        private_key_path = "/config/auth/wireguard/"
+        private_key_path = f"{auth_dir}/wireguard/"
         install_into_config(
             conf, [f"interfaces wireguard {interface} private-key-tpm '{private_key}'"]
         )
@@ -385,7 +397,7 @@ def write_file(filename, contents):
 
 
 # Generation functions
-def generate_private_key():
+def generate_private_key(tpm_file=None):
     key_type = ask_input(
         'Enter private key type: [rsa, dsa, ec]',
         default='rsa',
@@ -409,7 +421,19 @@ def generate_private_key():
         valid_responses=size_valid,
     )
 
-    return create_private_key(key_type, size), key_type
+    private_key = create_private_key(key_type, size)
+    if tpm_file:
+        if not tpm.tpm_enabled():
+            print('Error: tpm does not exist!  Cannot use tpm commands to generate file!')
+            return private_key, key_type
+        key_pem = ''.join(
+            encode_private_key(private_key, passphrase=None)
+            .strip()
+            .split('\n')[1:-1]
+        )
+        tpm.write_tpm_key_file(str(key_pem).encode(), tpm_file)
+
+    return private_key, key_type
 
 
 def parse_san_string(san_string):
@@ -438,9 +462,18 @@ def generate_certificate_request(
     install=False,
     file=False,
     ask_san=True,
+    tpm_file=None
 ):
+    if tpm_file:
+        if name:
+            tpm_file = name
+        else:
+            tpm_file = None
     if not private_key:
-        private_key, key_type = generate_private_key()
+        private_key, key_type = generate_private_key(tpm_file=tpm_file)
+        generated_private_key = True
+    else:
+        generated_private_key = False
 
     default_values = get_default_values()
     subject = {}
@@ -477,7 +510,10 @@ def generate_certificate_request(
 
     if not install and not file:
         print(encode_certificate(cert_req))
-        print(encode_private_key(private_key, passphrase=passphrase))
+        if not tpm_file:
+            print(encode_private_key(private_key, passphrase=passphrase))
+        elif tpm_file and generated_private_key:
+            print(f'Created tpm-sealed private key in {auth_dir}/{tpm_file}')
         return None
 
     if install:
@@ -489,14 +525,18 @@ def generate_certificate_request(
             key_type=key_type,
             key_passphrase=passphrase,
             is_ca=False,
+            tpm_file=tpm_file
         )
 
     if file:
         write_file(f'{name}.csr', encode_certificate(cert_req))
-        write_file(
-            f'{name}.key', encode_private_key(private_key, passphrase=passphrase)
-        )
+        if not tpm_file or not generated_private_key:
+            write_file(
+                f'{name}.key', encode_private_key(private_key, passphrase=passphrase)
+            )
 
+    if tpm_file and generated_private_key:
+        print(f'Created tpm-sealed private key in {auth_dir}/{tpm_file}')
 
 def generate_certificate(
     cert_req, ca_cert, ca_private_key, is_ca=False, is_sub_ca=False
@@ -518,32 +558,49 @@ def generate_certificate(
     )
 
 
-def generate_ca_certificate(name, install=False, file=False):
-    private_key, key_type = generate_private_key()
+def generate_ca_certificate(name, install=False, file=False, tpm_file=None):
+    if tpm_file:
+        if name:
+            tpm_file = name
+        else:
+            tpm_file = None
+    private_key, key_type = generate_private_key(tpm_file)
     cert_req = generate_certificate_request(
-        private_key, key_type, return_request=True, ask_san=False
+        private_key, key_type, return_request=True, ask_san=False, tpm_file=tpm_file
     )
     cert = generate_certificate(cert_req, cert_req, private_key, is_ca=True)
     passphrase = ask_passphrase()
 
     if not install and not file:
         print(encode_certificate(cert))
-        print(encode_private_key(private_key, passphrase=passphrase))
+        if not tpm_file:
+            print(encode_private_key(private_key, passphrase=passphrase))
+        else:
+            print(f'Created tpm-sealed private key in {auth_dir}/{tpm_file}')
         return None
 
     if install:
         install_certificate(
-            name, cert, private_key, key_type, key_passphrase=passphrase, is_ca=True
+            name, cert, private_key, key_type, key_passphrase=passphrase, is_ca=True, tpm_file=tpm_file
         )
 
     if file:
         write_file(f'{name}.pem', encode_certificate(cert))
-        write_file(
-            f'{name}.key', encode_private_key(private_key, passphrase=passphrase)
-        )
+        if not tpm_file:
+            write_file(
+                f'{name}.key', encode_private_key(private_key, passphrase=passphrase)
+            )
+
+    if tpm_file:
+        print(f'Created tpm-sealed private key in {auth_dir}/{tpm_file}')
 
 
-def generate_ca_certificate_sign(name, ca_name, install=False, file=False):
+def generate_ca_certificate_sign(name, ca_name, install=False, file=False, tpm_file=None):
+    if tpm_file:
+        if name:
+            tpm_file = name
+        else:
+            tpm_file = None
     ca_dict = get_config_ca_certificate(ca_name)
 
     if not ca_dict:
@@ -557,6 +614,9 @@ def generate_ca_certificate_sign(name, ca_name, install=False, file=False):
         return None
 
     ca_private = ca_dict['private']
+    # TODO: possibility exists for an unrelated tpm file to exist with exact same name and we use that
+    if tpm.tpm_enabled() and os.path.exists(f"{auth_dir}/{ca_private['key']}"):
+        ca_private['key'] = tpm.read_tpm_key_file(f"{auth_dir}/{ca_private['key']}")
     ca_private_passphrase = None
     if 'password_protected' in ca_private:
         ca_private_passphrase = ask_input('Enter signing CA private key passphrase:')
@@ -573,9 +633,9 @@ def generate_ca_certificate_sign(name, ca_name, install=False, file=False):
 
     cert_req = None
     if not ask_yes_no('Do you already have a certificate request?'):
-        private_key, key_type = generate_private_key()
+        private_key, key_type = generate_private_key(tpm_file)
         cert_req = generate_certificate_request(
-            private_key, key_type, return_request=True, ask_san=False
+            private_key, key_type, return_request=True, ask_san=False, tpm_file=tpm_file
         )
     else:
         print('Paste certificate request and press enter:')
@@ -583,9 +643,11 @@ def generate_ca_certificate_sign(name, ca_name, install=False, file=False):
         curr_line = ''
         while True:
             curr_line = input().strip()
-            if not curr_line or curr_line == CERT_REQ_END:
+            if not curr_line:
                 break
             lines.append(curr_line)
+            if curr_line == CERT_REQ_END:
+                break
 
         if not lines:
             print('Aborted')
@@ -610,24 +672,32 @@ def generate_ca_certificate_sign(name, ca_name, install=False, file=False):
 
     if not install and not file:
         print(encode_certificate(cert))
-        if private_key is not None:
+        if private_key is not None and not tpm_file:
             print(encode_private_key(private_key, passphrase=passphrase))
         return None
 
     if install:
         install_certificate(
-            name, cert, private_key, key_type, key_passphrase=passphrase, is_ca=True
+            name, cert, private_key, key_type, key_passphrase=passphrase, is_ca=True, tpm_file=tpm_file
         )
 
     if file:
         write_file(f'{name}.pem', encode_certificate(cert))
-        if private_key is not None:
+        if private_key is not None and not tpm_file:
             write_file(
                 f'{name}.key', encode_private_key(private_key, passphrase=passphrase)
             )
 
+    if tpm_file:
+        print(f'Created tpm-sealed private key in {auth_dir}/{tpm_file}')
 
-def generate_certificate_sign(name, ca_name, install=False, file=False):
+
+def generate_certificate_sign(name, ca_name, install=False, file=False, tpm_file=None):
+    if tpm_file:
+        if name:
+            tpm_file = name
+        else:
+            tpm_file = None
     ca_dict = get_config_ca_certificate(ca_name)
 
     if not ca_dict:
@@ -641,6 +711,9 @@ def generate_certificate_sign(name, ca_name, install=False, file=False):
         return None
 
     ca_private = ca_dict['private']
+    # TODO: possibility exists for an unrelated tpm file to exist with exact same name and we use that
+    if tpm.tpm_enabled() and os.path.exists(f"{auth_dir}/{ca_private['key']}"):
+        ca_private['key'] = tpm.read_tpm_key_file(f"{auth_dir}/{ca_private['key']}")
     ca_private_passphrase = None
     if 'password_protected' in ca_private:
         ca_private_passphrase = ask_input('Enter CA private key passphrase:')
@@ -657,9 +730,9 @@ def generate_certificate_sign(name, ca_name, install=False, file=False):
 
     cert_req = None
     if not ask_yes_no('Do you already have a certificate request?'):
-        private_key, key_type = generate_private_key()
+        private_key, key_type = generate_private_key(tpm_file)
         cert_req = generate_certificate_request(
-            private_key, key_type, return_request=True
+            private_key, key_type, return_request=True, tpm_file=tpm_file
         )
     else:
         print('Paste certificate request and press enter:')
@@ -667,9 +740,11 @@ def generate_certificate_sign(name, ca_name, install=False, file=False):
         curr_line = ''
         while True:
             curr_line = input().strip()
-            if not curr_line or curr_line == CERT_REQ_END:
+            if not curr_line:
                 break
             lines.append(curr_line)
+            if curr_line == CERT_REQ_END:
+                break
 
         if not lines:
             print('Aborted')
@@ -692,21 +767,24 @@ def generate_certificate_sign(name, ca_name, install=False, file=False):
 
     if not install and not file:
         print(encode_certificate(cert))
-        if private_key is not None:
+        if private_key is not None and not tpm_file:
             print(encode_private_key(private_key, passphrase=passphrase))
         return None
 
     if install:
         install_certificate(
-            name, cert, private_key, key_type, key_passphrase=passphrase, is_ca=False
+            name, cert, private_key, key_type, key_passphrase=passphrase, is_ca=False, tpm_file=tpm_file
         )
 
     if file:
         write_file(f'{name}.pem', encode_certificate(cert))
-        if private_key is not None:
+        if private_key is not None and not tpm_file:
             write_file(
                 f'{name}.key', encode_private_key(private_key, passphrase=passphrase)
             )
+
+    if tpm_file:
+        print(f'Created tpm-sealed private key in {auth_dir}/{tpm_file}')
 
 
 def generate_certificate_selfsign(name, install=False, file=False):
@@ -852,26 +930,35 @@ def generate_dh_parameters(name, install=False, file=False):
         write_file(f'{name}.pem', encode_dh_parameters(dh_params))
 
 
-def generate_keypair(name, install=False, file=False):
-    private_key, key_type = generate_private_key()
+def generate_keypair(name, install=False, file=False, tpm_file=None):
+    if tpm_file:
+        if name:
+            tpm_file = name
+        else:
+            tpm_file = None
+    private_key, key_type = generate_private_key(tpm_file=tpm_file)
     public_key = private_key.public_key()
     passphrase = ask_passphrase()
 
     if not install and not file:
         print(encode_public_key(public_key))
         print('')
-        print(encode_private_key(private_key, passphrase=passphrase))
+        if not tpm_file:
+            print(encode_private_key(private_key, passphrase=passphrase))
         return None
 
     if install:
-        install_keypair(name, key_type, private_key, public_key, passphrase)
+        install_keypair(name, key_type, private_key, public_key, passphrase, tpm_file=tpm_file)
 
     if file:
         write_file(f'{name}.pem', encode_public_key(public_key))
-        write_file(
-            f'{name}.key', encode_private_key(private_key, passphrase=passphrase)
-        )
+        if not tpm_file:
+            write_file(
+                f'{name}.key', encode_private_key(private_key, passphrase=passphrase)
+            )
 
+    if tpm_file:
+        print(f'Created tpm-sealed private key in {auth_dir}/{tpm_file}')
 
 def generate_openvpn_key(name, install=False, file=False):
     result = cmd('openvpn --genkey secret /dev/stdout | grep -o "^[^#]*"')
@@ -1184,16 +1271,16 @@ def generate_pki(
     try:
         if pki_type == 'ca':
             if sign:
-                generate_ca_certificate_sign(name, sign, install=install, file=file)
+                generate_ca_certificate_sign(name, sign, install=install, file=file, tpm_file=tpm_file if tpm.tpm_enabled() else None)
             else:
-                generate_ca_certificate(name, install=install, file=file)
+                generate_ca_certificate(name, install=install, file=file, tpm_file=tpm_file if tpm.tpm_enabled() else None)
         elif pki_type == 'certificate':
             if sign:
-                generate_certificate_sign(name, sign, install=install, file=file)
+                generate_certificate_sign(name, sign, install=install, file=file, tpm_file=tpm_file if tpm.tpm_enabled() else None)
             elif self_sign:
                 generate_certificate_selfsign(name, install=install, file=file)
             else:
-                generate_certificate_request(name=name, install=install, file=file)
+                generate_certificate_request(name=name, install=install, file=file, tpm_file=tpm_file if tpm.tpm_enabled() else None)
 
         elif pki_type == 'crl':
             generate_certificate_revocation_list(name, install=install, file=file)
@@ -1205,7 +1292,7 @@ def generate_pki(
             generate_dh_parameters(name, install=install, file=file)
 
         elif pki_type == 'key-pair':
-            generate_keypair(name, install=install, file=file)
+            generate_keypair(name, install=install, file=file, tpm_file=tpm_file if tpm.tpm_enabled() else None)
 
         elif pki_type == 'openvpn':
             generate_openvpn_key(name, install=install, file=file)

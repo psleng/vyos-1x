@@ -221,6 +221,145 @@
             </children>
             <command>${vyos_op_scripts_dir}/pki.py generate_pki --pki-type key-pair</command>
           </node>
+          <node name="ipsec">
+            <properties>
+              <help>Generate certificates and keys for use in ipsec commands</help>
+            </properties>
+            <children>
+              <node name="certificate">
+                <properties>
+                  <help>Generate certificate request</help>
+                </properties>
+                <children>
+                  <tagNode name="file">
+                    <properties>
+                      <help>Write generated certificate request and key into the specified filename</help>
+                      <completionHelp>
+                        <list>&lt;filename&gt;</list>
+                      </completionHelp>
+                    </properties>
+                    <command>${vyos_op_scripts_dir}/pki.py generate_pki --pki-type certificate --name "$6" --file --tpm-file sealed</command>
+                  </tagNode>
+                  <tagNode name="install">
+                    <properties>
+                      <help>Commands for installing generated certificate private key into running configuration, using given name as filename</help>
+                      <completionHelp>
+                        <list>&lt;certificate_name&gt;</list>
+                      </completionHelp>
+                    </properties>
+                    <command>${vyos_op_scripts_dir}/pki.py generate_pki --pki-type certificate --name "$6" --install --tpm-file sealed</command>
+                  </tagNode>
+                  <tagNode name="sign">
+                    <properties>
+                      <help>Sign generated certificate with specified CA certificate</help>
+                      <completionHelp>
+                        <path>pki ca</path>
+                      </completionHelp>
+                    </properties>
+                    <children>
+                      <tagNode name="file">
+                        <properties>
+                          <help>Write generated signed certificate into the specified filename</help>
+                          <completionHelp>
+                            <list>&lt;filename&gt;</list>
+                          </completionHelp>
+                        </properties>
+                        <command>${vyos_op_scripts_dir}/pki.py generate_pki --pki-type certificate --name "$8" --sign "$6" --file --tpm-file sealed</command>
+                      </tagNode>
+                      <tagNode name="install">
+                        <properties>
+                          <help>Commands for installing generated signed certificate into running configuration</help>
+                          <completionHelp>
+                            <list>&lt;certificate name&gt;</list>
+                          </completionHelp>
+                        </properties>
+                        <command>${vyos_op_scripts_dir}/pki.py generate_pki --pki-type certificate --name "$8" --sign "$6" --install --tpm-file sealed</command>
+                      </tagNode>
+                    </children>
+                  </tagNode>
+                </children>
+              </node>
+              <node name="ca">
+                <properties>
+                  <help>Generate CA certificate</help>
+                </properties>
+                <children>
+                  <tagNode name="sign">
+                    <properties>
+                      <help>Sign generated CA certificate with another specified CA certificate</help>
+                      <completionHelp>
+                        <path>pki ca</path>
+                      </completionHelp>
+                    </properties>
+                    <children>
+                      <tagNode name="file">
+                        <properties>
+                          <help>Write generated CA certificate into the specified filename</help>
+                          <completionHelp>
+                            <list>&lt;filename&gt;</list>
+                          </completionHelp>
+                        </properties>
+                        <command>${vyos_op_scripts_dir}/pki.py generate_pki --pki-type ca --name "$8" --sign "$6" --file --tpm-file sealed</command>
+                      </tagNode>
+                      <tagNode name="install">
+                        <properties>
+                          <help>Commands for installing generated CA certificate into running configuration, using given name as as filename</help>
+                          <completionHelp>
+                            <list>&lt;certificate_name&gt;</list>
+                          </completionHelp>
+                        </properties>
+                        <command>${vyos_op_scripts_dir}/pki.py generate_pki --pki-type ca --name "$8" --sign "$6" --install --tpm-file sealed</command>
+                      </tagNode>
+                    </children>
+                    <command>${vyos_op_scripts_dir}/pki.py generate_pki --pki-type ca --sign "$6"</command>
+                  </tagNode>
+                  <tagNode name="file">
+                    <properties>
+                      <help>Write generated CA certificate into the specified filename</help>
+                      <completionHelp>
+                        <list>&lt;filename&gt;</list>
+                      </completionHelp>
+                    </properties>
+                    <command>${vyos_op_scripts_dir}/pki.py generate_pki --pki-type ca --name "$6" --file --tpm-file sealed</command>
+                  </tagNode>
+                  <tagNode name="install">
+                    <properties>
+                      <help>Commands for installing generated CA certificate into running configuration</help>
+                      <completionHelp>
+                        <list>&lt;CA name&gt;</list>
+                      </completionHelp>
+                    </properties>
+                    <command>${vyos_op_scripts_dir}/pki.py generate_pki --pki-type ca --name "$6" --install --tpm-file sealed</command>
+                  </tagNode>
+                </children>
+              </node>
+              <node name="key-pair">
+                <properties>
+                  <help>Generate a key pair</help>
+                </properties>
+                <children>
+                  <tagNode name="file">
+                    <properties>
+                      <help>Write generated key pair into the specified filename</help>
+                      <completionHelp>
+                        <list>&lt;filename&gt;</list>
+                      </completionHelp>
+                    </properties>
+                    <command>${vyos_op_scripts_dir}/pki.py generate_pki --pki-type key-pair --name "$6" --file --tpm-file sealed</command>
+                  </tagNode>
+                  <tagNode name="install">
+                    <properties>
+                      <help>Commands for installing generated key pair into running configuration, using given name as filename</help>
+                      <completionHelp>
+                        <list>&lt;keyname&gt;</list>
+                      </completionHelp>
+                    </properties>
+                    <command>${vyos_op_scripts_dir}/pki.py generate_pki --pki-type key-pair --name "$6" --install --tpm-file sealed</command>
+                  </tagNode>
+                </children>
+              </node>
+            </children>
+          </node>
           <node name="openvpn">
             <properties>
               <help>Generate OpenVPN keys</help>
