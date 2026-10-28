@@ -125,6 +125,23 @@ TRAP_MAP: Dict[str, Tuple[str, List[Tuple[Tuple[int, ...], str, str, str]]]] = {
             (IF_ENTRY + (8,), 'i', '_active_slot', 'if'),
         ],
     ),
+    # igosWwanSimRemoved (.11) / igosWwanSimInserted (.12)
+    'WWAN_SIM_REMOVED': (
+        f'{NOTIF_BASE}.11',
+        [
+            (EVENT_SLOT_OID, 'i', '_active_slot', 'scalar'),
+            (IF_ENTRY + (8,), 'i', '_active_slot', 'if'),
+            (IF_ENTRY + (15,), 's', 'message', 'if'),
+        ],
+    ),
+    'WWAN_SIM_INSERTED': (
+        f'{NOTIF_BASE}.12',
+        [
+            (EVENT_SLOT_OID, 'i', '_active_slot', 'scalar'),
+            (SIM_ENTRY + (4,), 's', 'iccid', 'sim'),
+            (IF_ENTRY + (8,), 'i', '_active_slot', 'if'),
+        ],
+    ),
     # igosWwanBearerUp (.4) / igosWwanBearerDown (.5)
     'WWAN_BEARER_UP': (
         f'{NOTIF_BASE}.4',
