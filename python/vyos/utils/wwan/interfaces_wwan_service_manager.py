@@ -167,6 +167,8 @@ class ConfigServiceManager:
         'reconnect_attempt': ('connectivity', 'WWAN_RECONNECT_ATTEMPT'),
         'sim_failover': ('sim', 'WWAN_SIM_FAILOVER'),
         'sim_switch': ('sim', 'WWAN_SIM_SWITCH'),
+        'sim_removed': ('sim', 'WWAN_SIM_REMOVED'),
+        'sim_inserted': ('sim', 'WWAN_SIM_INSERTED'),
         'fsm_failed': ('connectivity', 'WWAN_FSM_FAILED'),
         'usage_warning': ('usage', 'WWAN_USAGE_WARNING'),
         'usage_limit_exceeded': ('usage', 'WWAN_USAGE_LIMIT_EXCEEDED'),
@@ -243,8 +245,14 @@ class ConfigServiceManager:
             'sequence': 0,
             'source': 'wwan-fsm',
             'type': 'event',
-            'code': 'WWAN_EVENT',
-            'category': 'connectivity',
+            # code/category intentionally start empty so the type->code
+            # derivation below actually runs. Pre-seeding them with the
+            # WWAN_EVENT/connectivity fallback here made `if not base.get('code')`
+            # always false, so the derivation was dead code: every alert shipped
+            # as the generic WWAN_EVENT, which the SNMP trap emitter's TRAP_MAP
+            # does not map -> no WWAN trap was ever sent for any event.
+            'code': '',
+            'category': '',
             'severity': 'info',
             'message': '',
             'interface_number': -1,

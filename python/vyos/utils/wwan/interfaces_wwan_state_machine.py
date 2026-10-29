@@ -801,6 +801,13 @@ class ModemStateMachine:
         self._last_failed_investigation_ts = 0.0
         self._last_failed_investigation_reason = None
 
+        # Per-slot guard: slots with an "open" sim_removed alert. A modem
+        # wedged with a slot empty emits a single WWAN_SIM_REMOVED per removal
+        # (not one per FAILED-state poll), and the matching WWAN_SIM_INSERTED
+        # fires only for a slot we actually saw removed (avoids boot/failover
+        # noise). Dual-SIM: tracked per slot; cleared per slot on reinsertion.
+        self._sim_removed_slots = set()
+
         # SIM PIN/PUK unlock safety — try only once per boot cycle
         self._pin_unlock_attempted = False    # True after first PIN attempt (success or failure)
         self._puk_unlock_attempted = False    # True after first PUK attempt (success or failure)
@@ -4777,6 +4784,10 @@ class ModemStateMachine:
                     logger.info("SIM interface ready",
                                extra={'interface_number': self.interface_number,
                                       'sim_path': sim_path})
+                    # Security/presence event: a SIM is present again (modem-
+                    # reported path). Guard-protected: only emits (and probes
+                    # the ICCID) for a slot previously reported removed.
+                    await self._emit_sim_inserted()
                     return sim_path
             except Exception as e:  # noqa: BLE001 -- poll through transient errors
                 last_err = e
@@ -7565,6 +7576,94 @@ class ModemStateMachine:
             logger.error(f"SIM switch cleanup failed entirely: {e}",
                         extra={'interface_number': self.interface_number})
 
+    def _active_slot_for_alert(self, slot=None) -> int:
+        """Best-effort SIM slot number for a SIM presence alert."""
+        try:
+            if slot:
+                return int(slot)
+        except (TypeError, ValueError):
+            pass
+        return int(self.current_active_sim or self.primary_sim_slot or 1)
+
+    def _emit_sim_removed_alert(self, slot=None):
+        """Emit a per-slot WWAN_SIM_REMOVED security alert when the SIM in a
+        slot is physically removed (or the slot is empty at boot).
+
+        A modem whose active SIM was pulled sits in ``state=failed
+        reason=sim-missing`` and never passes through the normal
+        CONFIGURING/CONNECTING -> FAILED transition, so without an explicit
+        emit this (security-relevant) event produces no SNMP trap at all. The
+        per-slot guard keeps a wedged modem from trap-storming and is cleared
+        when a SIM is re-inserted into that slot.
+        """
+        slot = self._active_slot_for_alert(slot)
+        if slot in self._sim_removed_slots:
+            return
+        self._sim_removed_slots.add(slot)
+        self._emit_alert(
+            alert_type='sim_removed',
+            severity='critical',
+            message=f'SIM removed from slot {slot}',
+            active_sim_slot=slot,
+        )
+
+    def _emit_sim_inserted_alert(self, slot=None, iccid=''):
+        """Emit a per-slot WWAN_SIM_INSERTED alert when a SIM is (re)inserted.
+
+        Fires only for a slot previously flagged removed, so a SIM present at
+        boot (or an unrelated failover slot) does not generate spurious
+        inserts, and repeated pull/insert cycles keep trapping correctly.
+        """
+        slot = self._active_slot_for_alert(slot)
+        if slot not in self._sim_removed_slots:
+            return
+        self._sim_removed_slots.discard(slot)
+        self._emit_alert(
+            alert_type='sim_inserted',
+            severity='warning',
+            message=f'SIM inserted in slot {slot}',
+            active_sim_slot=slot,
+            iccid=str(iccid or ''),
+        )
+
+    async def _read_slot_iccid(self, slot: int, attempts: int = 5,
+                               delay: float = 0.5) -> str:
+        """Best-effort read of a slot's ICCID (SimIdentifier).
+
+        When a SIM first becomes "ready" ModemManager has often not read the
+        card's ICCID yet, so poll a few times (bounded) until it appears.
+        Returns '' if it never populates within the window.
+        """
+        for _ in range(max(1, attempts)):
+            info = await self._probe_sim_slot_info(slot)
+            iccid = str(info.get('iccid') or '')
+            if iccid:
+                return iccid
+            await asyncio.sleep(delay)
+        return ''
+
+    async def _emit_sim_inserted(self, slot=None):
+        """Probe the ICCID (best-effort) then emit WWAN_SIM_INSERTED.
+
+        The ICCID probe runs only when we will actually emit (the slot was
+        previously reported removed), so the normal connect path pays no extra
+        D-Bus cost for a SIM that was never pulled.  The ICCID is strictly
+        best-effort: a slow, empty, or failed read must NEVER suppress the
+        (security-relevant) insertion alert — it just goes out with an empty
+        ICCID.
+        """
+        slot = self._active_slot_for_alert(slot)
+        if slot not in self._sim_removed_slots:
+            return
+        iccid = ''
+        try:
+            iccid = await self._read_slot_iccid(slot)
+        except Exception as e:  # noqa: BLE001 -- ICCID is optional; never block the alert
+            logger.debug(
+                f"ICCID read failed for insertion alert (slot {slot}): {e}",
+                extra={'interface_number': self.interface_number})
+        self._emit_sim_inserted_alert(slot, iccid=iccid)
+
     async def _handle_failed_state_event(self, mm_state):
         """Handle ModemManager FAILED/UNKNOWN state transition.
 
@@ -7704,6 +7803,7 @@ class ModemStateMachine:
                                'active_slot': active,
                                'active_present': active_present,
                                'present_slots': sorted(present)})
+                    self._emit_sim_removed_alert()
                     self._cancel_failed_retry()
                     self.transition(ModemEvent.SIM_MISSING)
                     await self._handle_sim_missing_failover()
@@ -7727,6 +7827,7 @@ class ModemStateMachine:
                     "triggering SIM failover",
                     extra={'interface_number': self.interface_number,
                            'failed_reason_name': reason_name})
+                self._emit_sim_removed_alert()
                 self._cancel_failed_retry()  # SIM event supersedes retry
                 self.transition(ModemEvent.SIM_MISSING)
                 await self._handle_sim_missing_failover()
@@ -8144,6 +8245,7 @@ class ModemStateMachine:
                 extra={'interface_number': self.interface_number,
                        'slot': slot, 'confirmation_seconds': grace,
                        'fsm_state': self.machine.current_state})
+            self._emit_sim_removed_alert(slot)
             self._cancel_failed_retry()  # SIM event supersedes retry
             await self._handle_sim_missing_failover()
         except asyncio.CancelledError:
@@ -8172,6 +8274,10 @@ class ModemStateMachine:
                             extra={'interface_number': self.interface_number,
                                    'slot': slot})
                 return
+
+            # Security/presence event: a SIM physically returned to this slot
+            # (GPIO SIM-detect absent->present edge).
+            await self._emit_sim_inserted(slot)
 
             selected = (self.current_active_sim
                         or (self.config or {}).get('primary_sim_slot', 1))

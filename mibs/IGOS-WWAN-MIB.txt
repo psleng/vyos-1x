@@ -951,6 +951,30 @@ IGOS-WWAN-MIB DEFINITIONS ::= BEGIN
         DESCRIPTION "FSM triggered a modem hardware reset."
         ::= { igosWwanNotifPrefix 10 }
 
+    igosWwanSimRemoved NOTIFICATION-TYPE
+        OBJECTS { igosWwanEventSlot,
+                  igosWwanIfActiveSlot,
+                  igosWwanIfLastEventDescription }
+        STATUS  current
+        DESCRIPTION
+            "A SIM was physically removed from the slot identified by
+             igosWwanEventSlot.  Security/tamper relevant; when the removed
+             slot is the active slot this also takes cellular service down
+             until a working SIM is present."
+        ::= { igosWwanNotifPrefix 11 }
+
+    igosWwanSimInserted NOTIFICATION-TYPE
+        OBJECTS { igosWwanEventSlot,
+                  igosWwanSimIccid,
+                  igosWwanIfActiveSlot }
+        STATUS  current
+        DESCRIPTION
+            "A SIM was inserted into the slot identified by
+             igosWwanEventSlot.  igosWwanSimIccid carries the inserted card's
+             ICCID when known.  Security/tamper relevant.  Emitted only for a
+             slot previously reported via igosWwanSimRemoved."
+        ::= { igosWwanNotifPrefix 12 }
+
     -- ================================================================
     -- Conformance
     -- ================================================================
@@ -1037,7 +1061,7 @@ IGOS-WWAN-MIB DEFINITIONS ::= BEGIN
             igosWwanRegistrationLost, igosWwanBearerUp, igosWwanBearerDown,
             igosWwanSignalDegraded, igosWwanDataLimitWarning,
             igosWwanDataLimitReached, igosWwanSimSwapDetected,
-            igosWwanHardwareReset
+            igosWwanHardwareReset, igosWwanSimRemoved, igosWwanSimInserted
         }
         STATUS current DESCRIPTION "All WWAN traps."
         ::= { igosWwanGroups 8 }

@@ -448,6 +448,13 @@ Recommends:
 # VM and x86 generic images are unaffected. Pulled in for hardware
 # flavors via the igOS platform fragments in vyos-build.
   python3-libgpiod,
+# Telit FN920C04 cellular modem firmware-loader (tfl) and control (uxfp)
+# tools. Soft runtime deps like python3-libgpiod: only meaningful on igOS
+# hardware flavors with a cellular modem, so they are pulled in for those
+# images via the igOS platform fragments in vyos-build rather than hard
+# Depends. Cloud, VM and x86 generic images are unaffected.
+  tfl,
+  uxfp,
 Description: VyOS configuration scripts and data
  VyOS configuration scripts, interface definitions, and everything
 

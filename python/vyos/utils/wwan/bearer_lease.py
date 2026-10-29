@@ -86,7 +86,7 @@ class Lease:
     interface_number:
         WWAN interface index (the ``N`` in ``wwanN``).
     owner:
-        Allow-listed client identity, e.g. ``"wlb-failover"``, ``"dod-traffic"``
+        Allow-listed client identity, e.g. ``"failover"``, ``"dod-traffic"``
         or ``"cli"``.  Unique per interface: re-acquiring with the same owner
         refreshes the existing lease rather than stacking a second one.
     reason:

@@ -93,9 +93,9 @@ class TestBearerLeaseRegistry(TestCase):
         self.assertTrue(self.reg.any_live(0))
 
     def test_renew_preserves_acquired_at_age(self):
-        self.reg.acquire(0, 'wlb-failover', ttl=15)
+        self.reg.acquire(0, 'failover', ttl=15)
         self.clock.advance(10)
-        self.reg.renew(0, 'wlb-failover', ttl=15)
+        self.reg.renew(0, 'failover', ttl=15)
         snap = self.reg.snapshot(0)[0]
         # age is measured from first acquisition, not the renew
         self.assertAlmostEqual(snap['age'], 10.0)
@@ -103,11 +103,11 @@ class TestBearerLeaseRegistry(TestCase):
     # ---- multiple owners ---------------------------------------------------
 
     def test_multiple_owners_or_together(self):
-        self.reg.acquire(0, 'wlb-failover', ttl=15)
+        self.reg.acquire(0, 'failover', ttl=15)
         self.reg.acquire(0, 'dod-traffic', ttl=30)
         self.assertTrue(self.reg.any_live(0))
-        self.assertEqual(self.reg.owners(0), ['dod-traffic', 'wlb-failover'])
-        # traffic lapses first; failover still holds demand up
+        self.assertEqual(self.reg.owners(0), ['dod-traffic', 'failover'])
+        # the shorter failover lease lapses first; traffic still holds demand up
         self.clock.advance(16)
         self.assertTrue(self.reg.any_live(0))
         self.assertEqual(self.reg.owners(0), ['dod-traffic'])
@@ -122,10 +122,10 @@ class TestBearerLeaseRegistry(TestCase):
         self.assertEqual(leases[0].reason, 'second')
 
     def test_release_owner_everywhere(self):
-        self.reg.acquire(0, 'wlb-failover', ttl=15)
-        self.reg.acquire(1, 'wlb-failover', ttl=15)
+        self.reg.acquire(0, 'failover', ttl=15)
+        self.reg.acquire(1, 'failover', ttl=15)
         self.reg.acquire(1, 'dod-traffic', ttl=30)
-        removed = self.reg.release_owner('wlb-failover')
+        removed = self.reg.release_owner('failover')
         self.assertEqual(sorted(removed), [0, 1])
         self.assertFalse(self.reg.any_live(0))
         self.assertEqual(self.reg.owners(1), ['dod-traffic'])
@@ -167,12 +167,12 @@ class TestBearerLeaseRegistry(TestCase):
     # ---- snapshot ----------------------------------------------------------
 
     def test_snapshot_shape(self):
-        self.reg.acquire(0, 'wlb-failover', ttl=15, reason='active failover target')
+        self.reg.acquire(0, 'failover', ttl=15, reason='active failover target')
         self.clock.advance(5)
         snap = self.reg.snapshot(0)
         self.assertEqual(len(snap), 1)
         entry = snap[0]
-        self.assertEqual(entry['owner'], 'wlb-failover')
+        self.assertEqual(entry['owner'], 'failover')
         self.assertEqual(entry['reason'], 'active failover target')
         self.assertEqual(entry['ttl'], 15)
         self.assertAlmostEqual(entry['expires_in'], 10.0)

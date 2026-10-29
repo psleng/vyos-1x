@@ -108,7 +108,7 @@ class TestReconcileBearerDemand(TestCase):
 
     def test_always_on_ignores_leases(self):
         fsm = _make_fsm(self.clock, mode='always-on', state=IDLE)
-        fsm.bearer_leases.acquire(0, 'wlb-failover', ttl=15)
+        fsm.bearer_leases.acquire(0, 'failover', ttl=15)
         fsm._reconcile_bearer_demand()
         fsm.transition.assert_not_called()
 
@@ -117,7 +117,7 @@ class TestReconcileBearerDemand(TestCase):
     def test_lease_connects_from_registered_idle(self):
         fsm = _make_fsm(self.clock, state=IDLE)
         fsm.user_disconnected = True
-        fsm.bearer_leases.acquire(0, 'wlb-failover', ttl=15)
+        fsm.bearer_leases.acquire(0, 'failover', ttl=15)
         fsm._reconcile_bearer_demand()
         fsm.transition.assert_called_once_with(ModemEvent.CONNECT)
         self.assertTrue(fsm._lease_owns_bearer)
@@ -125,14 +125,14 @@ class TestReconcileBearerDemand(TestCase):
 
     def test_lease_queues_connect_from_failed(self):
         fsm = _make_fsm(self.clock, state=ModemState.FAILED.value)
-        fsm.bearer_leases.acquire(0, 'wlb-failover', ttl=15)
+        fsm.bearer_leases.acquire(0, 'failover', ttl=15)
         fsm._reconcile_bearer_demand()
         fsm.transition.assert_not_called()
         self.assertTrue(fsm.connect_requested)
 
     def test_transitional_state_defers(self):
         fsm = _make_fsm(self.clock, state=ModemState.CONNECTING.value)
-        fsm.bearer_leases.acquire(0, 'wlb-failover', ttl=15)
+        fsm.bearer_leases.acquire(0, 'failover', ttl=15)
         fsm._reconcile_bearer_demand()
         fsm.transition.assert_not_called()
         self.assertFalse(fsm.connect_requested)
@@ -141,12 +141,12 @@ class TestReconcileBearerDemand(TestCase):
 
     def test_release_idles_owned_bearer_after_grace(self):
         fsm = _make_fsm(self.clock, state=IDLE)
-        fsm.bearer_leases.acquire(0, 'wlb-failover', ttl=15)
+        fsm.bearer_leases.acquire(0, 'failover', ttl=15)
         fsm._reconcile_bearer_demand()
         fsm.machine.current_state = CONNECTED
         fsm.transition.reset_mock()
 
-        fsm.bearer_leases.release(0, 'wlb-failover')
+        fsm.bearer_leases.release(0, 'failover')
         self._tick(fsm, 0)         # arms the grace deadline
         self._tick(fsm, 4)         # still inside the 5s grace
         fsm.transition.assert_not_called()
@@ -156,7 +156,7 @@ class TestReconcileBearerDemand(TestCase):
 
     def test_expired_lease_idles_owned_bearer(self):
         fsm = _make_fsm(self.clock, state=IDLE)
-        fsm.bearer_leases.acquire(0, 'wlb-failover', ttl=15)
+        fsm.bearer_leases.acquire(0, 'failover', ttl=15)
         fsm._reconcile_bearer_demand()
         fsm.machine.current_state = CONNECTED
         fsm.transition.reset_mock()
@@ -166,11 +166,11 @@ class TestReconcileBearerDemand(TestCase):
 
     def test_lease_adopts_already_connected_bearer(self):
         fsm = _make_fsm(self.clock, state=CONNECTED)
-        fsm.bearer_leases.acquire(0, 'wlb-failover', ttl=15)
+        fsm.bearer_leases.acquire(0, 'failover', ttl=15)
         fsm._reconcile_bearer_demand()
         fsm.transition.assert_not_called()
         self.assertTrue(fsm._lease_owns_bearer)
-        fsm.bearer_leases.release(0, 'wlb-failover')
+        fsm.bearer_leases.release(0, 'failover')
         self._tick(fsm, 0)
         self._tick(fsm, 6)
         fsm.transition.assert_called_once_with(ModemEvent.ENTER_IDLE)
@@ -179,7 +179,7 @@ class TestReconcileBearerDemand(TestCase):
         fsm = _make_fsm(self.clock, state=CONNECTED)
         fsm._lease_owns_bearer = True
         self._tick(fsm, 0)         # arm grace
-        fsm.bearer_leases.acquire(0, 'wlb-failover', ttl=15)
+        fsm.bearer_leases.acquire(0, 'failover', ttl=15)
         self._tick(fsm, 10)
         fsm.transition.assert_not_called()
         self.assertIsNone(fsm._lease_idle_deadline)
@@ -206,7 +206,7 @@ class TestReconcileBearerDemand(TestCase):
         fsm = _make_fsm(self.clock, state=IDLE)
         fsm._data_limit_hold = True
         fsm.user_disconnected = True
-        fsm.bearer_leases.acquire(0, 'wlb-failover', ttl=15)
+        fsm.bearer_leases.acquire(0, 'failover', ttl=15)
         fsm._reconcile_bearer_demand()
         fsm.transition.assert_not_called()
         self.assertFalse(fsm.connect_requested)
@@ -215,14 +215,14 @@ class TestReconcileBearerDemand(TestCase):
     def test_airplane_vetoes_lease(self):
         fsm = _make_fsm(self.clock, state=IDLE)
         fsm._airplane_mode_active = True
-        fsm.bearer_leases.acquire(0, 'wlb-failover', ttl=15)
+        fsm.bearer_leases.acquire(0, 'failover', ttl=15)
         fsm._reconcile_bearer_demand()
         fsm.transition.assert_not_called()
 
     def test_hold_lift_with_live_lease_connects(self):
         fsm = _make_fsm(self.clock, state=IDLE)
         fsm._data_limit_hold = True
-        fsm.bearer_leases.acquire(0, 'wlb-failover', ttl=15)
+        fsm.bearer_leases.acquire(0, 'failover', ttl=15)
         fsm._reconcile_bearer_demand()
         fsm._data_limit_hold = False
         self._tick(fsm)
@@ -232,7 +232,7 @@ class TestReconcileBearerDemand(TestCase):
 
     def test_acquire_starts_sweeper(self):
         fsm = _make_fsm(self.clock, state=IDLE)
-        fsm.bearer_lease_acquire('wlb-failover', ttl=15, reason='t')
+        fsm.bearer_lease_acquire('failover', ttl=15, reason='t')
         fsm._safe_create_task.assert_called_once()
         fsm._safe_create_task.call_args.args[0].close()  # silence never-awaited
 
@@ -262,7 +262,7 @@ class TestLeaseAwareDisconnectBearer(IsolatedAsyncioTestCase):
     async def test_live_lease_suppresses_teardown(self):
         fsm = _make_fsm(_Clock(), state=CONNECTED)
         fsm.bearer_requested = True
-        fsm.bearer_leases.acquire(0, 'wlb-failover', ttl=15)
+        fsm.bearer_leases.acquire(0, 'failover', ttl=15)
         await InterfaceConfig.disconnect_bearer.__wrapped__(self._iface(fsm))
         self.assertFalse(fsm.user_disconnected)
         self.assertFalse(fsm.bearer_requested)

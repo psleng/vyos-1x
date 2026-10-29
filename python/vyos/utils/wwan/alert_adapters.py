@@ -51,6 +51,9 @@ ALERT_CODE_TO_SNMP_OID = {
     # igosWwanFailoverEvent       (.2)
     'WWAN_SIM_FAILOVER':          '1.3.6.1.4.1.1966.30.1.2.0.2',
     'WWAN_SIM_SWITCH':            '1.3.6.1.4.1.1966.30.1.2.0.2',
+    # igosWwanSimRemoved/Inserted (.11 / .12)
+    'WWAN_SIM_REMOVED':           '1.3.6.1.4.1.1966.30.1.2.0.11',
+    'WWAN_SIM_INSERTED':          '1.3.6.1.4.1.1966.30.1.2.0.12',
     # igosWwanBearerUp/Down       (.4 / .5)
     'WWAN_BEARER_UP':             '1.3.6.1.4.1.1966.30.1.2.0.4',
     'WWAN_BEARER_DOWN':           '1.3.6.1.4.1.1966.30.1.2.0.5',
