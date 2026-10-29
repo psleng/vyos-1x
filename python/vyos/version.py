@@ -130,7 +130,7 @@ def get_remote_version(url):
         adapter.max_retries = retry.Retry(total=5, backoff_factor=0.15)
 
     try:
-        # Perle added timeout to avoid the script hanging indefinitely if the remote server is not reachable
+        # Added timeout to avoid the script hanging indefinitely if the remote server is not reachable
         remote_data = session.get(url=url, headers=headers, timeout=10)
         remote_data.raise_for_status()
         if remote_data.status_code != 200:
