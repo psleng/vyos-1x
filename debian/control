@@ -455,6 +455,16 @@ Recommends:
 # Depends. Cloud, VM and x86 generic images are unaffected.
   tfl,
   uxfp,
+# Cellular modem GNSS support: gpsd owns the modem's raw NMEA serial port
+# and serves position on TCP 2947; python3-gps is the client library used
+# by op-mode (show interfaces wwan <wwanN> gps). Soft runtime deps like the
+# modem tools above: only meaningful on igOS hardware flavors with a
+# cellular modem that exposes a GPS port, and not every modem model does,
+# so they are pulled in for those images via the igOS platform fragments in
+# vyos-build rather than a hard Depends. Cloud, VM and x86 generic images
+# are unaffected.
+  gpsd,
+  python3-gps,
 Description: VyOS configuration scripts and data
  VyOS configuration scripts, interface definitions, and everything
 
