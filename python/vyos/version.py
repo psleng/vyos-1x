@@ -127,10 +127,11 @@ def get_remote_version(url):
     # and this code implements automatic retries using the next wait time range:
     #   - 0.15, 0.30, 0.60, 1.20 and 2.40 seconds.
     for adapter in session.adapters.values():
-        adapter.max_retries = retry.Retry(total=5, backoff_factor=0.15)
+        adapter.max_retries = retry.Retry(total=2, backoff_factor=0.15)
 
     try:
-        remote_data = session.get(url=url, headers=headers)
+        # Added timeout to avoid the script hanging indefinitely if the remote server is not reachable
+        remote_data = session.get(url=url, headers=headers, timeout=3)
         remote_data.raise_for_status()
         if remote_data.status_code != 200:
             return False
