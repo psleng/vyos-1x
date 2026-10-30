@@ -424,6 +424,7 @@ class TestActiveSimRemovalPolicy(IsolatedAsyncioTestCase):
             machine=SimpleNamespace(current_state=ModemState.CONNECTED.value),
             _cancel_failed_retry=Mock(),
             _handle_sim_missing_failover=AsyncMock(),
+            _emit_sim_removed_alert=Mock(),
         )
 
         with patch.object(state_machine.asyncio, 'sleep', new=AsyncMock()):
@@ -431,6 +432,7 @@ class TestActiveSimRemovalPolicy(IsolatedAsyncioTestCase):
                 fsm, 1
             )
 
+        fsm._emit_sim_removed_alert.assert_called_once_with(1)
         fsm._cancel_failed_retry.assert_called_once_with()
         fsm._handle_sim_missing_failover.assert_awaited_once_with()
 
