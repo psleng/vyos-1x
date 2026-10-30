@@ -94,6 +94,39 @@ def config_dict_merge(src: dict, dest: Union[dict, ConfigDict]) -> ConfigDict:
         dest = ConfigDict(dest)
     return ext_dict_merge(src, dest)
 
+def merge_defaults(config_tree: 'vyos.configtree.ConfigTree', defaults: dict) -> None:
+    """Overlay default values onto an existing ConfigTree, in place.
+
+    'defaults' is a dict of default values as returned by
+    Config.get_config_defaults(get_first_key=True, recursive=True). Only values
+    that are not already present in the tree are added, so explicitly configured
+    values are preserved.
+
+    Default values are never secret, so this may safely be applied to a
+    configuration whose secret values have already been masked (e.g. the output
+    of 'cli-shell-api showConfig --show-hide-secrets'). This is the mechanism
+    used to render a configuration including its default values, e.g. for
+    'show configuration all'.
+    """
+    def _walk(subdict: dict, path: list):
+        for key, value in subdict.items():
+            current = path + [key]
+            if isinstance(value, dict):
+                if not value:
+                    if not config_tree.exists(current):
+                        config_tree.set(current)
+                else:
+                    _walk(value, current)
+            elif isinstance(value, list):
+                if not config_tree.exists(current):
+                    for item in value:
+                        config_tree.set(current, value=item, replace=False)
+            else:
+                if not config_tree.exists(current):
+                    config_tree.set(current, value=value)
+
+    _walk(defaults, [])
+
 def config_dict_mangle_acme(name, cli_dict):
     """
     Load CLI PKI dictionary and if an ACME certificate is used, load it's content

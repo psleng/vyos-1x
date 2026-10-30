@@ -14,7 +14,7 @@
               <help>Show running configuration (including default values)</help>
             </properties>
             <!-- no admin check -->
-            <command>cli-shell-api showCfg --show-show-defaults --show-active-only --show-hide-secrets</command>
+            <command>${vyos_op_scripts_dir}/show_configuration_all.py</command>
           </node>
           <node name="commands">
             <properties>
@@ -35,6 +35,20 @@
                   <help>Show running configuration in readable JSON format</help>
                 </properties>
                 <command>${vyos_op_scripts_dir}/show_configuration_json.py --pretty</command>
+              </node>
+              <node name="all">
+                <properties>
+                  <help>Show running configuration in JSON format (including default values)</help>
+                </properties>
+                <command>${vyos_op_scripts_dir}/show_configuration_json.py --with-defaults</command>
+                <children>
+                  <node name="pretty">
+                    <properties>
+                      <help>Show running configuration in readable JSON format (including default values)</help>
+                    </properties>
+                    <command>${vyos_op_scripts_dir}/show_configuration_json.py --with-defaults --pretty</command>
+                  </node>
+                </children>
               </node>
             </children>
           </node>

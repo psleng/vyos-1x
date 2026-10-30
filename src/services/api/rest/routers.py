@@ -46,6 +46,7 @@ from starlette.formparsers import MultiPartException
 from multipart.multipart import parse_options_header
 
 from vyos.config import Config
+from vyos.config import merge_defaults
 from vyos.configtree import ConfigTree
 from vyos.configdiff import get_config_diff
 from vyos.configsession import ConfigSessionError
@@ -619,14 +620,20 @@ async def retrieve_op(data: RetrieveModel):
                 config_format = data.configFormat
 
             res = session.show_config(path=data.path)
+
+            config_tree = ConfigTree(res)
+            if data.withDefaults:
+                defaults = config.get_config_defaults(data.path, get_first_key=True,
+                                                      recursive=True)
+                merge_defaults(config_tree, defaults)
+
             if config_format == 'json':
-                config_tree = ConfigTree(res)
                 res = json.loads(config_tree.to_json())
             elif config_format == 'json_ast':
-                config_tree = ConfigTree(res)
                 res = json.loads(config_tree.to_json_ast())
             elif config_format == 'raw':
-                pass
+                if data.withDefaults:
+                    res = config_tree.to_string()
             else:
                 return error(400, f"'{config_format}' is not a valid config format")
         else:
