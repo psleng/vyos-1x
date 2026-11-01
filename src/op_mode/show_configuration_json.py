@@ -20,15 +20,16 @@ import json
 from vyos.configquery import ConfigTreeQuery
 
 
-config = ConfigTreeQuery()
-c = config.get_config_dict()
-
 parser = argparse.ArgumentParser()
 parser.add_argument("-p", "--pretty", action="store_true", help="Show pretty configuration in JSON format")
+parser.add_argument("-d", "--with-defaults", action="store_true", help="Include default values in the JSON output")
 
 
 if __name__ == '__main__':
     args = parser.parse_args()
+
+    config = ConfigTreeQuery()
+    c = config.get_config_dict(with_recursive_defaults=args.with_defaults)
 
     if args.pretty:
         print(json.dumps(c, indent=4))

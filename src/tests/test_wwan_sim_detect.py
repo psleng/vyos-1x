@@ -422,6 +422,7 @@ class TestActiveSimRemovalPolicy(IsolatedAsyncioTestCase):
             config={'primary_sim_slot': 1},
             sim_controller=SimpleNamespace(is_present=AsyncMock(return_value=False)),
             machine=SimpleNamespace(current_state=ModemState.CONNECTED.value),
+            _emit_sim_removed_alert=Mock(),
             _cancel_failed_retry=Mock(),
             _handle_sim_missing_failover=AsyncMock(),
         )

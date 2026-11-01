@@ -28,6 +28,7 @@ from typing import Self
 from pydantic import BaseModel
 from pydantic import StrictStr
 from pydantic import StrictInt
+from pydantic import StrictBool
 from pydantic import field_validator
 from pydantic import model_validator
 from fastapi.responses import HTMLResponse
@@ -128,6 +129,7 @@ class RetrieveModel(ApiModel):
     op: StrictStr
     path: List[StrictStr]
     configFormat: StrictStr = None
+    withDefaults: Optional[StrictBool] = False
 
     class Config:
         json_schema_extra = {
@@ -136,6 +138,7 @@ class RetrieveModel(ApiModel):
                 'op': 'returnValue | returnValues | exists | showConfig',
                 'path': ['config', 'mode', 'path'],
                 'configFormat': 'json (default) | json_ast | raw',
+                'withDefaults': 'false (default) | true',
             }
         }
 
