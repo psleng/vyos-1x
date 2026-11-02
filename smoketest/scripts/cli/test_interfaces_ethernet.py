@@ -33,6 +33,7 @@ from vyos.netlink import coalesce
 from vyos.frrender import mgmt_daemon
 from vyos.ifconfig import Section
 from vyos.utils.file import read_file
+from vyos.utils.file import write_file
 from vyos.utils.network import is_intf_addr_assigned
 from vyos.utils.network import is_ipv6_link_local
 from vyos.utils.process import cmd
@@ -197,6 +198,32 @@ class EthernetInterfaceTest(BasicInterfaceTest.TestCase):
             v6 = f'/proc/sys/net/ipv6/conf/{interface}/ignore_routes_with_linkdown'
             if os.path.exists(v6):
                 self.assertEqual(read_file(v6), '1')
+
+        # A stale global 'all' = 1 (e.g. left over by an in-place upgrade that
+        # has not rebooted) would OR-override the per-interface opt-out and
+        # withdraw the routes anyway. Committing 'disable-link-detect' must
+        # repair the global baseline back to 0 so the setting takes effect
+        # immediately without a reboot.
+        all_v4 = '/proc/sys/net/ipv4/conf/all/ignore_routes_with_linkdown'
+        all_v6 = '/proc/sys/net/ipv6/conf/all/ignore_routes_with_linkdown'
+        write_file(all_v4, '1')
+        if os.path.exists(all_v6):
+            write_file(all_v6, '1')
+        for interface in self._interfaces:
+            self.cli_set(self._base_path + [interface, 'disable-link-detect'])
+        self.cli_commit()
+        self.assertEqual(read_file(all_v4), '0')
+        if os.path.exists(all_v6):
+            self.assertEqual(read_file(all_v6), '0')
+        for interface in self._interfaces:
+            v4 = f'/proc/sys/net/ipv4/conf/{interface}/ignore_routes_with_linkdown'
+            self.assertEqual(read_file(v4), '0')
+            v6 = f'/proc/sys/net/ipv6/conf/{interface}/ignore_routes_with_linkdown'
+            if os.path.exists(v6):
+                self.assertEqual(read_file(v6), '0')
+        for interface in self._interfaces:
+            self.cli_delete(self._base_path + [interface, 'disable-link-detect'])
+        self.cli_commit()
 
     def test_speed_duplex_verify(self):
         for interface in self._interfaces:

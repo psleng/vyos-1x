@@ -1113,6 +1113,20 @@ class Interface(Control):
         if os.path.exists(f'/proc/sys/net/ipv6/conf/{self.ifname}/ignore_routes_with_linkdown'):
             self.set_interface('ipv6_ignore_routes_linkdown', value)
 
+        # The per-interface opt-out above is only honoured while the global
+        # 'all.ignore_routes_with_linkdown' is 0, because the kernel evaluates
+        # the knob as (all || per-interface): with all=1 the FIB withdraws the
+        # routes on carrier loss no matter what the per-interface value is, so
+        # 'disable-link-detect' silently has no effect.  30-vyos-router.conf
+        # seeds all=0 at boot, but an in-place upgrade (no reboot) can leave a
+        # stale all=1 behind.  Enforce the baseline here so the setting takes
+        # effect immediately on commit without requiring a reboot.
+        if disable_detect:
+            for family in ('ipv4', 'ipv6'):
+                path = f'/proc/sys/net/{family}/conf/all/ignore_routes_with_linkdown'
+                if os.path.exists(path) and read_file(path) != '0':
+                    write_file(path, '0')
+
     def get_alias(self):
         """
         Get interface alias name used by e.g. SNMP
