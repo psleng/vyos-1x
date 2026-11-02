@@ -581,7 +581,7 @@ def _format_show_counters(data: list):
     headers = ['Interface', 'Rx Packets', 'Rx Bytes', 'Tx Packets', 'Tx Bytes', 'Rx Dropped', 'Tx Dropped', 'Rx Errors', 'Tx Errors']
     output = tabulate(data_entries, headers, numalign="left")
     print (output)
-    return output
+    return 0
 
 def show_kernel(raw: bool, intf_name: typing.Optional[str],
                 detail: bool, statistics: bool):

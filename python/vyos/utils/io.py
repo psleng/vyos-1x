@@ -115,9 +115,11 @@ def select_entry(l: list, list_msg: str = '', prompt_msg: str = '',
 def catch_broken_pipe(func):
     import os
     import sys
+    import functools
+    @functools.wraps(func)
     def wrapped(*args, **kwargs):
         try:
-            func(*args, **kwargs)
+            return func(*args, **kwargs)
         except (BrokenPipeError, KeyboardInterrupt):
             # Flush output to /dev/null and bail out.
             os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno()) # pylint: disable = no-member
