@@ -495,9 +495,15 @@ def verify(login):
                             f"serial-access range {common_origins_list} cannot be set with existing {user_config['serial']['access']['stable']}"
                         )
 
-    # No more than 1 authentication methods
-    if len({'radius', 'tacacs'}.intersection(set(login))) > 1:
-        raise ConfigError('Only one of RADIUS, TACACS can be used at the same time!')
+    # No more than 1 authentication method (RADIUS, TACACS+ and SAML are
+    # mutually exclusive - when SAML is configured iGos authenticates solely
+    # via the IdP, so a RADIUS/TACACS+ backend alongside it would be silently
+    # ignored).
+    auth_backends = {'radius', 'tacacs', 'saml'}.intersection(set(login))
+    if len(auth_backends) > 1:
+        raise ConfigError(
+            'Only one of RADIUS, TACACS+ or SAML can be used at the same time!'
+        )
 
     # At lease one RADIUS server must not be disabled
     if 'radius' in login:
