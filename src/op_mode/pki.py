@@ -40,6 +40,7 @@ from vyos.pki import create_certificate_request
 from vyos.pki import create_certificate_revocation_list
 from vyos.pki import create_private_key
 from vyos.pki import create_dh_parameters
+from vyos.pki import FFDHE_SIZES
 from vyos.pki import load_certificate
 from vyos.pki import load_certificate_request
 from vyos.pki import load_private_key
@@ -834,7 +835,11 @@ def generate_ssh_keypair(name, install=False, file=False):
 def generate_dh_parameters(name, install=False, file=False):
     bits = ask_input('Enter DH parameters key size:', default=2048, numeric_only=True)
 
-    print('Generating parameters...')
+    if bits in FFDHE_SIZES:
+        # Standard sizes use the pre-computed RFC 7919 FFDHE groups - instant.
+        print('Using standard RFC 7919 FFDHE parameters...')
+    else:
+        print(f'Generating {bits}-bit parameters, this may take a long time...')
 
     dh_params = create_dh_parameters(bits)
     if not dh_params:

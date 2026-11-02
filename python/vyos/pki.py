@@ -12,8 +12,10 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import base64
 import datetime
 import ipaddress
+import textwrap
 
 from cryptography import x509
 from cryptography.exceptions import InvalidSignature
@@ -102,10 +104,41 @@ def encode_private_key(private_key, encoding='PEM', key_format='PKCS8', passphra
         format=private_format_map[key_format],
         encryption_algorithm=encryption).decode('utf-8')
 
+def _encode_der_length(length):
+    # Minimal ASN.1 DER length octets (short form < 128, else long form).
+    if length < 0x80:
+        return bytes([length])
+    encoded = b''
+    while length:
+        encoded = bytes([length & 0xFF]) + encoded
+        length >>= 8
+    return bytes([0x80 | len(encoded)]) + encoded
+
+def _encode_der_integer(value):
+    # Minimal ASN.1 DER encoding of a non-negative INTEGER.
+    raw = value.to_bytes((value.bit_length() + 7) // 8 or 1, 'big')
+    if raw[0] & 0x80:
+        # Prepend a zero byte so the value is not misread as negative.
+        raw = b'\x00' + raw
+    return b'\x02' + _encode_der_length(len(raw)) + raw
+
 def encode_dh_parameters(dh_parameters):
-    return dh_parameters.parameter_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.ParameterFormat.PKCS3).decode('utf-8')
+    # Emit canonical PKCS#3 "DH PARAMETERS" (an ASN.1 SEQUENCE of just the
+    # prime and the generator).  We encode it ourselves instead of relying on
+    # ``parameter_bytes(ParameterFormat.PKCS3)`` because OpenSSL 3.x recognises
+    # the RFC 7919 (ffdheXXXX) primes as named groups and silently upgrades the
+    # output to the "X9.42 DH PARAMETERS" structure (which also carries the
+    # subgroup order ``q``).  VyOS stores only the base64 body and re-wraps it
+    # with a PKCS#3 header, and consumers such as OpenVPN/strongSwan read it
+    # back with ``PEM_read_bio_DHparams`` which only understands PKCS#3 — so an
+    # X9.42 body wrapped in a PKCS#3 header would fail to load.  For primes that
+    # are not a named group (freshly generated parameters) this produces output
+    # byte-for-byte identical to the previous implementation.
+    numbers = dh_parameters.parameter_numbers()
+    body = _encode_der_integer(numbers.p) + _encode_der_integer(numbers.g)
+    der = b'\x30' + _encode_der_length(len(body)) + body
+    b64 = '\n'.join(textwrap.wrap(base64.b64encode(der).decode('ascii'), 64))
+    return f'{DH_BEGIN}{b64}{DH_END}\n'
 
 # EC Helper
 
@@ -218,12 +251,147 @@ def create_certificate_revocation_list(ca_cert, ca_private_key, serial_numbers=[
 
     return builder.sign(private_key=ca_private_key, algorithm=hashes.SHA256())
 
+# RFC 7919 finite-field Diffie-Hellman (FFDHE) group primes, all with
+# generator g=2.  These are standardised, publicly vetted safe primes, so they
+# can be used verbatim instead of searching for a fresh random safe prime —
+# which is the expensive, multi-second-to-multi-minute step in DH parameter
+# "generation".  Verified byte-for-byte against OpenSSL's named groups and
+# RFC 7919 Appendix A.
+_FFDHE_GENERATOR = 2
+_RFC7919_FFDHE_PRIMES = {
+    2048: int(
+        'ffffffffffffffffadf85458a2bb4a9aafdc5620273d3cf1d8b9c583ce2d'
+        '3695a9e13641146433fbcc939dce249b3ef97d2fe363630c75d8f681b202'
+        'aec4617ad3df1ed5d5fd65612433f51f5f066ed0856365553ded1af3b557'
+        '135e7f57c935984f0c70e0e68b77e2a689daf3efe8721df158a136ade735'
+        '30acca4f483a797abc0ab182b324fb61d108a94bb2c8e3fbb96adab760d7'
+        'f4681d4f42a3de394df4ae56ede76372bb190b07a7c8ee0a6d709e02fce1'
+        'cdf7e2ecc03404cd28342f619172fe9ce98583ff8e4f1232eef28183c3fe'
+        '3b1b4c6fad733bb5fcbc2ec22005c58ef1837d1683b2c6f34a26c1b2effa'
+        '886b423861285c97ffffffffffffffff',
+        16),
+    3072: int(
+        'ffffffffffffffffadf85458a2bb4a9aafdc5620273d3cf1d8b9c583ce2d'
+        '3695a9e13641146433fbcc939dce249b3ef97d2fe363630c75d8f681b202'
+        'aec4617ad3df1ed5d5fd65612433f51f5f066ed0856365553ded1af3b557'
+        '135e7f57c935984f0c70e0e68b77e2a689daf3efe8721df158a136ade735'
+        '30acca4f483a797abc0ab182b324fb61d108a94bb2c8e3fbb96adab760d7'
+        'f4681d4f42a3de394df4ae56ede76372bb190b07a7c8ee0a6d709e02fce1'
+        'cdf7e2ecc03404cd28342f619172fe9ce98583ff8e4f1232eef28183c3fe'
+        '3b1b4c6fad733bb5fcbc2ec22005c58ef1837d1683b2c6f34a26c1b2effa'
+        '886b4238611fcfdcde355b3b6519035bbc34f4def99c023861b46fc9d6e6'
+        'c9077ad91d2691f7f7ee598cb0fac186d91caefe130985139270b4130c93'
+        'bc437944f4fd4452e2d74dd364f2e21e71f54bff5cae82ab9c9df69ee86d'
+        '2bc522363a0dabc521979b0deada1dbf9a42d5c4484e0abcd06bfa53ddef'
+        '3c1b20ee3fd59d7c25e41d2b66c62e37ffffffffffffffff',
+        16),
+    4096: int(
+        'ffffffffffffffffadf85458a2bb4a9aafdc5620273d3cf1d8b9c583ce2d'
+        '3695a9e13641146433fbcc939dce249b3ef97d2fe363630c75d8f681b202'
+        'aec4617ad3df1ed5d5fd65612433f51f5f066ed0856365553ded1af3b557'
+        '135e7f57c935984f0c70e0e68b77e2a689daf3efe8721df158a136ade735'
+        '30acca4f483a797abc0ab182b324fb61d108a94bb2c8e3fbb96adab760d7'
+        'f4681d4f42a3de394df4ae56ede76372bb190b07a7c8ee0a6d709e02fce1'
+        'cdf7e2ecc03404cd28342f619172fe9ce98583ff8e4f1232eef28183c3fe'
+        '3b1b4c6fad733bb5fcbc2ec22005c58ef1837d1683b2c6f34a26c1b2effa'
+        '886b4238611fcfdcde355b3b6519035bbc34f4def99c023861b46fc9d6e6'
+        'c9077ad91d2691f7f7ee598cb0fac186d91caefe130985139270b4130c93'
+        'bc437944f4fd4452e2d74dd364f2e21e71f54bff5cae82ab9c9df69ee86d'
+        '2bc522363a0dabc521979b0deada1dbf9a42d5c4484e0abcd06bfa53ddef'
+        '3c1b20ee3fd59d7c25e41d2b669e1ef16e6f52c3164df4fb7930e9e4e588'
+        '57b6ac7d5f42d69f6d187763cf1d5503400487f55ba57e31cc7a7135c886'
+        'efb4318aed6a1e012d9e6832a907600a918130c46dc778f971ad00380929'
+        '99a333cb8b7a1a1db93d7140003c2a4ecea9f98d0acc0a8291cdcec97dcf'
+        '8ec9b55a7f88a46b4db5a851f44182e1c68a007e5e655f6affffffffffff'
+        'ffff',
+        16),
+    6144: int(
+        'ffffffffffffffffadf85458a2bb4a9aafdc5620273d3cf1d8b9c583ce2d'
+        '3695a9e13641146433fbcc939dce249b3ef97d2fe363630c75d8f681b202'
+        'aec4617ad3df1ed5d5fd65612433f51f5f066ed0856365553ded1af3b557'
+        '135e7f57c935984f0c70e0e68b77e2a689daf3efe8721df158a136ade735'
+        '30acca4f483a797abc0ab182b324fb61d108a94bb2c8e3fbb96adab760d7'
+        'f4681d4f42a3de394df4ae56ede76372bb190b07a7c8ee0a6d709e02fce1'
+        'cdf7e2ecc03404cd28342f619172fe9ce98583ff8e4f1232eef28183c3fe'
+        '3b1b4c6fad733bb5fcbc2ec22005c58ef1837d1683b2c6f34a26c1b2effa'
+        '886b4238611fcfdcde355b3b6519035bbc34f4def99c023861b46fc9d6e6'
+        'c9077ad91d2691f7f7ee598cb0fac186d91caefe130985139270b4130c93'
+        'bc437944f4fd4452e2d74dd364f2e21e71f54bff5cae82ab9c9df69ee86d'
+        '2bc522363a0dabc521979b0deada1dbf9a42d5c4484e0abcd06bfa53ddef'
+        '3c1b20ee3fd59d7c25e41d2b669e1ef16e6f52c3164df4fb7930e9e4e588'
+        '57b6ac7d5f42d69f6d187763cf1d5503400487f55ba57e31cc7a7135c886'
+        'efb4318aed6a1e012d9e6832a907600a918130c46dc778f971ad00380929'
+        '99a333cb8b7a1a1db93d7140003c2a4ecea9f98d0acc0a8291cdcec97dcf'
+        '8ec9b55a7f88a46b4db5a851f44182e1c68a007e5e0dd9020bfd64b64503'
+        '6c7a4e677d2c38532a3a23ba4442caf53ea63bb454329b7624c8917bdd64'
+        'b1c0fd4cb38e8c334c701c3acdad0657fccfec719b1f5c3e4e46041f3881'
+        '47fb4cfdb477a52471f7a9a96910b855322edb6340d8a00ef092350511e3'
+        '0abec1fff9e3a26e7fb29f8c183023c3587e38da0077d9b4763e4e4b94b2'
+        'bbc194c6651e77caf992eeaac0232a281bf6b3a739c1226116820ae8db58'
+        '47a67cbef9c9091b462d538cd72b03746ae77f5e62292c311562a846505d'
+        'c82db854338ae49f5235c95b91178ccf2dd5cacef403ec9d1810c6272b04'
+        '5b3b71f9dc6b80d63fdd4a8e9adb1e6962a69526d43161c1a41d570d7938'
+        'dad4a40e329cd0e40e65ffffffffffffffff',
+        16),
+    8192: int(
+        'ffffffffffffffffadf85458a2bb4a9aafdc5620273d3cf1d8b9c583ce2d'
+        '3695a9e13641146433fbcc939dce249b3ef97d2fe363630c75d8f681b202'
+        'aec4617ad3df1ed5d5fd65612433f51f5f066ed0856365553ded1af3b557'
+        '135e7f57c935984f0c70e0e68b77e2a689daf3efe8721df158a136ade735'
+        '30acca4f483a797abc0ab182b324fb61d108a94bb2c8e3fbb96adab760d7'
+        'f4681d4f42a3de394df4ae56ede76372bb190b07a7c8ee0a6d709e02fce1'
+        'cdf7e2ecc03404cd28342f619172fe9ce98583ff8e4f1232eef28183c3fe'
+        '3b1b4c6fad733bb5fcbc2ec22005c58ef1837d1683b2c6f34a26c1b2effa'
+        '886b4238611fcfdcde355b3b6519035bbc34f4def99c023861b46fc9d6e6'
+        'c9077ad91d2691f7f7ee598cb0fac186d91caefe130985139270b4130c93'
+        'bc437944f4fd4452e2d74dd364f2e21e71f54bff5cae82ab9c9df69ee86d'
+        '2bc522363a0dabc521979b0deada1dbf9a42d5c4484e0abcd06bfa53ddef'
+        '3c1b20ee3fd59d7c25e41d2b669e1ef16e6f52c3164df4fb7930e9e4e588'
+        '57b6ac7d5f42d69f6d187763cf1d5503400487f55ba57e31cc7a7135c886'
+        'efb4318aed6a1e012d9e6832a907600a918130c46dc778f971ad00380929'
+        '99a333cb8b7a1a1db93d7140003c2a4ecea9f98d0acc0a8291cdcec97dcf'
+        '8ec9b55a7f88a46b4db5a851f44182e1c68a007e5e0dd9020bfd64b64503'
+        '6c7a4e677d2c38532a3a23ba4442caf53ea63bb454329b7624c8917bdd64'
+        'b1c0fd4cb38e8c334c701c3acdad0657fccfec719b1f5c3e4e46041f3881'
+        '47fb4cfdb477a52471f7a9a96910b855322edb6340d8a00ef092350511e3'
+        '0abec1fff9e3a26e7fb29f8c183023c3587e38da0077d9b4763e4e4b94b2'
+        'bbc194c6651e77caf992eeaac0232a281bf6b3a739c1226116820ae8db58'
+        '47a67cbef9c9091b462d538cd72b03746ae77f5e62292c311562a846505d'
+        'c82db854338ae49f5235c95b91178ccf2dd5cacef403ec9d1810c6272b04'
+        '5b3b71f9dc6b80d63fdd4a8e9adb1e6962a69526d43161c1a41d570d7938'
+        'dad4a40e329ccff46aaa36ad004cf600c8381e425a31d951ae64fdb23fce'
+        'c9509d43687feb69edd1cc5e0b8cc3bdf64b10ef86b63142a3ab8829555b'
+        '2f747c932665cb2c0f1cc01bd70229388839d2af05e454504ac78b758282'
+        '2846c0ba35c35f5c59160cc046fd8251541fc68c9c86b022bb7099876a46'
+        '0e7451a8a93109703fee1c217e6c3826e52c51aa691e0e423cfc99e9e316'
+        '50c1217b624816cdad9a95f9d5b8019488d9c0a0a1fe3075a577e23183f8'
+        '1d4a3f2fa4571efc8ce0ba8a4fe8b6855dfe72b0a66eded2fbabfbe58a30'
+        'fafabe1c5d71a87e2f741ef8c1fe86fea6bbfde530677f0d97d11d49f7a8'
+        '443d0822e506a9f4614e011e2a94838ff88cd68c8bb7c5c6424cffffffff'
+        'ffffffff',
+        16),
+}
+
+# Public tuple of DH key sizes served instantly from the RFC 7919 FFDHE table.
+FFDHE_SIZES = tuple(sorted(_RFC7919_FFDHE_PRIMES))
+
 def create_dh_parameters(bits=2048):
     if not bits or bits < 512:
         print("Invalid DH parameter key size")
         return False
 
-    return dh.generate_parameters(generator=2, key_size=int(bits))
+    bits = int(bits)
+
+    # Standard key sizes map onto the RFC 7919 FFDHE groups: these are
+    # pre-computed, vetted safe primes, so we can return them instantly instead
+    # of hunting for a fresh random safe prime (the slow part that made
+    # 'generate pki dh' take seconds-to-minutes, especially on router hardware).
+    # Non-standard sizes fall back to on-the-fly generation.
+    ffdhe_prime = _RFC7919_FFDHE_PRIMES.get(bits)
+    if ffdhe_prime is not None:
+        return dh.DHParameterNumbers(ffdhe_prime, _FFDHE_GENERATOR).parameters()
+
+    return dh.generate_parameters(generator=2, key_size=bits)
 
 # Wrap functions
 
