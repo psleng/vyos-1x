@@ -39,6 +39,23 @@ SERIAL_DEV_PREFIX = 'ttyS'
 SERIAL_CONFIG_PATH = Path('/run/serial')
 SERINFO_PATH = Path('/tmp/serinfo')
 
+def serial_ssh_server_configured(conf) -> bool:
+    base = ['service', 'serial']
+    cfg = conf.get_config_dict(base, key_mangling=('-', '_'),
+                               no_tag_node_value_mangle=True,
+                               get_first_key=True)
+
+    profiles = cfg.get('profile', {}).get('tty_profile', {})
+    for device_conf in cfg.get('device', {}).values():
+        if 'disable' in device_conf:
+            continue
+        if 'server' in device_conf.get('ssh', {}):
+            return True
+        profile_name = device_conf.get('profile')
+        if profile_name and 'server' in profiles.get(profile_name, {}).get('ssh', {}):
+            return True
+    return False
+
 def send_command_to_iolan(action, name):
     msg = {
         'action': action,  # 'restart' | 'stop' | 'delete' | 'relaunch'
