@@ -916,7 +916,7 @@
                     <description>IPv4 address with prefix length</description>
                   </valueHelp>
                   <constraint>
-                    <validator name="ipv4-prefix"/>
+                    <validator name="ipv4-host"/>
                   </constraint>
                 </properties>
                 <defaultValue>192.168.200.1/32</defaultValue>
@@ -929,7 +929,7 @@
                     <description>IPv6 address with prefix length</description>
                   </valueHelp>
                   <constraint>
-                    <validator name="ipv6-prefix"/>
+                    <validator name="ipv6-host"/>
                   </constraint>
                 </properties>
                 <defaultValue>fd00:6c61:6e30::1/128</defaultValue>
