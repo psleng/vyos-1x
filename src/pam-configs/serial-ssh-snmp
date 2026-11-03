@@ -1,0 +1,7 @@
+Name: Serial SSH SNMP authentication failure hook
+Default: no
+Priority: 254
+
+Auth-Type: Primary
+Auth:
+    optional pam_exec.so /usr/bin/iol_sndtrap

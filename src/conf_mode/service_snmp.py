@@ -38,7 +38,9 @@ from vyos.utils.configfs import add_cli_node
 from vyos.utils.dict import dict_search
 from vyos.utils.network import is_addr_assigned
 from vyos.utils.process import call
+from vyos.utils.process import cmd
 from vyos.utils.permission import chmod_755
+from vyos.utils.serial import serial_ssh_server_configured
 from vyos.version import get_version_data
 from vyos import ConfigError
 from vyos import airbag
@@ -92,6 +94,17 @@ def get_config(config=None):
 
     if conf.exists(['service', 'lldp', 'snmp']):
         snmp.update({'lldp_snmp' : ''})
+
+    # Serial ports can run an SSH server that triggers an SNMP trap on login
+    # failure via the serial-ssh-snmp PAM hook (see apply()). That hook must
+    # only be enabled when both an SNMP trap target and a serial SSH server
+    # exist. Compute both conditions here - before the 'deleted' early-return -
+    # so that removing the entire SNMP service also disables the hook.
+    snmp['snmp_trap_target'] = (
+        conf.exists(base + ['trap-target'])
+        or conf.exists(base + ['v3', 'trap-target'])
+    )
+    snmp['serial_ssh_server'] = serial_ssh_server_configured(conf)
 
     if 'deleted' in snmp:
         return snmp
@@ -293,6 +306,15 @@ def generate(snmp):
 
     return None
 
+def _update_serial_ssh_snmp_pam(snmp):
+    # The serial-ssh-snmp PAM hook emits an SNMP trap on a failed serial SSH
+    # login. Only enable it when both an SNMP trap target and a serial SSH
+    # server are configured; otherwise disable it.
+    if snmp.get('snmp_trap_target') and snmp.get('serial_ssh_server'):
+        cmd('pam-auth-update --enable serial-ssh-snmp')
+    else:
+        cmd('pam-auth-update --disable serial-ssh-snmp')
+
 def apply(snmp):
     # Always reload systemd manager configuration
     call('systemctl daemon-reload')
@@ -305,6 +327,7 @@ def apply(snmp):
                 os.unlink(path)
             except FileNotFoundError:
                 pass
+        _update_serial_ssh_snmp_pam(snmp)
         return None
 
     # start SNMP daemon
@@ -316,6 +339,7 @@ def apply(snmp):
     # restart the unit.  If no WWAN is configured the unit is a no-op
     # (gated by ConditionPathExists=).
     _sync_wwan_snmp_trap_env(snmp)
+    _update_serial_ssh_snmp_pam(snmp)
     return None
 
 
