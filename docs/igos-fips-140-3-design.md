@@ -182,7 +182,7 @@ Each consumer needs a decision: *route through the OpenSSL FIPS provider*,
 |---|---|---|
 | **OpenSSL CLI / libssl** | fips provider via `openssl.cnf` | The upstream T8529 piece. Foundation for everything that links OpenSSL. |
 | **OpenSSH** (sshd/ssh) | approved KEX/cipher/MAC/host-key set | Debian OpenSSH links OpenSSL but also has internal implementations; FIPS requires pruning the negotiated algorithm lists (no curve25519/chacha20-poly1305/ed25519 unless treated as allowed; approved = ECDH P-curves, AES-GCM/CTR, HMAC-SHA2, RSA/ECDSA host keys). |
-| **strongSwan / IPsec** | `openssl` plugin → fips provider; approved IKE/ESP proposals | Prefer the OpenSSL plugin so crypto runs in the validated module; constrain proposals to approved DH groups/ciphers/PRFs. |
+| **strongSwan / IPsec** | restrict IKE/ESP proposals to approved set (conf_mode) | **NOT governed by the OpenSSL provider by default.** VyOS charon ([charon.j2](../data/templates/ipsec/charon.j2)) leaves `load`/`load_modular` at defaults, so strongSwan uses its **own native plugins** (aes, sha2, gmp, curve25519, chacha20poly1305). Enabling the FIPS provider does **not** break IPsec and does **not** make it compliant. Enforce by constraining the enumerated `encryption`/`hash`/`prf`/`dh-group` proposal values (rendered by [get_esp_ike_cipher](../python/vyos/template.py) into swanctl proposals) + approved defaults. Routing charon through the `openssl` plugin so crypto runs in the validated module is a heavier option, not needed for a first compliant cut. |
 | **GUI / nginx TLS** | fips provider (links OpenSSL) | TLS 1.2/1.3 approved cipher suites only. |
 | **HTTP API / Python** | OpenSSL via `hashlib`/`ssl` | Non-approved digests (MD5) raise unless `usedforsecurity=False`; audit call sites. |
 | **FRR, SNMP, NTP/chrony, etc.** | approved algorithms / OpenSSL | SNMPv3 auth/priv limited to approved (no MD5/DES); audit each. |
@@ -191,24 +191,220 @@ Each consumer needs a decision: *route through the OpenSSL FIPS provider*,
 
 ---
 
-## 5. Non-approved features that must be refused in FIPS mode
+## 5. Enforcement: the simpler approach (recommended)
 
-The sharpest compliance risk is not missing an algorithm — it is **silently
-allowing a non-approvable one**. FIPS mode must make `verify()` **reject** (or the
-boot policy disable) configurations that require non-approved crypto. Known
-examples on this platform:
+This section captures the **recommended, lighter design** reached after working
+through the actual shape of the problem. The earlier instinct was a heavyweight
+mechanism (two baked CLI grammars, or model-style leaf removal); the analysis
+below shows that for this platform the compliance surface is **mostly
+crypto-method restriction, not feature removal**, so a much smaller design gets
+to a compliant, shippable posture.
 
-- **WireGuard** — Curve25519 / ChaCha20-Poly1305 / BLAKE2; **not FIPS-approvable
-  at all**. In FIPS mode, `set interfaces wireguard …` must be a commit error.
+### 5.1 The shape of the problem
+
+Only **two whole features** are non-approvable and must be removed/refused:
+
+- **WireGuard** — Curve25519 / ChaCha20-Poly1305 / BLAKE2; **no approved option at
+  all**. `set interfaces wireguard …` must be unavailable/refused in FIPS mode.
+- **PPTP** (`vpn pptp`) — MS-CHAP + **MPPE/RC4**; non-approvable. Legacy and rarely
+  used, but it is the second whole-feature removal.
+
+Everything else is **crypto-method (algorithm) restriction**, not feature
+removal. Notably **MACsec stays** — its cipher suites are **GCM-AES-128/256**,
+which *are* FIPS-approved (optionally pin to approved key sizes).
+
+### 5.2 The key sizing insight: OpenSSL-backed vs not
+
+How much work each crypto consumer needs depends on **where its crypto runs**:
+
+- **OpenSSL-backed** (GUI/nginx TLS, OpenVPN, PKI, anything linking libssl): once
+  the FIPS provider is active, **non-approved algorithms are simply unavailable —
+  the provider is the enforcer.** Here you mainly need **approved defaults** so
+  services negotiate cleanly instead of failing ugly. No per-option CLI work
+  required for compliance.
+- **NOT OpenSSL-backed** (OpenSSH's *native* curve25519/chacha20/ed25519,
+  **strongSwan** native plugins, net-snmp, kernel crypto): the provider does
+  **nothing**. These must be restricted **explicitly in the generated config**
+  (sshd `Ciphers`/`KEX`/`MACs`, swanctl proposals, SNMPv3 auth/priv). This is a
+  conf_mode / config-generation job regardless of any CLI grammar.
+
+IPsec is the canonical "NOT OpenSSL-backed" case: it keeps working when FIPS is
+on, but is only made compliant by restricting the `ike-group`/`esp-group`
+proposal values (see §4).
+
+### 5.3 The recommended enforcement design
+
+| Thing | Enforcement |
+|---|---|
+| **WireGuard, PPTP** | leaf-removal (model-style `cli-remove`) **or** `verify()`-reject when `fips` set — only 2 features |
+| **OpenSSL-backed crypto** (TLS/GUI, OpenVPN, PKI) | FIPS provider auto-blocks non-approved algorithms; just ship **approved defaults** so it's clean, not broken |
+| **Non-OpenSSL crypto** (SSH native, IPsec, SNMPv3, kernel) | **FIPS-aware conf_mode generation** (approved-only + approved defaults) + `verify()` reject explicitly-set non-approved values |
+
+Net result: **T8529 (provider) + a short `verify()` guard list + a handful of
+FIPS-aware conf_mode generators** — no second grammar, no cache-switching, no
+boot-time grammar selector. Enforcement principle remains **fail closed at
+commit**: a box that boots FIPS-on but quietly runs a non-approved cipher is
+worse than one that refuses to commit.
+
+### 5.4 Parked idea: exclude non-approved options from the CLI (vs. reject)
+
+**Desired, but deferred.** The approach above *rejects* a non-approved value at
+commit (`verify()`), rather than *removing it from the available choices*. A
+reject is cheaper and fully sufficient for **compliance**, but it has a real
+downside for **UX / the GUI**:
+
+- The GUI reads the **available options** from the CLI grammar (reftree /
+  completion data) to build its forms. If non-approved algorithms are still
+  *present* in the grammar and only rejected at commit, the GUI will keep
+  offering them and the user only discovers they're disallowed on commit. Hiding
+  them at the grammar level would make the GUI "just work" — it would naturally
+  present only approved choices.
+
+Ways to actually exclude options from the choices (for a future iteration) —
+designed out in detail in **§5.6**:
+
+- **Two baked CLI grammars** (FIPS vs non-FIPS), selected at boot. Cleanest UX
+  but the heaviest machinery: 2× template/reftree generation, lockstep cache
+  switching, a boot-time selector, and a classification list. Justified only if
+  "non-approved options must be invisible/unsettable in the CLI" becomes a hard
+  product/cert requirement — kept in the back pocket, not built now.
+- **Model-style `cli-remove`** of specific nodes — fits the 2 whole-feature
+  removals (WireGuard/PPTP) but was designed as a once-at-first-boot, model-keyed
+  mechanism; using it for a reversible, config-keyed FIPS toggle needs rework
+  (see §8.4) and does not naturally express per-value (cipher-list) pruning.
+
+**Decision for now:** ship `verify()`-reject + approved defaults (compliant,
+small). Revisit grammar-level exclusion if/when the GUI UX or a cert requirement
+makes invisible-not-just-rejected options worth the build cost.
+
+### 5.5 Non-approved items to enforce (block-list)
+
+- **WireGuard, PPTP** — whole-feature (above).
 - **Non-approved SSH/IPsec algorithms** — curve25519, chacha20-poly1305, ed25519
-  (context-dependent), MD5/SHA-1-based MACs, DH groups below approved strength.
-- **MD5 / DES / RC4 / non-approved curves** anywhere (SNMPv3, legacy TLS, PPTP/
+  (context-dependent), MD5/SHA-1-based MACs, DH groups below approved strength
+  (modp768/1024/1536, brainpool curves, curve25519/448).
+- **MD5 / DES / 3DES / RC4 / non-approved curves** anywhere (SNMPv3, legacy TLS,
   MPPE, etc.).
-- **Legacy VPNs** (PPTP/L2TP without approved crypto) and anything leaning on the
-  OpenSSL `legacy` provider.
+- Anything leaning on the OpenSSL `legacy` provider.
 
-Enforcement principle: **fail closed at commit**. A box that boots into FIPS mode
-but quietly runs a non-approved cipher is worse than one that refuses to commit.
+### 5.6 Grammar pruning — removing methods from the tree (vs. just rejecting)
+
+This records a concrete design for the deferred wish in §5.4: **remove
+non-approved crypto methods from the CLI grammar** so the GUI (which reads the
+available options from the reference tree) naturally presents only approved
+choices, instead of offering them and failing at commit. Captured here for a
+later decision; **not** required for a first compliant cut (§5.3 is).
+
+#### 5.6.1 What "a method in the tree" actually is (grounded)
+
+A crypto value such as `3des` or `curve25519-sha256` is a **token in a
+`<completionHelp><list>…</list>`** (often with a matching `<valueHelp>`
+description and sometimes a `<regex>`/validator constraint). Examples in-tree:
+`service ssh {cipher,key-exchange,mac}` ([service_ssh.xml.in](../interface-definitions/service_ssh.xml.in)),
+IPsec proposal `encryption`/`hash`
+([vpn-ipsec-encryption.xml.i](../interface-definitions/include/vpn-ipsec-encryption.xml.i)).
+
+At build, each token lands in **three** consumable artifacts (see the
+`interface_definitions` target in [Makefile](../Makefile)):
+
+1. **node.def template tree** (`/opt/vyatta/share/vyatta-cfg/templates/…`) —
+   shell completion (`allowed:`) and validation (`syntax:`).
+2. **`reftree.cache`** — generated by `reference_tree_to_json(...)` in
+   [generate_cache.py](../python/vyos/xml_ref/generate_cache.py) as **JSON**
+   ("unrendered json data for loading by vyconfd"); the config daemon's
+   authoritative validation source.
+3. **`xml_ref` Python cache** (`pkg_cache/*_cache.py` dict) — what
+   [vyos.xml_ref](../python/vyos/xml_ref/) and **the GUI** read for available
+   options.
+
+So "remove from the tree" = prune the **same token set** from all three,
+consistently. **WireGuard/PPTP** are the easy case — whole-node removal, which
+the Makefile already does for other nodes (e.g. `rm -rf $(TMPL_DIR)/protocols/eigrp`).
+The fact that `reftree.cache` is JSON (not an opaque blob) is what makes surgical
+pruning tractable.
+
+#### 5.6.2 The central piece: one auditable policy file
+
+Rather than scatter approved-ness across dozens of XML includes (which would also
+need RNG schema changes), keep a **single FIPS algorithm allow-list**, e.g.
+`data/fips/approved-algorithms.toml`, keyed by CLI leaf path → approved token
+subset, plus whole-node removals:
+
+```toml
+[leaf."service ssh cipher"]
+approved = ["aes128-ctr","aes192-ctr","aes256-ctr",
+            "aes128-gcm@openssh.com","aes256-gcm@openssh.com"]
+
+[leaf."service ssh key-exchange"]
+approved = ["ecdh-sha2-nistp256","ecdh-sha2-nistp384","ecdh-sha2-nistp521",
+            "diffie-hellman-group14-sha256","diffie-hellman-group16-sha512"]
+
+[leaf."vpn ipsec esp-group <tagNode> proposal <tagNode> encryption"]
+approved = ["aes128","aes192","aes256","aes128gcm128","aes256gcm128"]
+
+remove_node = ["interfaces wireguard", "vpn pptp"]
+```
+
+This file **is** the compliance artifact an auditor wants — one place stating the
+approved algorithm set per subsystem. It maps 1:1 onto the `<completionHelp>`
+tokens, needs no schema change, and is far easier to review than annotations
+spread through the grammar.
+
+#### 5.6.3 Options for applying the policy (single image, reboot-applied)
+
+- **Option A — Boot-time prune of the shipped artifacts (lighter).** Ship one
+  full grammar + the policy. When `system option fips` is set, a boot-time tool
+  prunes **working copies**: rewrite node.def `allowed:`/`syntax:` per leaf and
+  `rm -rf` whole-node removals; delete non-approved tokens from the
+  `reftree.cache` JSON and the `xml_ref` Python cache; delete removed subtrees.
+  Keep pristine copies for toggle-off; **fail closed** if the prune fails.
+  Because the caches are JSON/dict, this is a bounded transform.
+  *Pro:* no artifact duplication, reversible. *Con:* a hand-edited cache can drift
+  from what the daemon expects; must keep the pruner correct.
+
+- **Option B — Regenerate from policy-pruned XML on-box (cleaner, heavier).**
+  Ship the interface-definition XML + reuse `reference_tree_to_json`
+  (libvyosconfig is already on the device). At FIPS boot, text-prune the XML per
+  the policy, then re-run the **authoritative** generator to produce consistent
+  artifacts. *Pro:* zero risk of a cache diverging from the real build path.
+  *Con:* ships XML + template scripts on-box; adds a few seconds to FIPS boot.
+
+- **Option C — Two baked grammars, boot-selected (zero runtime risk, heaviest).**
+  Build normal + approved-only variants of all three artifacts; ship both; a boot
+  selector activates the set by `system option fips`. *Pro:* no runtime
+  generation/editing. *Con:* doubles every grammar artifact and needs lockstep
+  switching; justified only if a cert explicitly demands prebuilt immutable
+  grammars. (This is the "two grammars" idea parked in §5.4.)
+
+**Lean:** Option B if shipping the XML + generator on-box is acceptable (most
+robust — reuses the real build path); otherwise Option A with a JSON prune.
+
+#### 5.6.4 The subtlety: pruning does NOT replace `verify()`
+
+Removing a value/node from the grammar means a `config.boot` that **already
+contains** it (set before enabling FIPS, or restored from backup) will **fail to
+parse** — the daemon rejects unknown tokens and the box won't load its config.
+So pruning must be paired, in this order, at the toggle:
+
+1. **`verify()` gate** on the FIPS-enable commit: refuse to enable FIPS while the
+   running/boot config still contains a non-approved value or a to-be-removed
+   node (fail-closed, with a message naming what to change). This is the same
+   `verify()` work from §5.3.
+2. **Then prune** the grammar for the *next* boot, so the GUI/CLI only present
+   approved options going forward.
+
+The two mechanisms are **complementary, not alternatives**: `verify()` guarantees
+the config is clean before the grammar narrows; the prune delivers the GUI/UX win
+(only approved options visible). Prune-only would brick on stale config;
+verify-only leaves the GUI offering disallowed options (the original §5.4
+complaint).
+
+#### 5.6.5 Guard against policy drift
+
+Add a **build-time consistency check** (sibling of `check-properties-collision`
+in [Makefile](../Makefile)) that every path/token in the policy file actually
+exists in the grammar, so the allow-list cannot silently go stale when an
+upstream `<completionHelp>` list is reordered or renamed.
 
 ---
 
@@ -254,9 +450,11 @@ module + disabled non-approved features" the bar? This materially changes effort
 
 ### 7.3 Algorithm policy + enforcement
 - Generate FIPS-constrained config for each consumer in §4 (sshd Ciphers/MACs/
-  KEX, strongSwan proposals, nginx cipher suites, SNMPv3 auth/priv).
+  KEX, strongSwan proposals, nginx cipher suites, SNMPv3 auth/priv), plus
+  **approved defaults** so OpenSSL-backed consumers negotiate cleanly (§5.2).
 - Extend the relevant `verify()` paths to **reject non-approved features** in
-  FIPS mode (§5), starting with WireGuard.
+  FIPS mode (§5.3), starting with **WireGuard** (and **PPTP**), and to reject
+  explicitly-set non-approved crypto-method values for the non-OpenSSL consumers.
 
 ### 7.4 Observability
 - `show system fips` (op-mode): provider status (`openssl list -providers`),
@@ -406,8 +604,16 @@ User-space-OpenSSL-only, or kernel `fips=1` + boot integrity + Secure Boot?
 Drives whether this is weeks or a quarter. *Decision needed before scoping.*
 
 ### 8.4 Non-approved feature policy (§5)
-Confirm the block-list (WireGuard is a certainty) and the UX: hard commit error
-vs. a "disabled in FIPS mode" no-op. Hard error is recommended (fail closed).
+Resolved to the lighter design in §5: only **WireGuard** and **PPTP** are
+whole-feature removals; everything else is crypto-method restriction enforced in
+conf_mode. Recommended UX is a **hard commit error** (fail closed) via `verify()`
+plus approved defaults. **Open / parked:** whether to additionally *exclude*
+non-approved options from the CLI grammar so the **GUI** (which reads available
+options from the reftree) presents only approved choices — desirable for UX but
+deferred because it requires grammar-pruning machinery. **A concrete design for
+this (three artifacts, central policy file, Options A/B/C, verify()+prune
+ordering) is recorded in §5.6.** Revisit if GUI UX or a cert requirement makes
+invisible-not-just-rejected options worth the build cost.
 
 ### 8.5 Password hashing
 `yescrypt` is not FIPS-approved; decide the FIPS-mode local-auth KDF (e.g.
@@ -432,8 +638,9 @@ entropy source adequacy, and Secure Boot availability on the hardware.
 - **Phase 2 — System-wide approved operation.** FIPS algorithm policy for SSH,
   IPsec, GUI/nginx, SNMP, Python consumers (§4).
 - **Phase 3 — Fail-closed enforcement.** `verify()` refuses non-approved features
-  (WireGuard first), approved-KDF password hashing (§8.5). Drop the "incomplete"
-  warning.
+  (WireGuard + PPTP first), restricts crypto-method values for non-OpenSSL
+  consumers (SSH/IPsec/SNMP), approved-KDF password hashing (§8.5). Drop the
+  "incomplete" warning.
 - **Phase 4 (conditional) — Kernel FIPS + boot integrity.** `CONFIG_CRYPTO_FIPS`,
   `fips=1`, integrity-checked initramfs, Secure Boot tie-in — only if §8.3
   requires it.
@@ -447,8 +654,9 @@ entropy source adequacy, and Secure Boot availability on the hardware.
   - `src/conf_mode/system_option.py` — generate/verify + reboot-apply semantics.
   - `data/templates/openssl/openssl.cnf.j2` — provider activation (port T8529).
   - New op-mode `show system fips` + `op-mode-definitions`.
-  - `verify()` in feature conf-mode scripts (WireGuard, SSH, IPsec, SNMP, …) —
-    FIPS fail-closed enforcement.
+  - `verify()` in feature conf-mode scripts (WireGuard, PPTP, SSH, IPsec, SNMP,
+    …) — FIPS fail-closed enforcement (whole-feature reject for WireGuard/PPTP;
+    crypto-method value restriction for the rest — §5.3).
   - New boot-time systemd unit for self-test / fail-closed activation.
 - `vyos-build`
   - **`scripts/package-build-iGOS/openssl-fips-provider/`** — **DONE (Phase 0):**
