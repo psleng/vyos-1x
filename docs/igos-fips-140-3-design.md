@@ -533,22 +533,67 @@ handful of one-line `verify()` rejects, plus the whole-feature rejects
 
 ## 6. Kernel & boot integrity
 
-OpenSSL-only FIPS (today's VyOS state) is **not** a complete 140-3 story. Options,
-in increasing rigor:
+> **SCOPE DECISION (revised — §8.3): kernel FIPS _mode_ is IN scope; a validated
+> kernel _module_ is NOT claimed.** The **validated-module** claim rests on the
+> user-space OpenSSL module (cert #4985). In addition, the kernel is run in
+> **FIPS mode** (`fips=1`) as **approved-mode operation / hardening** — it
+> self-tests and restricts kernel crypto to approved algorithms, and makes
+> `/proc/sys/crypto/fips_enabled = 1`. This is **not** a CMVP-validated kernel
+> module (none is available for a Debian/am64x build — see §8.3); it is
+> approved-mode *behavior*. Keep the wording precise: "kernel FIPS mode enabled,
+> approved algorithms enforced," never "validated kernel."
 
-- **Kernel crypto FIPS mode** — requires `CONFIG_CRYPTO_FIPS=y` (currently not in
-  the VyOS kernel config), the `fips=1` boot parameter, and an **integrity-checked
-  initramfs** (the kernel refuses `fips=1` without the HMAC of the crypto modules
-  present). Affects kernel-space crypto (dm-crypt, AF_ALG, kernel IPsec if used).
+OpenSSL-only FIPS is **not** a complete 140-3 story. The layers, in increasing
+rigor:
+
+- **Kernel crypto FIPS mode (Phase 4 — in scope)** — requires `CONFIG_CRYPTO_FIPS=y`
+  (not currently in the VyOS kernel config), the `fips=1` boot parameter, and an
+  **integrity-checked initramfs** (the kernel refuses `fips=1` without the HMAC of
+  the crypto modules present). Enforces approved algorithms + self-tests for
+  kernel-space crypto (dm-crypt, AF_ALG, IPsec ESP data-plane).
 - **Module/boot integrity** — ties into **Secure Boot** (T861, already in
-  vyos-build): measured/verified boot chain so the validated module and its
-  config cannot be tampered with.
+  vyos-build): measured/verified boot chain so the module and its config cannot
+  be tampered with.
 - **Entropy/DRBG** — ensure an approved SP 800-90A/B DRBG seeded from an approved
   entropy source (jitterentropy/`rngd`), especially on embedded (am64x) targets.
 
-Decision needed (§8): does the target compliance claim require kernel FIPS mode
-and boot integrity, or is "all user-space crypto via the validated OpenSSL
-module + disabled non-approved features" the bar? This materially changes effort.
+**Boundary nuance (with kernel FIPS mode on, module unvalidated).** Enabling
+`fips=1` moves kernel-space crypto from *unrestricted* to *approved-mode* (approved
+algorithms + self-test), which strengthens posture and passes "FIPS mode enabled"
+checks — but the kernel module remains **unvalidated**, so these operations are
+**approved-mode but not performed by a validated module**:
+
+- **IPsec ESP data-plane** — strongSwan does IKE in user-space (route through the
+  `openssl` plugin to put it in the validated module — §4.1); the **bulk ESP
+  packet encryption runs in the kernel** (XFRM). With `fips=1` it uses approved
+  algorithms and self-tests, but the data-confidentiality operation is not in a
+  *validated* module.
+- **LUKS config-encryption** — kernel dm-crypt (§6.1): approved-mode under
+  `fips=1`, module unvalidated.
+- **Kernel RNG** — approved DRBG under `fips=1`, module unvalidated.
+
+So the **validated-module** claim is OpenSSL-only; kernel FIPS mode is layered on
+as approved-mode operation. The claim wording must not blur the two (§8.2/§8.3).
+
+**Single image — build-time capability vs runtime enforcement.** Building the
+kernel with `CONFIG_CRYPTO_FIPS=y` **removes no algorithms**; it only *adds* the
+FIPS capability (self-tests, integrity check, the `fips_enabled` flag). A kernel
+built with it but running `fips=0` (the param absent) behaves **identically to a
+non-FIPS kernel** — the full algorithm set is available. The restriction to
+approved algorithms is a **runtime** effect of `fips=1` only. So one
+`CONFIG_CRYPTO_FIPS=y` kernel serves **both** customers from a single image:
+
+| One kernel binary | `fips` not set (non-FIPS) | `fips=1` (FIPS) |
+|---|---|---|
+| `CONFIG_CRYPTO_FIPS=y` | all algorithms, normal behavior | approved algorithms only, self-tests run |
+
+This mirrors the OpenSSL provider toggle exactly (one library, provider switched
+by `system option fips`) and is how RHEL/Ubuntu ship — non-FIPS users lose
+nothing. Costs of the build option are limited to a slightly larger kernel
+(self-test vectors), boot-time self-tests **only when `fips=1`**, and the
+mandatory `.hmac`/initramfs integrity infrastructure (without which `fips=1`
+panics — but `fips=0` still boots normally). None of this affects non-FIPS
+runtime behavior, so the FIPS-capable kernel is safe to ship as the single image.
 
 ### 6.1 TPM interaction with FIPS
 
@@ -612,6 +657,52 @@ all of the above — cite the TPM's cert alongside OpenSSL provider #4985. The
 open platform question (parallel to the am64x OE question in §8.6): **is the
 target TPM a certed discrete part or an uncertified fTPM?**
 
+### 6.2 IPsec ESP data-plane — in-boundary options and the libipsec trade-off
+
+A recurring question: can IPsec's **bulk (ESP) encryption** run through OpenSSL so
+it is fully inside the validated boundary? **Yes — but rarely worth it.**
+
+**The option.** strongSwan's **`kernel-libipsec`** plugin moves the ESP data path
+out of the kernel into the charon userspace daemon; combined with the `openssl`
+plugin, the bulk crypto is then performed by OpenSSL → the FIPS provider → fully
+in-boundary (data plane included, not just IKE).
+
+**Why it is slow — it's the data path, not the cipher.** Default kernel ESP never
+leaves the kernel:
+
+```
+NIC → kernel net stack → XFRM encrypt (kernel) → NIC out
+```
+
+zero-copy, softirq context, multi-queue, often with hardware IPsec offload. The
+libipsec path round-trips every packet through userspace:
+
+```
+NIC → kernel → TUN → copy UP to charon → OpenSSL encrypt
+    → write DOWN to UDP socket → kernel → NIC out
+```
+
+So **per packet, both directions**, you pay two kernel↔userspace boundary
+crossings (TUN read + UDP write), memory copies, context switches into/out of
+charon, and serialization through a single daemon (no multi-core fan-out). The
+AES itself is still fast (AES-NI on x86, ARMv8 crypto extensions on the am64x
+Cortex-A53) — the cost is **packet movement**, which at small/medium packet sizes
+dominates and typically yields an **order-of-magnitude** throughput drop
+(multi-Gbps kernel vs hundreds of Mbps userspace) plus higher CPU and latency.
+
+**Why it bites extra on am64x.** TI am64x parts have a hardware security
+accelerator (**SA2UL**) that the **kernel** IPsec path can offload to. libipsec
+bypasses both the kernel fast path **and** the accelerator, so on this modest
+embedded SoC the gap between "kernel ESP + HW offload" and "userspace ESP on a
+Cortex-A53" is especially punishing.
+
+**Recommended posture.** Keep ESP in the kernel (approved algorithms via proposal
+restriction + kernel `fips=1` for approved-mode), route **IKE** through the
+`openssl` plugin (validated), and accept that the ESP *validated-module* claim is
+the one thing given up — rather than cripple throughput. Reserve `kernel-libipsec`
+for genuinely **low-throughput** tunnels where fully-in-boundary ESP is a hard
+requirement.
+
 ---
 
 ## 7. Proposed implementation
@@ -640,6 +731,16 @@ target TPM a certed discrete part or an uncertified fTPM?**
   module self-test fails — i.e. **fail-closed boot**. This unit is also what
   **regenerates `/run/ssl/fipsmodule.cnf`** on every boot (it lives in tmpfs and
   is wiped — see §7.1 note); without it a FIPS-enabled box breaks on first reboot.
+  - **Implemented (Phase 1): controlled fail-closed.** On self-test failure the
+    boot helper ([src/system/fips-regenerate.sh](../src/system/fips-regenerate.sh))
+    runtime-masks the network-exposed crypto services
+    (`ssh`/`ssh@`/`ssh-tpm-service`, `strongswan`, `openvpn@`, `nginx`,
+    `vyos-http-api`) so they do not operate in an unverified state, raises a loud
+    console/syslog message, and drops a persistent failure marker
+    (`/run/vyos-fips-selftest-failed`) surfaced by `show system fips` — while
+    leaving **console getty** up for recovery. The mask lives in `/run` and
+    clears on reboot so the self-test is retried. (Chosen over hard
+    emergency/halt to avoid bricking the headless am64x appliance.)
 
 #### 7.2.1 Reboot handling on toggle (two traps + the pattern)
 
@@ -860,9 +961,34 @@ customer-facing wording and the operational-environment constraints the cert
 lists. *Decision: legal/marketing-aligned claim + the list of approved
 algorithms we advertise.*
 
+**Critical distinction — FIPS _mode_ vs validated _module_** (drives all claim
+wording): a CMVP certificate validates a specific **module** build/OE; `fips=1`
+(user-space provider activation or kernel `fips=1`) is runtime **approved-mode
+behavior**. They satisfy different requirements:
+- *"Uses a FIPS 140-3 **validated** cryptographic module, operated in approved
+  mode"* — satisfied by the OpenSSL provider (cert #4985). This is the defensible
+  validated-module claim.
+- *"Operates in FIPS **mode** / approved algorithms enforced"* — satisfied by
+  activating the provider **and** kernel `fips=1`; passes checkbox-style
+  "`fips_enabled=1`" requirements. Does **not** by itself assert a validated
+  kernel module.
+
+Do not conflate: the validated-module claim is **OpenSSL-only**; kernel `fips=1`
+is approved-mode operation, not validation. Never word kernel FIPS mode as
+"validated kernel."
+
 ### 8.3 How deep does the compliance bar go (§6)
-User-space-OpenSSL-only, or kernel `fips=1` + boot integrity + Secure Boot?
-Drives whether this is weeks or a quarter. *Decision needed before scoping.*
+**RESOLVED: validated-module claim is user-space-OpenSSL; kernel FIPS _mode_ is
+additionally enabled (Phase 4 — IN scope) as approved-mode hardening.** The
+**validated boundary** is the OpenSSL module (#4985). On top of that, the kernel
+is run with `fips=1` so kernel-space crypto (IPsec ESP data-plane, LUKS,
+kernel RNG) operates in **approved mode** (approved algorithms + self-tests) and
+`fips_enabled=1` — strengthening posture and satisfying "FIPS mode enabled"
+requirements. A **CMVP-validated kernel module is NOT claimed** (none is available
+for a Debian/am64x build without self-funding a validation — §8-notes). This adds
+real engineering (Phase 4: kernel `CONFIG_CRYPTO_FIPS`, `fips=1` cmdline,
+integrity-checked initramfs) but no validation paperwork; the claim wording stays
+per §8.2 (approved-mode, not validated, for the kernel).
 
 ### 8.4 Non-approved feature policy (§5)
 Resolved to the lighter design in §5: only **WireGuard** and **PPTP** are
@@ -925,9 +1051,16 @@ in/out for the first release.*
   Drop the "incomplete" warning.
 - **Phase 3a (conditional) — RadSec.** If RADIUS is required under FIPS, add
   `radsecproxy` + CLI/config/PKI wiring so RADIUS runs over TLS (§4.1/§8.8).
-- **Phase 4 (conditional) — Kernel FIPS + boot integrity.** `CONFIG_CRYPTO_FIPS`,
-  `fips=1`, integrity-checked initramfs, Secure Boot tie-in — only if §8.3
-  requires it.
+- **Phase 4 — Kernel FIPS mode (approved-mode operation; NOT a validated kernel
+  module). IN scope (§8.3).** `vyos-build`: kernel `CONFIG_CRYPTO_FIPS=y` +
+  integrity-checked initramfs (HMAC `.hmac` for kernel + crypto modules) +
+  approved DRBG/entropy (jitterentropy), optionally Secure Boot (T861) for the
+  integrity chain. `vyos-1x`: add **`fips=1`** to the kernel cmdline when
+  `system option fips` is set (via the existing `system_option.py` cmdline/kexec
+  path). Result: kernel-space crypto self-tests + enforces approved algorithms and
+  `fips_enabled=1`. **No validated-kernel claim** — approved-mode only (§6/§8.2).
+  Fail-closed if the kernel refuses `fips=1` (missing integrity → boot panic), so
+  the initramfs HMAC infrastructure is a hard prerequisite.
 
 ---
 
@@ -959,6 +1092,10 @@ in/out for the first release.*
     RADIUS consumers (PPPoE/L2TP/IPoE) likewise. RadSec (`radsecproxy`) is the
     remediation if RADIUS is required (§8.8) — not implemented.
   - New boot-time systemd unit for self-test / fail-closed activation.
+  - **Kernel FIPS mode (Phase 4, §8.3)** — `src/conf_mode/system_option.py`: add
+    `fips=1` to the kernel cmdline when `system option fips` is set (reuse the
+    existing cmdline/kexec path), so the kernel enters approved mode on the same
+    toggle.
 - `vyos-build`
   - **`scripts/package-build-iGOS/openssl-fips-provider/`** — **DONE (Phase 0):**
     standalone package that builds the OpenSSL **3.1.2** FIPS provider from pinned
@@ -971,8 +1108,11 @@ in/out for the first release.*
     no `enable-fips`, no `fips.so`).
   - **`radsecproxy`** (conditional, §4.1/§8.8) — new package if RADIUS is required
     under FIPS (RadSec/TLS wrapper for the UDP RADIUS clients).
-  - Kernel config + initramfs for Phase 4 (conditional).
-  - Secure Boot (T861) tie-in for integrity (conditional).
+  - **Kernel config + initramfs (Phase 4, §8.3)** — `CONFIG_CRYPTO_FIPS=y`,
+    integrity-checked initramfs (kernel + crypto-module `.hmac`), approved
+    DRBG/entropy; **approved-mode only, not a validated kernel module**.
+  - **Secure Boot (T861) tie-in** — optional, for the integrity chain backing
+    kernel FIPS mode.
 
 ---
 
@@ -980,6 +1120,11 @@ in/out for the first release.*
 
 - A separate `-fips` image or any divergent software path (explicitly rejected).
 - Live (no-reboot) entry/exit of FIPS mode.
+- A **CMVP-validated kernel crypto module**. Kernel **FIPS mode** (`fips=1`,
+  approved-mode operation) **is** in scope (Phase 4, §6/§8.3), but no validated
+  *kernel module* is claimed — the validated-module claim is OpenSSL-only.
+  Kernel-space crypto (IPsec ESP data-plane, LUKS, kernel RNG) is approved-mode
+  but not performed by a validated module.
 - Obtaining a *new* CMVP validation for igOS itself (we consume the OpenSSL
   provider's existing validation unless §8.2 dictates otherwise).
 - Changing cryptographic defaults for non-FIPS customers.

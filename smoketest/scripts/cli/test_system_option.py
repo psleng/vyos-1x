@@ -15,6 +15,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import os
+import platform
 import unittest
 
 from base_vyostest_shim import VyOSUnitTestSHIM
@@ -142,6 +143,54 @@ class TestSystemOption(VyOSUnitTestSHIM.TestCase):
 
         if cpu_vendor == 'AuthenticAMD':
             self.assertIn(f' initcall_blacklist=acpi_cpufreq_init amd_pstate={amd_pstate_mode}', tmp)
+
+    def test_fips(self):
+        openssl_config = '/etc/ssl/openssl.cnf'
+        fipsmodule_config = '/run/ssl/fipsmodule.cnf'
+        arch_map = {
+            'x86_64': 'x86_64-linux-gnu',
+            'aarch64': 'aarch64-linux-gnu',
+        }
+        arch = arch_map.get(platform.machine())
+        fips_module = f'/usr/lib/{arch}/ossl-modules/fips.so'
+
+        # The validated provider is shipped by a separate package; skip when it
+        # is not present in the test image.
+        if arch is None or not os.path.exists(fips_module):
+            self.skipTest('OpenSSL FIPS provider module not installed')
+
+        self.cli_set(base_path + ['fips'])
+        self.cli_commit()
+
+        # openssl.cnf must activate the fips + base providers and require
+        # fips=yes for algorithm fetches.
+        tmp = read_file(openssl_config)
+        self.assertIn('.include /run/ssl/fipsmodule.cnf', tmp)
+        self.assertIn('fips = fips_sect', tmp)
+        self.assertIn('base = base_sect', tmp)
+        self.assertIn('default_properties = fips=yes', tmp)
+
+        # fipsinstall must have produced the module config (self-test passed).
+        self.assertTrue(os.path.exists(fipsmodule_config))
+
+        # The kernel cmdline must gain fips=1 (approved-mode; inert unless the
+        # kernel is built with CONFIG_CRYPTO_FIPS).
+        grub_cfg = f'{image.grub.GRUB_DIR_VYOS_VERS}/{image.get_running_image()}.cfg'
+        tmp = read_file(grub_cfg)
+        self.assertIn(' fips=1', tmp)
+
+        # Disabling FIPS must revert openssl.cnf, remove the module config, and
+        # drop fips=1 from the kernel cmdline.
+        self.cli_delete(base_path + ['fips'])
+        self.cli_commit()
+
+        tmp = read_file(openssl_config)
+        self.assertNotIn('.include /run/ssl/fipsmodule.cnf', tmp)
+        self.assertNotIn('default_properties = fips=yes', tmp)
+        self.assertFalse(os.path.exists(fipsmodule_config))
+
+        tmp = read_file(grub_cfg)
+        self.assertNotIn(' fips=1', tmp)
 
 if __name__ == '__main__':
     unittest.main(verbosity=2, failfast=VyOSUnitTestSHIM.TestCase.debug_on())

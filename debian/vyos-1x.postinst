@@ -264,6 +264,10 @@ systemctl enable vyos-config-cloud-init.service
 # Enable Podman API
 systemctl enable podman.service
 
+# Enable early-boot regeneration of the OpenSSL FIPS module config (lives in
+# tmpfs and is wiped each boot); no-op unless FIPS mode is enabled.
+systemctl enable vyos-fips-regenerate.service
+
 # Disable the system-wide dnsmasq instance — VyOS spawns scoped dnsmasq
 # instances per-feature (DNS forwarding, DHCP server, WWAN ip-passthrough)
 # with --bind-interfaces.  The default Debian unit binds to *:67 and would

@@ -15,6 +15,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import os
+import platform
 import psutil
 import re
 
@@ -57,6 +58,19 @@ systemd_action_file = '/lib/systemd/system/ctrl-alt-del.target'
 usb_autosuspend = r'/etc/udev/rules.d/40-usb-autosuspend.rules'
 kernel_dynamic_debug = r'/sys/kernel/debug/dynamic_debug/control'
 time_format_to_locale = {'12-hour': 'en_US.UTF-8', '24-hour': 'en_GB.UTF-8'}
+
+# FIPS 140-3: the validated OpenSSL provider is shipped per-arch into the
+# OpenSSL module directory; openssl.cnf is rendered to activate it.
+arch_map = {
+    'x86_64': 'x86_64-linux-gnu',
+    'aarch64': 'aarch64-linux-gnu',
+}
+arch = arch_map.get(platform.machine())
+openssl_config = '/etc/ssl/openssl.cnf'
+openssl_fipsmodule_config = '/run/ssl/fipsmodule.cnf'
+# Persistent marker (NOT in tmpfs) recording that a FIPS toggle needs a reboot.
+fips_reboot_marker = '/config/.fips_reboot_required'
+
 tuned_profiles = {
     'power-save': 'powersave',
     'network-latency': 'network-latency',
@@ -202,6 +216,19 @@ def get_config(config=None):
 
 
 def verify(options):
+    if 'fips' in options:
+        if arch is None:
+            raise ConfigError(
+                f'FIPS mode is not supported on this architecture '
+                f'({platform.machine()})'
+            )
+        fips_module = f'/usr/lib/{arch}/ossl-modules/fips.so'
+        if not os.path.exists(fips_module):
+            raise ConfigError(
+                f'OpenSSL FIPS module not found: {fips_module}. '
+                f'The FIPS provider package must be installed.'
+            )
+
     if 'http_client' in options:
         config = options['http_client']
         if 'source_interface' in config:
@@ -304,6 +331,25 @@ def verify(options):
 
 
 def generate(options):
+    # FIPS 140-3: run the module self-test (POST) and (re)generate the module
+    # config, then render openssl.cnf to activate (or deactivate) the provider.
+    # fipsinstall is run with OPENSSL_CONF unset to a minimal config so it does
+    # not try to load the (possibly fips-referencing) system openssl.cnf before
+    # /run/ssl/fipsmodule.cnf exists.
+    if 'fips' in options:
+        os.makedirs(os.path.dirname(openssl_fipsmodule_config), exist_ok=True)
+        fips_module = f'/usr/lib/{arch}/ossl-modules/fips.so'
+        cmd(
+            f'openssl fipsinstall -module {fips_module} '
+            f'-out {openssl_fipsmodule_config}',
+            env={**os.environ, 'OPENSSL_CONF': '/dev/null'},
+        )
+    else:
+        if os.path.exists(openssl_fipsmodule_config):
+            os.remove(openssl_fipsmodule_config)
+
+    render(openssl_config, 'openssl/openssl.cnf.j2', options)
+
     render(curlrc_config, 'system/curlrc.j2', options)
     render(ssh_config, 'system/ssh_config.j2', options)
     render(usb_autosuspend, 'system/40_usb_autosuspend.j2', options)
@@ -333,6 +379,12 @@ def generate(options):
     # Keep this in sync with image_installer.py:get_cli_kernel_options()
     if 'reboot_on_panic' in options:
         cmdline_options.append('panic=60')
+
+    # FIPS 140-3 kernel mode (approved-mode operation; not a validated kernel
+    # module). Inert unless the kernel is built with CONFIG_CRYPTO_FIPS.
+    # Keep this in sync with image_installer.py:get_cli_kernel_options()
+    if 'fips' in options:
+        cmdline_options.append('fips=1')
 
     if 'disable_hpet' in kernel_opts:
         cmdline_options.append('hpet=disable')
@@ -493,6 +545,25 @@ def apply(options):
             Warning(
                 'Kernel configuration options have changed. '
                 'To apply these changes, you must save the configuration and reboot the system!'
+            )
+
+    # FIPS 140-3: a provider switch only fully applies once every process
+    # restarts under the new openssl.cnf, so a toggle is reboot-applied. Detect
+    # a real change against the previously-committed value (exists_effective)
+    # and only act post-boot (boot_configuration_complete) to avoid a boot-loop
+    # during config replay. Commit != save, so we warn to save and reboot rather
+    # than auto-rebooting; a persistent marker records the pending state.
+    if boot_configuration_complete():
+        fips_now = 'fips' in options
+        fips_was = Config().exists_effective(['system', 'option', 'fips'])
+        if fips_now != fips_was:
+            if fips_now:
+                write_file(fips_reboot_marker, '')
+            elif os.path.exists(fips_reboot_marker):
+                os.unlink(fips_reboot_marker)
+            Warning(
+                'FIPS mode has changed. To fully apply this change you must '
+                'save the configuration and reboot the system!'
             )
 
     # System bootup beep
