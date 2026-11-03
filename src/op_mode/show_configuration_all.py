@@ -23,11 +23,51 @@
 # renders the configuration with those defaults overlaid, while reusing the
 # native '--show-hide-secrets' output as a base so that secret values stay
 # masked and the output format is unchanged.
+#
+# Defaults are overlaid only for items that are actually configured, i.e. into
+# subtrees that already exist in the active configuration - not for every node
+# in the reference tree. This matches the legacy behaviour: 'show configuration
+# all' shows the defaults of the configured items, not every default.
 
 from vyos.config import Config
-from vyos.config import merge_defaults
 from vyos.configtree import ConfigTree
 from vyos.utils.process import cmd
+
+
+def _merge_configured_defaults(config_tree: ConfigTree, active_tree: ConfigTree,
+                               defaults: dict, path: list) -> None:
+    """Overlay default values onto 'config_tree' in place, but only for items
+    that are actually configured.
+
+    Unlike vyos.config.merge_defaults, which overlays every default in the
+    schema, this descends only into subtrees that already exist in the active
+    configuration ('active_tree'). Defaults are therefore shown for the
+    configured items only - not for every node in the entire reference tree.
+    This restores the behaviour of the legacy 'show configuration all'.
+
+    'active_tree' is an immutable snapshot of the explicitly configured values;
+    existence is tested against it (not the tree being mutated) so that overlaid
+    defaults never cause further defaults to be pulled in.
+    """
+    for key, value in defaults.items():
+        current = path + [key]
+        if isinstance(value, dict):
+            if not value:
+                # A valueless default node: only meaningful below a configured
+                # parent, which is guaranteed here since we descend solely into
+                # subtrees present in the active configuration.
+                if path and not config_tree.exists(current):
+                    config_tree.set(current)
+            elif active_tree.exists(current):
+                # Descend only into subtrees the operator actually configured.
+                _merge_configured_defaults(config_tree, active_tree, value, current)
+        elif isinstance(value, list):
+            if path and not config_tree.exists(current):
+                for item in value:
+                    config_tree.set(current, value=item, replace=False)
+        else:
+            if path and not config_tree.exists(current):
+                config_tree.set(current, value=value)
 
 
 def get_configuration_all() -> str:
@@ -36,9 +76,12 @@ def get_configuration_all() -> str:
     # afterwards and are never secret, so masking is unaffected.
     base = cmd('cli-shell-api showConfig --show-active-only --show-hide-secrets')
     config_tree = ConfigTree(base)
+    # Immutable snapshot of what is explicitly configured, used to decide which
+    # subtrees should receive default values.
+    active_tree = ConfigTree(base)
 
     defaults = Config().get_config_defaults([], get_first_key=True, recursive=True)
-    merge_defaults(config_tree, defaults)
+    _merge_configured_defaults(config_tree, active_tree, defaults, [])
 
     return config_tree.to_string()
 
