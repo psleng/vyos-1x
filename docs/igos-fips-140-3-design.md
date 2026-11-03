@@ -1,6 +1,7 @@
 # igOS FIPS 140-3 — Design Sketch
 
-Status: design draft (no implementation yet)
+Status: **implementation in progress** (Phases 0, 1, and the vyos-1x half of
+Phase 4 landed; enforcement phases pending — see "Implementation status" below).
 Scope: run a **single igOS image** that can be placed into a **FIPS 140-3 mode**
 by configuration (`set system option fips`, applied on **reboot**), so that the
 system performs its cryptography using a **FIPS 140-3 validated module** (the
@@ -14,6 +15,69 @@ This builds directly on upstream VyOS's partial work (which is explicitly flagge
 "incomplete") and extends it from "OpenSSL provider toggle" toward a
 system-wide, enforceable FIPS mode. It spans `vyos-1x`, `vyos-build`, and the
 kernel.
+
+---
+
+## Implementation status (checkpoint: 2026-11-03 — pausing for a build)
+
+**Scope decisions locked in:** validated-module claim = **OpenSSL provider only**
+(#4985); kernel **FIPS _mode_** (`fips=1`) is additionally enabled as approved-mode
+hardening but **no validated-kernel-module claim** (§8.2/§8.3). Single-image,
+reboot-applied toggle. WireGuard + PPTP = whole-feature removals; everything else
+= crypto-method restriction (§5). TPM operator uses disabled under FIPS on an
+uncertified fTPM (§6.1). RADIUS/TACACS+ non-approvable, no RadSec today (§4.1).
+
+**DONE (implemented + validated here — compile/ruff/pylint/XML-schema/template
+render; NOT yet run on-target):**
+- **Phase 0 — provider toggle foundation.** `system option fips` leaf
+  ([interfaces/system_option.xml.in](../interface-definitions/system_option.xml.in));
+  verify/generate/apply in
+  [system_option.py](../src/conf_mode/system_option.py) (arch detect, `fipsinstall`
+  self-test, render openssl.cnf, reboot-marker + Warning — §7.2.1);
+  [openssl.cnf.j2](../data/templates/openssl/openssl.cnf.j2); smoketest
+  ([test_system_option.py](../smoketest/scripts/cli/test_system_option.py)).
+- **Phase 1 — reboot-applied, fail-closed boot, observability.** Boot-time
+  regeneration + **controlled fail-closed**
+  ([fips-regenerate.sh](../src/system/fips-regenerate.sh) +
+  [vyos-fips-regenerate.service](../src/systemd/vyos-fips-regenerate.service),
+  enabled in [postinst](../debian/vyos-1x.postinst)); `show system fips`
+  ([system_fips.py](../src/op_mode/system_fips.py) +
+  [show-system.xml.in](../op-mode-definitions/show-system.xml.in)).
+- **Phase 4 (vyos-1x half) — `fips=1` kernel cmdline** on the toggle, in **both**
+  the commit path ([system_option.py](../src/conf_mode/system_option.py)
+  `generate()`) and the install/upgrade path
+  ([image_installer.py](../src/op_mode/image_installer.py)
+  `get_cli_kernel_options()` — moved above the early return so it applies without
+  `system option kernel`). Inert until the kernel is built with
+  `CONFIG_CRYPTO_FIPS`.
+- Provider package (vyos-build) **built + `fipsinstall` INSTALL PASSED on arm64**
+  (§7.5) and registered in the flavor + nexus-build Makefile (prior session).
+
+**ON-TARGET VALIDATION PENDING (needs the booted image — this is the build the
+user is running now):**
+- Toggle `set system option fips` → `show system fips` → reboot survives (tmpfs
+  regeneration), `openssl list -providers` shows fips active, `/run/ssl/fipsmodule.cnf`
+  present; then `delete` reverts cleanly.
+- Fail-closed path: corrupt/remove `fips.so` while openssl.cnf references it →
+  confirm crypto services masked + console banner + `show system fips` shows
+  SELF-TEST FAILED (watch via the serial console / `socat`).
+- Confirm the igOS **3.5** base's shipped `/etc/ssl/openssl.cnf` isn't carrying
+  customizations our template would overwrite (§7.1 note).
+
+**NEXT UP (restart here tomorrow):**
+1. **p23-helper-policy** — `python/vyos/fips.py` helper + `data/fips/approved-algorithms.toml`
+   (§5.7): `fips_enabled()`, `approved()`, `reject_unapproved()`, `apply_fips_defaults()`.
+2. **p3-ssh-ipsec** — FIPS-aware SSH/IPsec: `{% elif fips %}` approved-defaults in
+   `sshd_config.j2` + route IKE through the strongSwan `openssl` plugin (§6.2) +
+   proposal restriction + verify rejects.
+3. **p3-wg-pptp** — fail-closed `verify()` rejecting WireGuard + PPTP under FIPS.
+4. Then: OpenVPN `providers default`→`fips base` (§6.1), TPM operator rejects
+   (§6.1), RADIUS/TACACS+ rejects (§4.1), password-hash KDF (§8.5). Drop the
+   "incomplete" warning once enforcement lands.
+
+**Decision-gated / owned elsewhere:** p4-kernel-build (`CONFIG_CRYPTO_FIPS` +
+HMAC initramfs — vyos-build, user owns); RadSec scope (§8.8); password KDF (§8.5);
+claim wording (§8.2); am64x OE + TPM certification (§8.6/§8.7).
 
 ---
 
