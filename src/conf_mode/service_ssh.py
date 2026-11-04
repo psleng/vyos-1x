@@ -87,12 +87,15 @@ def get_config(config=None):
     if tmp:
         ssh.update({'restart_required': {}})
 
+    tmp = is_node_changed(conf, base)
+    if tmp:
+        # Set dependency to restart serial ports running ssh server when ssh config changes
+        # Not when ssh is called as dependency
+        set_dependents('serial', conf)
+
     # We have gathered the dict representation of the CLI, but there are default
     # options which we need to update into the dictionary retrieved.
     ssh = conf.merge_defaults(ssh, recursive=True)
-
-    # Set dependency to restart serial ports running ssh server when ssh config changes
-    set_dependents('serial', conf)
 
     # Ignore default XML values if config doesn't exists
     # Delete key from dict
