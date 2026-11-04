@@ -1,0 +1,111 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<interfaceDefinition>
+  <node name="delete">
+    <children>
+      <node name="firmware">
+        <properties>
+          <help>Delete cached firmware archives</help>
+        </properties>
+        <children>
+          <tagNode name="wwan">
+            <properties>
+              <help>Cellular modem interface</help>
+              <completionHelp>
+                <path>interfaces wwan</path>
+                <script>cd /sys/class/net; ls -d wwan* 2&gt;/dev/null</script>
+              </completionHelp>
+            </properties>
+            <children>
+              <virtualTagNode>
+                <properties>
+                  <help>Cached igOS firmware version</help>
+                  <completionHelp>
+                    <script>sudo ${vyos_op_scripts_dir}/wwan_firmware.py show_firmware --interface="${COMP_WORDS[3]}" --quiet --downloaded-only</script>
+                  </completionHelp>
+                </properties>
+                <command>sudo ${vyos_op_scripts_dir}/wwan_firmware.py delete_firmware --interface="$4" --version="$5"</command>
+                <children>
+                  <leafNode name="now">
+                    <properties>
+                      <help>Delete cached archive without confirmation</help>
+                    </properties>
+                    <command>sudo ${vyos_op_scripts_dir}/wwan_firmware.py delete_firmware --interface="$4" --version="$5" --no-prompt</command>
+                  </leafNode>
+                </children>
+              </virtualTagNode>
+            </children>
+          </tagNode>
+        </children>
+      </node>
+    </children>
+  </node>
+  <node name="update">
+    <properties>
+      <help>Update system components</help>
+    </properties>
+    <children>
+      <node name="firmware">
+        <properties>
+          <help>Update system firmware</help>
+        </properties>
+        <children>
+          <tagNode name="wwan">
+            <properties>
+              <help>Update cellular modem firmware</help>
+              <completionHelp>
+                <path>interfaces wwan</path>
+                <script>cd /sys/class/net; ls -d wwan* 2&gt;/dev/null</script>
+              </completionHelp>
+            </properties>
+            <children>
+              <tagNode name="archive">
+                <properties>
+                  <help>Signed standalone firmware archive URL or local path</help>
+                </properties>
+                <command>sudo ${vyos_op_scripts_dir}/wwan_firmware.py update_archive --interface="$4" --archive="$6"</command>
+                <children>
+                  <node name="force-unsigned">
+                    <properties>
+                      <help>Install local unsigned archive (explicitly enabled development images only)</help>
+                    </properties>
+                    <command>sudo ${vyos_op_scripts_dir}/wwan_firmware.py update_archive --interface="$4" --archive="$6" --force-unsigned</command>
+                    <children>
+                      <leafNode name="now">
+                        <properties><help>Install without confirmation</help></properties>
+                        <command>sudo ${vyos_op_scripts_dir}/wwan_firmware.py update_archive --interface="$4" --archive="$6" --force-unsigned --no-prompt</command>
+                      </leafNode>
+                    </children>
+                  </node>
+                  <leafNode name="now">
+                    <properties>
+                      <help>Install without confirmation</help>
+                    </properties>
+                    <command>sudo ${vyos_op_scripts_dir}/wwan_firmware.py update_archive --interface="$4" --archive="$6" --no-prompt</command>
+                  </leafNode>
+                </children>
+              </tagNode>
+              <virtualTagNode>
+                <properties>
+                  <help>igOS firmware version or latest</help>
+                  <completionHelp>
+                    <list>latest</list>
+                    <script>sudo ${vyos_op_scripts_dir}/wwan_firmware.py show_firmware --interface="${COMP_WORDS[3]}" --quiet</script>
+                  </completionHelp>
+                </properties>
+                <command>sudo ${vyos_op_scripts_dir}/wwan_firmware.py set_firmware --interface="$4" --version="$5"</command>
+                <children>
+                  <leafNode name="now">
+                    <properties>
+                      <help>Update without confirmation</help>
+                    </properties>
+                    <command>sudo ${vyos_op_scripts_dir}/wwan_firmware.py set_firmware --interface="$4" --version="$5" --no-prompt</command>
+                  </leafNode>
+                </children>
+              </virtualTagNode>
+            </children>
+          </tagNode>
+        </children>
+      </node>
+    </children>
+  </node>
+</interfaceDefinition>
