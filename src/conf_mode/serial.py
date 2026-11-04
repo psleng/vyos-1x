@@ -153,6 +153,10 @@ def get_config(config=None):
         'disable' not in device_conf and 'server' in device_conf.get('ssh', {})
         for device_conf in result.get('device', {}).values()
     )
+
+    # Serial SSH server relies on the system SSH service (service ssh) being
+    # configured; record its presence so verify() can enforce the dependency.
+    result['system_ssh_configured'] = conf.exists(['service', 'ssh'])
     return result
 
 
@@ -591,6 +595,9 @@ def verify(config):
             )
 
         validate_ppp_interface_auth(config)
+
+    if run_serial_validation and config.get('serial_ssh_server') and not config.get('system_ssh_configured'):
+        raise ConfigError('Serial SSH server requires service SSH to be configured, please configure "service ssh"!')
 
     if run_serial_validation and 'missing_profile' in config:
         for device, profile_name in config['missing_profile'].items():

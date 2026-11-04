@@ -39,6 +39,7 @@ from vyos.pki import encode_public_key
 from vyos.pki import load_openssh_public_key
 from vyos.utils.dict import dict_search_recursive
 from vyos.utils.file import write_file
+from vyos.utils.serial import serial_ssh_server_configured
 # PERLE - access tpm allowed checking
 from vyos.tpm import tpm_allowed
 
@@ -74,6 +75,10 @@ def get_config(config=None):
         conf = Config()
     base = ['service', 'ssh']
     if not conf.exists(base):
+        # service ssh is being removed - a serial SSH server relies on it, so
+        # refuse the deletion while such a server is still configured.
+        if serial_ssh_server_configured(conf):
+            return {'serial_ssh_dependent': True}
         return None
     ssh = conf.get_config_dict(base, key_mangling=('-', '_'),
                                get_first_key=True, with_pki=True)
@@ -116,6 +121,9 @@ def get_config(config=None):
 def verify(ssh):
     if not ssh:
         return None
+
+    if 'serial_ssh_dependent' in ssh:
+        raise ConfigError('Cannot delete "service ssh" while a serial SSH server is configured, please remove the serial SSH server first!')
 
     if 'rekey' in ssh and 'data' not in ssh['rekey']:
         raise ConfigError('Rekey data is required!')
