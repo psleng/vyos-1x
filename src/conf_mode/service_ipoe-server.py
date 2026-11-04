@@ -31,6 +31,7 @@ from vyos.accel_ppp_util import verify_accel_ppp_ip_pool
 from vyos.accel_ppp_util import verify_accel_ppp_authentication
 from vyos.vpp.utils import cli_ifaces_list
 from vyos import ConfigError
+from vyos import fips
 from vyos import airbag
 
 airbag.enable()
@@ -62,12 +63,19 @@ def get_config(config=None):
 
     ipoe['vpp_ifaces'] = cli_ifaces_list(conf)
 
+    # FIPS 140-3: classic RADIUS (MD5) has no approved form.
+    if fips.fips_enabled(conf) and conf.exists(base + ['authentication', 'radius']):
+        ipoe['fips_reject_radius'] = {}
+
     return ipoe
 
 
 def verify(ipoe):
     if not ipoe:
         return None
+
+    if 'fips_reject_radius' in ipoe:
+        fips.reject_feature('RADIUS (IPoE server)')
 
     if 'interface' not in ipoe:
         raise ConfigError('No IPoE interface configured')

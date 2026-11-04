@@ -1,7 +1,8 @@
 # igOS FIPS 140-3 — Design Sketch
 
 Status: **implementation in progress** (Phases 0, 1, and the vyos-1x half of
-Phase 4 landed; enforcement phases pending — see "Implementation status" below).
+Phase 4 landed; enforcement started — helper/policy + SSH + IPsec-verify landed,
+remaining enforcement pending — see "Implementation status" below).
 Scope: run a **single igOS image** that can be placed into a **FIPS 140-3 mode**
 by configuration (`set system option fips`, applied on **reboot**), so that the
 system performs its cryptography using a **FIPS 140-3 validated module** (the
@@ -18,7 +19,7 @@ kernel.
 
 ---
 
-## Implementation status (checkpoint: 2026-11-03 — pausing for a build)
+## Implementation status (checkpoint: 2026-11-04 — SSH/OpenVPN/IPsec + rejects landed & on-target validated)
 
 **Scope decisions locked in:** validated-module claim = **OpenSSL provider only**
 (#4985); kernel **FIPS _mode_** (`fips=1`) is additionally enabled as approved-mode
@@ -26,14 +27,17 @@ hardening but **no validated-kernel-module claim** (§8.2/§8.3). Single-image,
 reboot-applied toggle. WireGuard + PPTP = whole-feature removals; everything else
 = crypto-method restriction (§5). TPM operator uses disabled under FIPS on an
 uncertified fTPM (§6.1). RADIUS/TACACS+ non-approvable, no RadSec today (§4.1).
+NTS (NTP) non-approvable (AES-SIV absent from the FIPS provider); plain NTP keeps
+the clock.
 
-**DONE (implemented + validated here — compile/ruff/pylint/XML-schema/template
-render; NOT yet run on-target):**
+**DONE (implemented; most also on-target validated on 10.10.50.165 — see the
+per-item "on-target validated" notes below; always compile/ruff/pylint/
+configd-inspect/test clean):**
 - **Phase 0 — provider toggle foundation.** `system option fips` leaf
   ([interfaces/system_option.xml.in](../interface-definitions/system_option.xml.in));
   verify/generate/apply in
   [system_option.py](../src/conf_mode/system_option.py) (arch detect, `fipsinstall`
-  self-test, render openssl.cnf, reboot-marker + Warning — §7.2.1);
+  self-test, render openssl.cnf, reboot pending-state + Warning — §7.2.1);
   [openssl.cnf.j2](../data/templates/openssl/openssl.cnf.j2); smoketest
   ([test_system_option.py](../smoketest/scripts/cli/test_system_option.py)).
 - **Phase 1 — reboot-applied, fail-closed boot, observability.** Boot-time
@@ -50,34 +54,206 @@ render; NOT yet run on-target):**
   `get_cli_kernel_options()` — moved above the early return so it applies without
   `system option kernel`). Inert until the kernel is built with
   `CONFIG_CRYPTO_FIPS`.
+  - **Timing note — one-boot stale window (by design, benign).** Like every
+    `system option kernel …` parameter, `fips=1` is written to the **persistent**
+    grub cmdline (`/boot/grub/grub.cfg.d/vyos-versions/<version>.cfg`) at
+    **commit**, not at `save` — it must be staged before the reboot that consumes
+    it, so the intended flow is `set system option fips` → `commit` → **save** →
+    reboot (the `apply()` Warning says exactly this). A *commit-without-save then
+    reboot* therefore boots **once** with a stale `fips=1` while the saved config
+    is non-FIPS; boot-time **config replay** re-runs `generate()` and strips it,
+    so grub self-corrects and the next boot is clean. Normal enable (commit+save)
+    and disable (delete+save) flows are fully consistent. Note the provider side
+    (`openssl.cnf`/`fipsmodule.cnf`) reverts *immediately* on such a reboot while
+    the grub cmdline lags by one boot — this asymmetry is expected. `show system
+    fips` reports kernel FIPS from `/proc/sys/crypto/fips_enabled` (the real
+    kernel state), never from the cmdline, so it cannot report a false positive.
+    A true "apply on save" is intentionally **not** pursued: VyOS has no
+    conf-mode save hook, and deferring the grub write to boot-from-saved-config
+    would require two reboots to apply.
 - Provider package (vyos-build) **built + `fipsinstall` INSTALL PASSED on arm64**
   (§7.5) and registered in the flavor + nexus-build Makefile (prior session).
+- **Enforcement foundation + SSH/IPsec guards (this session).**
+  - **p23-helper-policy** — [`python/vyos/fips.py`](../python/vyos/fips.py)
+    (`fips_enabled()`, `approved()`, `default()`, `reject_unapproved()`,
+    `apply_fips_defaults()`, `remove_nodes()`) + the single auditable allow-list
+    [`data/fips/approved-algorithms.toml`](../data/fips/approved-algorithms.toml)
+    (§5.7). Installed to `/usr/share/vyos/fips/` by `debian/rules` (`cp -r data/*`).
+    **Both halves are policy-driven:** `verify()` rejects read the `approved`
+    sets, and generation-time defaults are emitted from each leaf's ordered
+    `default` list via `apply_fips_defaults()` (fill-if-absent; explicit values
+    are left for `verify()` to reject). No approved tokens are hardcoded in Python
+    or templates -- enforced by tests (`default` subset-of-`approved`, and a guard
+    that `sshd_config.j2` contains no literal algorithm tokens).
+  - **p3-ssh (enforced)** — FIPS-aware
+    [`sshd_config.j2`](../data/templates/ssh/sshd_config.j2) (approved
+    Ciphers/MACs/KexAlgorithms/HostKeyAlgorithms/PubkeyAcceptedAlgorithms emitted
+    from the policy via `get_config()`, + **approved RSA/ECDSA host keys only**,
+    ed25519/DSA + uncertified-TPM host
+    keys dropped under FIPS); [`service_ssh.py`](../src/conf_mode/service_ssh.py)
+    sets the `fips` flag in `get_config()`, generates approved text host keys, and
+    `verify()` rejects explicitly-set non-approved values. **This fixes the SSH
+    lockout** found on-target (ed25519-only host key + non-approved KEX made every
+    new SSH session under FIPS fail).
+  - **Toggle fan-out (dependency)** — the `system option fips` commit must re-run
+    the crypto consumers even though *their* subtrees did not change; otherwise
+    sshd keeps non-approved host keys under the active provider (the lockout)
+    until the next boot. Added a `config-mode-dependencies` `fips` case
+    ([vyos-1x.json](../data/config-mode-dependencies/vyos-1x.json): `system_option`
+    -> `fips`: `["service_ssh", "vpn_ipsec"]`, plus `fips_openvpn`:
+    `["interfaces_openvpn"]`) and `set_dependents()` in
+    [`system_option.py`](../src/conf_mode/system_option.py) `get_config()` when the
+    fips node changed; `apply()`'s `call_dependents()` runs them. OpenVPN is a
+    per-interface tagNode script, so each instance is registered with its tagnode
+    (a bare dependent runs with an empty ifname and fails). Result: enabling FIPS
+    reconfigures SSH/OpenVPN **at commit, no reboot, no lockout window**.
+  - **p3-ipsec (verify half)** — [`vpn_ipsec.py`](../src/conf_mode/vpn_ipsec.py)
+    `verify()` fails closed on explicitly-set non-approved IKE/ESP
+    encryption/hash/dh-group and ESP `pfs`.
+  - **p3-ipsec (openssl-plugin half)** — under FIPS,
+    [`vpn_ipsec.py`](../src/conf_mode/vpn_ipsec.py) renders
+    [`fips_plugins.conf.j2`](../data/templates/ipsec/fips_plugins.conf.j2) to
+    `/etc/strongswan.d/charon/zzz-vyos-fips.conf` (sorts last → overrides the
+    shipped per-plugin `load=yes`), disabling the native strongSwan crypto
+    plugins **and** the kernel `af-alg` plugin and setting `openssl load_legacy=no`
+    so **all IKE crypto is served by the validated OpenSSL provider** (ESP bulk
+    stays in the kernel, §6.2). A FIPS toggle forces a full `charon` restart
+    (plugin set is only read at startup), wired via a `fips_changed` flag.
+  - **OpenVPN (enforced)** — [`server.conf.j2`](../data/templates/openvpn/server.conf.j2)
+    renders **`providers fips base`** under FIPS (was `providers default`, which
+    explicitly loaded the *non-FIPS* default provider and bypassed FIPS);
+    [`interfaces_openvpn.py`](../src/conf_mode/interfaces_openvpn.py) sets the
+    `fips` flag, emits the approved `data-ciphers` default **from the policy**
+    (`apply_fips_defaults()`, TLS modes), and `verify()` rejects non-approved
+    cipher/data-ciphers/hash **and TPM-backed OpenVPN** (uncertified fTPM, §6.1).
+  - Regression coverage: [`test_fips_policy.py`](../src/tests/test_fips_policy.py)
+    (helper behavior + a **grammar drift-guard** per §5.6.5 asserting every
+    allow-list token still exists in the CLI `<completionHelp>`).
+  - Validated here: compile / ruff / pylint W0611 / configd-inspect / template
+    render across FIPS + non-FIPS + explicit-override cases. **On-target
+    validated** (10.10.50.165): enable `system option fips` → commit regenerates
+    `/run/sshd/sshd_config` with approved RSA/ECDSA host keys (dependency fired) →
+    a fresh SSH session negotiates `ecdsa-sha2-nistp256` host key + `ecdh-sha2-
+    nistp256` KEX + `aes128-ctr` + `hmac-sha2-256-etm` and connects (lockout
+    gone); a non-approved `service ssh cipher` is rejected at commit; `delete`
+    reverts SSH + provider cleanly. OpenVPN template renders `providers fips base`
+    + approved data-ciphers under FIPS via the real filter chain on-target, and
+    the fips toggle commits cleanly with OpenVPN in the fan-out. **strongSwan**:
+    with a minimal site-to-site PSK tunnel (approved aes256/sha256/modp2048)
+    configured, enabling FIPS rendered the plugin override and restarted charon
+    with **only the `openssl` plugin** for crypto (native aes/sha2/hmac/gcm/gcrypt/
+    af-alg/curve25519/chapoly all gone), the connection still loaded, and
+    disabling FIPS removed the override and restored the native plugins. Config
+    left unsaved (box clean).
+  - **Whole-feature rejects (p3-wg-pptp + RADIUS/TACACS+)** — fail-closed
+    `verify()` in every owning conf-mode script when FIPS is set: **WireGuard**
+    ([interfaces_wireguard.py](../src/conf_mode/interfaces_wireguard.py)),
+    **PPTP** ([vpn_pptp.py](../src/conf_mode/vpn_pptp.py)), and **RADIUS/TACACS+**
+    across all 9 paths (system login, pppoe/ipoe servers, l2tp/sstp/openconnect,
+    wireless WPA-Enterprise, IPsec EAP). Two directions: a data-driven central
+    gate in [system_option.py](../src/conf_mode/system_option.py) refuses to
+    *enable* FIPS while any is configured (post-boot only, so boot replay is not
+    blocked), and each feature's own `verify()` refuses to *add* it while FIPS is
+    set (fail-closed, incl. at boot). Paths/labels live in the policy
+    (`reject_under_fips`, `*` = tagNode); helper `features_present()` +
+    `reject_feature()`. **On-target validated**: enabling FIPS with a `system
+    login radius` present is refused (central gate + system_login verify), and
+    adding `interfaces wireguard` while FIPS is on is refused (wireguard verify).
+  - **NTS reject (NTP)** — [service_ntp.py](../src/conf_mode/service_ntp.py)
+    rejects `service ntp server <x> nts` under FIPS (NTS's mandatory AES-SIV AEAD
+    is absent from the FIPS provider; verified on-target). **Plain NTP has no
+    crypto and keeps working**, so the clock is preserved. On-target validated:
+    FIPS enables fine with plain pool servers; adding `nts` is refused with a
+    message pointing to plain NTP.
 
-**ON-TARGET VALIDATION PENDING (needs the booted image — this is the build the
-user is running now):**
+**WORKING-TREE STATE (for resuming):** all of the above lives in the `vyos-1x`
+source tree and is **staged but not yet committed** (`git status` on branch
+`vyos-1x-jf` shows 24 changed/new files, currently in the index). The on-target
+copies on 10.10.50.165 are **ephemeral test deploys** (scp'd into `/usr/libexec`
++ `/usr/share`) and were reverted to a clean config (FIPS off, unsaved) after
+each test — they do **not** survive a reboot/rebuild. Durable delivery = commit +
+rebuild the package. New (added) files: `python/vyos/fips.py`,
+`data/fips/approved-algorithms.toml`, `data/templates/ipsec/fips_plugins.conf.j2`,
+`src/tests/test_fips_policy.py` (re-stage the design doc's latest edits before
+committing).
+
+**ON-TARGET VALIDATION PENDING (needs the booted image):**
 - Toggle `set system option fips` → `show system fips` → reboot survives (tmpfs
   regeneration), `openssl list -providers` shows fips active, `/run/ssl/fipsmodule.cnf`
-  present; then `delete` reverts cleanly.
+  present; then `delete` reverts cleanly. **(Toggle + provider-active + revert
+  validated this session; reboot-survives still blocked pending save, see below.)**
+- **SSH under FIPS stays reachable** (the lockout fix): enable FIPS, confirm a new
+  SSH session negotiates an approved host key + KEX/cipher and succeeds.
+  **(VALIDATED on 10.10.50.165 — approved ECDSA host key + ecdh/aes-gcm/hmac-sha2,
+  fresh session connects; verify-reject + revert also validated.)**
 - Fail-closed path: corrupt/remove `fips.so` while openssl.cnf references it →
   confirm crypto services masked + console banner + `show system fips` shows
   SELF-TEST FAILED (watch via the serial console / `socat`).
 - Confirm the igOS **3.5** base's shipped `/etc/ssl/openssl.cnf` isn't carrying
-  customizations our template would overwrite (§7.1 note).
+  customizations our template would overwrite (§7.1 note). **(Confirmed stock.)**
 
-**NEXT UP (restart here tomorrow):**
-1. **p23-helper-policy** — `python/vyos/fips.py` helper + `data/fips/approved-algorithms.toml`
-   (§5.7): `fips_enabled()`, `approved()`, `reject_unapproved()`, `apply_fips_defaults()`.
-2. **p3-ssh-ipsec** — FIPS-aware SSH/IPsec: `{% elif fips %}` approved-defaults in
-   `sshd_config.j2` + route IKE through the strongSwan `openssl` plugin (§6.2) +
-   proposal restriction + verify rejects.
-3. **p3-wg-pptp** — fail-closed `verify()` rejecting WireGuard + PPTP under FIPS.
-4. Then: OpenVPN `providers default`→`fips base` (§6.1), TPM operator rejects
-   (§6.1), RADIUS/TACACS+ rejects (§4.1), password-hash KDF (§8.5). Drop the
-   "incomplete" warning once enforcement lands.
+**NEXT UP:**
+1. **HTTPS + Wireless + SNMPv3 + haproxy** — the ✔verified needs-work items from
+   the audit below (approved-only `ssl_ciphers`; reject WEP/TKIP/WPA1; reject
+   SNMP `md5`/`des`; haproxy approved cipher-suite). NTP/NTS reject **landed**.
+2. Then: TPM operator rejects for `ssh-tpm-agent` + TPM-PKI (§6.1; OpenVPN TPM
+   reject already landed), password-hash KDF (§8.5), and the ⚠audit rows below.
+   Drop the "incomplete" warning once enforcement lands.
+
+**Smoketest-level validation (needs a live IPsec peer):** end-to-end IKE SA
+establishment under FIPS (the on-target check here proved charon loads the
+approved connection with only the openssl plugin, but not a completed handshake
+against a second endpoint).
 
 **Decision-gated / owned elsewhere:** p4-kernel-build (`CONFIG_CRYPTO_FIPS` +
 HMAC initramfs — vyos-build, user owns); RadSec scope (§8.8); password KDF (§8.5);
 claim wording (§8.2); am64x OE + TPM certification (§8.6/§8.7).
+
+### Remaining enforcement surface — crypto-consumer audit (2026-11-04)
+
+**Audit coverage — honest scope:** this is a **breadth-complete, depth-partial**
+audit. I grepped *all* of `interface-definitions/` for crypto-bearing config
+(cipher/tls/encryption/hash/psk/radius/tacacs/wpa/snmp/…) to enumerate the full
+candidate set below, and **deep-verified** the rows marked ✔verified. The rows
+marked ⚠audit are confirmed to *touch* crypto but their exact token sets / whether
+the OpenSSL provider already covers them have **not** each been individually
+traced yet. Treat ⚠audit as "must be looked at", not "confirmed non-compliant".
+
+**Needs work — confirmed non-approved tokens exposed (✔verified):**
+
+| Feature | CLI / file | Non-approved exposure | Fix pattern |
+|---|---|---|---|
+| **HTTPS / GUI** | [`service https`](../interface-definitions/service_https.xml.in), [nginx.default.j2](../data/templates/https/nginx.default.j2) | hard-coded `ssl_ciphers` offers SHA1-CBC (`AES128-SHA`, `AES256-SHA`) + DSS suites; `tls-version` already limited to 1.2/1.3 | approved-only `ssl_ciphers` under FIPS (approved default) |
+| **Wireless / WiFi** | [`interfaces wireless`](../interface-definitions/interfaces_wireless.xml.in) (hostapd) | `security wep`, cipher `TKIP`, `mode wpa` (WPA1/TKIP) | reject WEP/TKIP/WPA1; allow WPA2/WPA3 + CCMP/GCMP |
+| **SNMPv3** | [`service snmp`](../interface-definitions/service_snmp.xml.in) (`authentication-type.xml.i`, `privacy-type.xml.i`) | auth `md5` (and `sha`=SHA1); privacy `des` | reject `md5`/`des` (and `sha`); require SHA-2 + AES |
+| **haproxy** (if used) | [`load-balancing haproxy`](../interface-definitions/load-balancing_haproxy.xml.in) | `ssl-cipher-suite` list includes `*-chacha20-poly1305` | reject/approved-default cipher suite under FIPS |
+| **NTP / NTS** | [`service ntp`](../interface-definitions/service_ntp.xml.in) (`server <x> nts`), chrony 4.3 | NTS mandates `AEAD_AES_SIV_CMAC_256`; **AES-SIV is only in OpenSSL's `default` provider, absent from `fips`+`base`** (verified on-target) — so NTS fails under FIPS, and AES-SIV is not a NIST-approved mode anyway (NTS-KE TLS is fine; the AEAD is the blocker, no interoperable approved substitute) | reject `service ntp server <x> nts` under FIPS — **LANDED** (plain NTP has no crypto and keeps the clock) |
+| **WireGuard, PPTP** | [`interfaces wireguard`](../interface-definitions/interfaces_wireguard.xml.in), [`vpn pptp`](../interface-definitions/vpn_pptp.xml.in) | whole feature (Curve25519/ChaCha20; MPPE/RC4) | whole-feature `verify()` reject — **LANDED** |
+
+**Confirmed already approved (no action):**
+- **MACsec** ([`interfaces macsec`](../interface-definitions/interfaces_macsec.xml.in)): cipher `gcm-aes-128`/`gcm-aes-256` only — AES-GCM, approved. (CAK/CKN key strength is an operational concern, not an algorithm one.)
+
+**⚠audit — touches crypto, not yet individually traced:**
+- **TLS servers/clients that are OpenSSL-backed** (provider likely auto-enforces, but audit cipher/version config + ship approved defaults): `vpn openconnect` (ocserv), `vpn sstp` / `interfaces sstpc`, `service pppoe-server`/`service ipoe-server` (accel-ppp, incl. MSCHAP/MPPE), `system syslog` (TLS), `system email` (SMTP TLS), `container` (registry TLS), `service monitoring zabbix-agent` (PSK/TLS), `service salt-minion`.
+- **PKI** ([`pki`](../interface-definitions/pki.xml.in)): enforce RSA ≥ 2048 / approved ECDSA curves; reject weak/legacy keys and MD5/SHA1 digests.
+- **VRRP auth** ([`high-availability`](../interface-definitions/high-availability.xml.in)): `plaintext-password`/`ah` — weak, but plaintext isn't a crypto-algorithm claim; classify intent.
+- **Password hashing** (`yescrypt` default — §8.5), **HTTP API `hashlib`/`ssl`** call-site MD5 audit.
+
+**Whole-feature rejects — no approvable configuration (LANDED 2026-11-04):**
+RADIUS and TACACS+ are treated like WireGuard/PPTP: they **cannot be used under
+FIPS** (classic RADIUS authenticates with MD5; there is **no RadSec** in this tree,
+and TACACS+ has no TLS variant at all). SAML remains the approved admin login
+(§4.1). Implemented as fail-closed `verify()` rejects wherever a `radius` server
+is set — `system login radius`, `service pppoe-server`, `service ipoe-server`,
+`vpn l2tp`, `vpn sstp`, `vpn openconnect`, `vpn pptp`, `interfaces wireless`
+(WPA-Enterprise), `vpn ipsec` (EAP-RADIUS) — plus `system login tacacs`, and a
+central fips-enable gate. Paths are data-driven (`reject_under_fips` in the
+policy). This stays a hard reject until/unless RadSec (`radsecproxy`, §8.8) is
+implemented.
+
+**NOT audited (out of this tree / needs owner):** kernel-space crypto beyond the
+`fips=1` posture, disk/LUKS at-rest (if any), and any crypto inside third-party
+daemons not surfaced through the VyOS CLI.
 
 ---
 
@@ -705,12 +881,11 @@ implemented), and all operator uses fall outside an uncertified module.
 - In FIPS mode, `verify()` **fails closed** on TPM-backed **OpenVPN**,
   **`ssh-tpm-agent`**, and **TPM-PKI**. Once blocked, the `providers … tpm2`
   branch is never rendered, so the TPM/provider conflict resolves itself.
-- **Independent of TPM:** OpenVPN's template emits `providers default` even in the
-  non-TPM branch — explicitly loading the `default` provider would re-expose
-  non-approved algorithms. In FIPS mode it must render **`providers fips base`**.
-  This is an OpenVPN config-generation touchpoint for §5.3, and the same
-  "is `default` loaded?" audit applies anywhere the tree selects OpenSSL
-  providers.
+- **Independent of TPM:** OpenVPN's template previously emitted `providers default`
+  even in the non-TPM branch — explicitly loading the `default` provider would
+  re-expose non-approved algorithms. It now renders **`providers fips base`** in
+  FIPS mode **(landed)**. The same "is `default` loaded?" audit applies anywhere
+  the tree selects OpenSSL providers.
 - **Config encryption** rides the kernel-FIPS scope call (§6/§8.3), separately
   from the "disable TPM operators" rule.
 
@@ -823,18 +998,22 @@ kexec path): on a normal interactive commit it **does not auto-reboot — it war
    `boot_configuration_complete()` (False during boot) **plus** a real-change
    check against the previously-committed value.
 
-**Detect a real toggle** with the `exists_effective` idiom (as other scripts do):
+**Detect a real toggle** with the `exists_effective` idiom (as other scripts do),
+but capture it in `get_config()` so `apply()` never creates a second `Config`
+instance (enforced by `test_configd_inspect`):
 
 ```python
-from vyos.config import Config
-from vyos.utils.boot import boot_configuration_complete
+def get_config(config=None):
+    conf = config or Config()
+    options = conf.get_config_dict(['system', 'option'], ...)
+    # record the previously-committed value using the single Config instance
+    options['fips_effective'] = conf.exists_effective(['system', 'option', 'fips'])
+    return options
 
 def apply(options):
-    conf = Config()
-    fips_now = 'fips' in options
-    fips_was = conf.exists_effective(['system', 'option', 'fips'])
-    if fips_now != fips_was and boot_configuration_complete():
-        ...   # real, post-boot toggle → reboot required
+    if boot_configuration_complete():
+        if ('fips' in options) != options.get('fips_effective', False):
+            Warning('FIPS mode changed — save config and reboot to apply.')
 ```
 
 At boot, `boot_configuration_complete()` is False → skipped (no loop); the
@@ -842,12 +1021,16 @@ boot-time FIPS unit above is what brings a fresh boot up fully FIPS.
 
 **How to "force" the reboot — three options, safest first:**
 
-1. **Warn + persistent marker (recommended default).** On toggle, write a
-   persistent marker (e.g. `/config/.fips_reboot_required` — *not* `/run`) and
-   `Warning('FIPS mode changed — save config and reboot to apply.')`. The
-   boot-time unit clears the marker once the provider is confirmed active, so the
-   pending state is **detectable** (op-mode `show system fips`, a login banner)
-   and the box is never silently half-FIPS.
+1. **Warn + self-correcting boot-state marker (recommended default, shipped).**
+   On a real toggle, `Warning('FIPS mode changed — save config and reboot to
+   apply.')`. The pending state is tracked **level-triggered**: the boot-time
+   unit records the FIPS mode the system actually came up in via a **runtime**
+   (`/run/vyos-fips-booted`, tmpfs) marker, recreated every boot, and op-mode
+   `show system fips` derives `reboot_required = (configured != booted)`. Because
+   the marker lives in `/run` and is rewritten each boot, the pending state can
+   never go stale across a reboot (an earlier persistent `/config` marker design
+   wrongly survived reverts and normal applies). The box is never silently
+   half-FIPS and the state is detectable in op-mode / a login banner.
 2. **Interactive confirm → save → reboot (the real "force").** Only when
    `boot_configuration_complete()` **and** `sys.stdin.isatty()`: prompt, then
    `conf.save_config()` (must precede) and `cmd('systemctl reboot')`. The
@@ -1146,11 +1329,12 @@ in/out for the first release.*
   - **FIPS-aware templates (§5.7)** — `{% elif fips %}` approved-defaults branch
     for the non-OpenSSL consumers whose defaults are baked in downstream
     (`data/templates/ssh/sshd_config.j2`, strongSwan proposals, SNMPv3) — ~3–4.
-  - **TPM-backed conf-mode paths (§6.1)** — `interfaces_openvpn.py`,
-    `service_ssh.py`/`ssh-tpm-agent`, `tpm_pki.py`/`src/op_mode/tpm_pki.py`:
-    fail-closed `verify()` on operator uses when FIPS + uncertified TPM.
+  - **TPM-backed conf-mode paths (§6.1)** — `interfaces_openvpn.py` (OpenVPN TPM
+    reject **landed**), `service_ssh.py`/`ssh-tpm-agent`,
+    `tpm_pki.py`/`src/op_mode/tpm_pki.py`: fail-closed `verify()` on operator uses
+    when FIPS + uncertified TPM.
   - `data/templates/openvpn/server.conf.j2` — `providers default` →
-    `providers fips base` in FIPS mode (and no `tpm2` branch — §6.1).
+    `providers fips base` in FIPS mode (and no `tpm2` branch — §6.1). **Landed.**
   - **Auth backends (§4.1)** — `src/conf_mode/system_login.py`: fail-closed
     `verify()` on classic RADIUS/TACACS+ in FIPS mode (SAML remains). accel-ppp
     RADIUS consumers (PPPoE/L2TP/IPoE) likewise. RadSec (`radsecproxy`) is the

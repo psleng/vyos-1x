@@ -113,7 +113,9 @@
     },
     "system_option": {
         "ip_ipv6": ["system_ip", "system_ipv6"],
-        "sysctl": ["system_sysctl"]
+        "sysctl": ["system_sysctl"],
+        "fips": ["service_ssh", "vpn_ipsec"],
+        "fips_openvpn": ["interfaces_openvpn"]
     },
     "system_logs": {
         "syslog": ["system_syslog"]

@@ -25,7 +25,7 @@ from vyos.configquery import ConfigTreeQuery
 from vyos.utils.process import rc_cmd
 
 openssl_fipsmodule_config = '/run/ssl/fipsmodule.cnf'
-fips_reboot_marker = '/config/.fips_reboot_required'
+fips_booted_marker = '/run/vyos-fips-booted'
 fips_selftest_failed_marker = '/run/vyos-fips-selftest-failed'
 kernel_fips_flag = '/proc/sys/crypto/fips_enabled'
 
@@ -79,15 +79,24 @@ def _get_raw_data() -> dict:
     config = ConfigTreeQuery()
     module = _fips_module_path()
 
+    configured = config.exists(['system', 'option', 'fips'])
+    booted_fips = os.path.exists(fips_booted_marker)
+    self_test_failed = os.path.exists(fips_selftest_failed_marker)
+
     return {
-        'configured': config.exists(['system', 'option', 'fips']),
+        'configured': configured,
         'module_path': module,
         'module_present': bool(module) and os.path.exists(module),
         'provider_active': _provider_active(),
         'self_test_config_present': os.path.exists(openssl_fipsmodule_config),
-        'self_test_failed': os.path.exists(fips_selftest_failed_marker),
+        'self_test_failed': self_test_failed,
         'kernel_fips_enabled': _kernel_fips_enabled(),
-        'reboot_required': os.path.exists(fips_reboot_marker),
+        'booted_fips': booted_fips,
+        # Level-triggered and self-correcting: a reboot is pending whenever the
+        # configured state differs from the state the system actually booted
+        # into. The failure banner already instructs a reboot, so suppress the
+        # generic pending line in that case.
+        'reboot_required': (configured != booted_fips) and not self_test_failed,
     }
 
 
@@ -119,11 +128,13 @@ def _format(data: dict) -> str:
     lines.append('')
 
     if data['reboot_required']:
-        lines.append('  A FIPS mode change is pending: save the configuration '
-                     'and reboot to apply.')
-    elif data['configured'] and not data['provider_active'] and not data['self_test_failed']:
-        lines.append('  FIPS is configured but the provider is not active: '
-                     'a reboot is required to fully apply.')
+        if data['configured']:
+            lines.append('  FIPS is enabled in the configuration but this boot is '
+                         'not running in FIPS mode:')
+        else:
+            lines.append('  FIPS is disabled in the configuration but this boot is '
+                         'still running in FIPS mode:')
+        lines.append('  save the configuration and reboot to apply.')
 
     # Phase 0/1 scope note: the provider is switched, but system-wide approved
     # operation (algorithm restriction, non-approved feature refusal) is not yet

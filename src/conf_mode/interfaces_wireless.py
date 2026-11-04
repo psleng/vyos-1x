@@ -42,6 +42,7 @@ from vyos.utils.process import is_systemd_service_active
 from vyos.utils.process import is_systemd_service_running
 from vyos.utils.network import interface_exists
 from vyos import ConfigError
+from vyos import fips
 from vyos import airbag
 import vyos.utils.nxpwifiutils as nxpwifiutils
 airbag.enable()
@@ -88,11 +89,17 @@ def get_config(config=None):
         conf = Config()
     base = ['interfaces', 'wireless']
 
-    _, wifi = get_interface_dict(conf, base)
+    ifname, wifi = get_interface_dict(conf, base)
 
     # retrieve global Wireless regulatory domain setting
     if conf.exists(country_code_path):
         wifi['country_code'] = conf.return_value(country_code_path)
+
+    # FIPS 140-3: WPA-Enterprise RADIUS (classic RADIUS = MD5) has no approved
+    # form; flag so verify() fails closed.
+    if 'deleted' not in wifi and fips.fips_enabled(conf):
+        if conf.exists(base + [ifname, 'security', 'wpa', 'radius']):
+            wifi['fips_reject_radius'] = {}
 
     if 'deleted' not in wifi:
         # then get_interface_dict provides default keys
@@ -189,6 +196,9 @@ def verify(wifi):
     if 'deleted' in wifi:
         verify_bridge_delete(wifi)
         return None
+
+    if 'fips_reject_radius' in wifi:
+        fips.reject_feature('RADIUS (wireless WPA-Enterprise)')
 
     if 'physical_device' not in wifi:
         raise ConfigError('You must specify a physical-device "phy"')

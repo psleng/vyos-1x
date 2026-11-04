@@ -30,6 +30,7 @@ from vyos.accel_ppp_util import verify_accel_ppp_authentication
 from vyos.accel_ppp_util import verify_accel_ppp_ip_pool
 from vyos.accel_ppp_util import get_pools_in_order
 from vyos import ConfigError
+from vyos import fips
 
 from vyos import airbag
 airbag.enable()
@@ -57,12 +58,18 @@ def get_config(config=None):
         l2tp['ordered_named_pools'] = get_pools_in_order(
             dict_search('client_ip_pool', l2tp))
     l2tp['server_type'] = 'l2tp'
+    # FIPS 140-3: classic RADIUS (MD5) has no approved form.
+    if fips.fips_enabled(conf) and conf.exists(base + ['authentication', 'radius']):
+        l2tp['fips_reject_radius'] = {}
     return l2tp
 
 
 def verify(l2tp):
     if not l2tp:
         return None
+
+    if 'fips_reject_radius' in l2tp:
+        fips.reject_feature('RADIUS (L2TP remote-access)')
 
     verify_accel_ppp_authentication(l2tp)
     verify_accel_ppp_ip_pool(l2tp)

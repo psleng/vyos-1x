@@ -44,6 +44,8 @@ from vyos.utils.network import is_intf_addr_assigned
 from vyos.utils.system import sysctl_write
 from vyos.configdep import set_dependents
 from vyos.configdep import call_dependents
+from vyos.configdict import is_node_changed
+from vyos import fips
 from vyos import ConfigError
 from vyos import airbag
 
@@ -68,8 +70,6 @@ arch_map = {
 arch = arch_map.get(platform.machine())
 openssl_config = '/etc/ssl/openssl.cnf'
 openssl_fipsmodule_config = '/run/ssl/fipsmodule.cnf'
-# Persistent marker (NOT in tmpfs) recording that a FIPS toggle needs a reboot.
-fips_reboot_marker = '/config/.fips_reboot_required'
 
 tuned_profiles = {
     'power-save': 'powersave',
@@ -212,6 +212,28 @@ def get_config(config=None):
     # second Config instance (enforced by test_configd_inspect).
     options['fips_effective'] = conf.exists_effective(['system', 'option', 'fips'])
 
+    # When the FIPS toggle changes, re-run the crypto consumers that need
+    # FIPS-aware (re)generation -- otherwise, since 'service ssh' / 'vpn ipsec' /
+    # 'interfaces openvpn' did not themselves change, their conf-mode scripts
+    # would not run until the next boot, leaving sshd offering non-approved host
+    # keys under the active FIPS provider (the SSH lockout) and OpenVPN loading
+    # the non-FIPS default provider. call_dependents() in apply() invokes them.
+    if is_node_changed(conf, ['system', 'option', 'fips']):
+        set_dependents('fips', conf)
+        # OpenVPN is a per-interface (tagNode) script, so it must be registered
+        # with each interface's tagnode -- a bare dependent would run with an
+        # empty ifname and fail.
+        if conf.exists(['interfaces', 'openvpn']):
+            for openvpn_ifname in conf.list_nodes(['interfaces', 'openvpn']):
+                set_dependents('fips_openvpn', conf, openvpn_ifname)
+
+    # FIPS 140-3: interactive gate -- refuse to enable FIPS while a feature with
+    # no approvable form (WireGuard/PPTP/RADIUS/TACACS+) is configured, naming
+    # what to remove. Only post-boot: at boot the owning scripts' own verify()
+    # rejects enforce fail-closed, so this must not block config replay.
+    if 'fips' in options and boot_configuration_complete():
+        options['fips_rejected_features'] = fips.features_present(conf)
+
     if 'performance' in options:
         # Update IPv4/IPv6 and sysctl options after tuned applied it's settings
         set_dependents('ip_ipv6', conf)
@@ -232,6 +254,12 @@ def verify(options):
             raise ConfigError(
                 f'OpenSSL FIPS module not found: {fips_module}. '
                 f'The FIPS provider package must be installed.'
+            )
+        rejected = options.get('fips_rejected_features')
+        if rejected:
+            raise ConfigError(
+                'FIPS mode cannot be enabled while these non-approved features '
+                'are configured; remove them first:\n  - ' + '\n  - '.join(rejected)
             )
 
     if 'http_client' in options:
@@ -554,18 +582,16 @@ def apply(options):
 
     # FIPS 140-3: a provider switch only fully applies once every process
     # restarts under the new openssl.cnf, so a toggle is reboot-applied. Detect
-    # a real change against the previously-committed value (exists_effective)
-    # and only act post-boot (boot_configuration_complete) to avoid a boot-loop
-    # during config replay. Commit != save, so we warn to save and reboot rather
-    # than auto-rebooting; a persistent marker records the pending state.
+    # a real change against the previously-committed value (fips_effective,
+    # captured in get_config) and only warn post-boot (boot_configuration_complete)
+    # to avoid a boot-loop during config replay. The actual pending state is
+    # tracked level-triggered by comparing the configured value against the
+    # booted FIPS state (see op-mode 'show system fips'), so no persistent marker
+    # is written here.
     if boot_configuration_complete():
         fips_now = 'fips' in options
         fips_was = options.get('fips_effective', False)
         if fips_now != fips_was:
-            if fips_now:
-                write_file(fips_reboot_marker, '')
-            elif os.path.exists(fips_reboot_marker):
-                os.unlink(fips_reboot_marker)
             Warning(
                 'FIPS mode has changed. To fully apply this change you must '
                 'save the configuration and reboot the system!'

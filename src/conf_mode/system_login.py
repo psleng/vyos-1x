@@ -57,6 +57,7 @@ from vyos.utils.boot import boot_configuration_complete
 from vyos.configdiff import get_config_diff
 from vyos.system.hardware import get_nvmem_password
 from vyos import ConfigError
+from vyos import fips
 from vyos import airbag
 
 airbag.enable()
@@ -241,6 +242,11 @@ def get_config(config=None):
 
     login['saml_restart_required'] = D.is_node_changed(['system', 'login', 'saml'])
 
+    # FIPS 140-3: classic RADIUS (MD5) and TACACS+ (MD5) have no approved form;
+    # SAML remains the approved login. Flag so verify() fails closed.
+    if fips.fips_enabled(conf):
+        login['fips'] = {}
+
     set_dependents('ssh', conf)
     return login
 
@@ -267,6 +273,11 @@ def verify(login):
         'enhanced_policy.password', login
     )
     # PERLE: End - get enhanced-policy config.
+    if 'fips' in login:
+        if 'radius' in login:
+            fips.reject_feature('RADIUS (system login)')
+        if 'tacacs' in login:
+            fips.reject_feature('TACACS+ (system login)')
     if 'rm_users' in login:
         # This check is required as the script is also executed from vyos-router
         # init script and there is no SUDO_USER environment variable available

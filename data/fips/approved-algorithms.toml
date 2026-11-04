@@ -1,0 +1,226 @@
+# igOS FIPS 140-3 approved-algorithm policy.
+#
+# Single, auditable allow-list of the crypto tokens permitted when the system is
+# placed into FIPS mode (`set system option fips`). Each [leaf."<cli path>"]
+# section lists the approved subset of the matching CLI <completionHelp> tokens;
+# `remove_node` names whole features removed under FIPS.
+#
+# Each leaf has two fields with DIFFERENT jobs:
+#
+#   approved = [...]   The VALIDATION allow-list: every value the operator is
+#                      permitted to set. Membership-only (order does not matter),
+#                      and permissive -- it includes every approvable option.
+#                      Consumed by reject_unapproved() -> verify() fails closed
+#                      on an explicitly-set value not in this set.
+#
+#   default  = [...]   What is EMITTED when the operator leaves the leaf unset,
+#                      to override a non-approved downstream compiled default
+#                      (e.g. OpenSSH curve25519/chacha20, OpenVPN chacha20/SHA1).
+#                      It is an ORDERED preference list (strongest/fastest first)
+#                      and is always a subset of `approved` (enforced by a test).
+#                      Consumed by apply_fips_defaults() (fill-if-absent). A
+#                      single-value leaf (e.g. OpenVPN `hash`) takes default[0].
+#
+# A leaf has NO `default` when "unset" cannot fall through to a non-approved
+# value -- i.e. the operator must specify it (IPsec proposals) or there is simply
+# no non-approved fallback (OpenVPN legacy `cipher`, `data-ciphers-fallback`). In
+# those cases only the `approved` reject applies.
+#
+# Consumed by python/vyos/fips.py:
+#   * reject_unapproved()  -> conf-mode verify() refuses explicitly-set
+#                             non-approved values (fail-closed at commit).
+#   * approved() / default() -> the approved set / emitted default for a leaf.
+#   * apply_fips_defaults()  -> emit `default` for leaves left unset.
+#
+# This file is the compliance artifact: one place stating the approved set per
+# subsystem. Keep tokens in sync with the grammar's <completionHelp> lists.
+
+# Whole-feature removals under FIPS (no approvable configuration). Consumed by
+# the WireGuard/PPTP fail-closed verify() rejects. Declared first so it is a
+# top-level key, not absorbed into a [leaf.*] table.
+remove_node = [
+    "interfaces wireguard",
+    "vpn pptp",
+]
+
+# Features/config paths with NO approvable form under FIPS. Enabling FIPS is
+# refused (interactively) while any of these is configured, and each owning
+# conf-mode script's verify() refuses the feature while FIPS is set (fail-closed,
+# including at boot). A "*" path element is a tagNode wildcard (any instance).
+#
+#   WireGuard / PPTP: non-approved by construction (Curve25519/ChaCha20; MPPE/RC4).
+#   RADIUS: classic RADIUS authenticates with MD5 and there is no RadSec here.
+#   TACACS+: MD5, no TLS variant. SAML remains the approved admin login (§4.1).
+#   NTS: Network Time Security needs AES-SIV, which is absent from the FIPS
+#        provider (plain NTP has no crypto and keeps working).
+[[reject_under_fips]]
+label = "WireGuard"
+path = ["interfaces", "wireguard"]
+
+[[reject_under_fips]]
+label = "PPTP VPN"
+path = ["vpn", "pptp"]
+
+[[reject_under_fips]]
+label = "RADIUS (system login)"
+path = ["system", "login", "radius"]
+
+[[reject_under_fips]]
+label = "TACACS+ (system login)"
+path = ["system", "login", "tacacs"]
+
+[[reject_under_fips]]
+label = "RADIUS (PPPoE server)"
+path = ["service", "pppoe-server", "authentication", "radius"]
+
+[[reject_under_fips]]
+label = "RADIUS (IPoE server)"
+path = ["service", "ipoe-server", "authentication", "radius"]
+
+[[reject_under_fips]]
+label = "RADIUS (L2TP remote-access)"
+path = ["vpn", "l2tp", "remote-access", "authentication", "radius"]
+
+[[reject_under_fips]]
+label = "RADIUS (SSTP)"
+path = ["vpn", "sstp", "authentication", "radius"]
+
+[[reject_under_fips]]
+label = "RADIUS (OpenConnect)"
+path = ["vpn", "openconnect", "authentication", "radius"]
+
+[[reject_under_fips]]
+label = "RADIUS (IPsec EAP)"
+path = ["vpn", "ipsec", "remote-access", "radius"]
+
+[[reject_under_fips]]
+label = "RADIUS (wireless WPA-Enterprise)"
+path = ["interfaces", "wireless", "*", "security", "wpa", "radius"]
+
+[[reject_under_fips]]
+label = "NTS (Network Time Security)"
+path = ["service", "ntp", "server", "*", "nts"]
+
+# ---------------------------------------------------------------------------
+# SSH (OpenSSH native crypto -- not OpenSSL-backed, so defaults are enforced in
+# the sshd_config.j2 FIPS branch and explicit values are rejected here).
+# ---------------------------------------------------------------------------
+[leaf."service ssh cipher"]
+approved = [
+    "aes128-ctr", "aes192-ctr", "aes256-ctr",
+    "aes128-gcm@openssh.com", "aes256-gcm@openssh.com",
+]
+default = [
+    "aes256-gcm@openssh.com", "aes128-gcm@openssh.com",
+    "aes256-ctr", "aes192-ctr", "aes128-ctr",
+]
+
+[leaf."service ssh mac"]
+approved = [
+    "hmac-sha2-256", "hmac-sha2-512",
+    "hmac-sha2-256-etm@openssh.com", "hmac-sha2-512-etm@openssh.com",
+]
+default = [
+    "hmac-sha2-512-etm@openssh.com", "hmac-sha2-256-etm@openssh.com",
+    "hmac-sha2-512", "hmac-sha2-256",
+]
+
+[leaf."service ssh key-exchange"]
+approved = [
+    "ecdh-sha2-nistp256", "ecdh-sha2-nistp384", "ecdh-sha2-nistp521",
+    "diffie-hellman-group14-sha256", "diffie-hellman-group16-sha512",
+    "diffie-hellman-group18-sha512",
+]
+default = [
+    "ecdh-sha2-nistp521", "ecdh-sha2-nistp384", "ecdh-sha2-nistp256",
+    "diffie-hellman-group16-sha512", "diffie-hellman-group18-sha512",
+    "diffie-hellman-group14-sha256",
+]
+
+[leaf."service ssh hostkey-algorithm"]
+approved = [
+    "rsa-sha2-256", "rsa-sha2-512",
+    "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521",
+]
+default = [
+    "rsa-sha2-512", "rsa-sha2-256",
+    "ecdsa-sha2-nistp521", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp256",
+]
+
+[leaf."service ssh pubkey-accepted-algorithm"]
+approved = [
+    "rsa-sha2-256", "rsa-sha2-512",
+    "rsa-sha2-256-cert-v01@openssh.com", "rsa-sha2-512-cert-v01@openssh.com",
+    "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521",
+    "ecdsa-sha2-nistp256-cert-v01@openssh.com",
+    "ecdsa-sha2-nistp384-cert-v01@openssh.com",
+    "ecdsa-sha2-nistp521-cert-v01@openssh.com",
+]
+default = [
+    "rsa-sha2-512", "rsa-sha2-256",
+    "ecdsa-sha2-nistp521", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp256",
+]
+
+# ---------------------------------------------------------------------------
+# IPsec (strongSwan). IKE and ESP proposals share the same encryption/hash
+# token vocabulary; dh-group is numeric. Approved = AES (CBC/CTR/GCM/CCM-128),
+# SHA-2 / AES-CMAC / AES-XCBC integrity, and MODP>=2048 / ECP>=256 groups.
+# ---------------------------------------------------------------------------
+[leaf."vpn ipsec ike-group proposal encryption"]
+approved = [
+    "aes128", "aes192", "aes256",
+    "aes128ctr", "aes192ctr", "aes256ctr",
+    "aes128gcm128", "aes192gcm128", "aes256gcm128",
+    "aes128ccm128", "aes192ccm128", "aes256ccm128",
+]
+
+[leaf."vpn ipsec ike-group proposal hash"]
+approved = [
+    "sha256", "sha384", "sha512", "aesxcbc", "aescmac",
+]
+
+[leaf."vpn ipsec ike-group proposal dh-group"]
+approved = ["14", "15", "16", "17", "18", "19", "20", "21"]
+
+[leaf."vpn ipsec esp-group proposal encryption"]
+approved = [
+    "aes128", "aes192", "aes256",
+    "aes128ctr", "aes192ctr", "aes256ctr",
+    "aes128gcm128", "aes192gcm128", "aes256gcm128",
+    "aes128ccm128", "aes192ccm128", "aes256ccm128",
+]
+
+[leaf."vpn ipsec esp-group proposal hash"]
+approved = [
+    "sha256", "sha384", "sha512", "aesxcbc", "aescmac",
+]
+
+[leaf."vpn ipsec esp-group pfs"]
+approved = [
+    "enable", "disable",
+    "dh-group14", "dh-group15", "dh-group16", "dh-group17", "dh-group18",
+    "dh-group19", "dh-group20", "dh-group21",
+]
+
+# ---------------------------------------------------------------------------
+# OpenVPN (OpenSSL-backed). Under FIPS the config renders `providers fips base`
+# so the validated module refuses non-approved algorithms at runtime; these
+# sets additionally reject explicitly-set non-approved values at commit, and the
+# data-ciphers `default` is emitted when the operator left it unset so a FIPS
+# tunnel negotiates cleanly (OpenVPN's compiled default now offers chacha20).
+# ---------------------------------------------------------------------------
+[leaf."interfaces openvpn encryption cipher"]
+approved = ["aes128", "aes192", "aes256", "aes128gcm", "aes192gcm", "aes256gcm"]
+
+[leaf."interfaces openvpn encryption data-ciphers"]
+approved = ["aes128", "aes192", "aes256", "aes128gcm", "aes192gcm", "aes256gcm"]
+default = ["aes256gcm", "aes128gcm", "aes256", "aes128"]
+
+[leaf."interfaces openvpn encryption data-ciphers-fallback"]
+approved = ["aes128", "aes192", "aes256", "aes128gcm", "aes192gcm", "aes256gcm"]
+
+[leaf."interfaces openvpn hash"]
+approved = ["sha256", "sha384", "sha512"]
+default = ["sha256"]
+
+

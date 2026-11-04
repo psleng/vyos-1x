@@ -36,6 +36,7 @@ from vyos.accel_ppp_util import get_pools_in_order
 from vyos.utils.network import is_listen_port_bind_service
 from vyos.utils.file import write_file
 from vyos import ConfigError
+from vyos import fips
 from vyos import airbag
 airbag.enable()
 
@@ -64,12 +65,18 @@ def get_config(config=None):
         sstp['ordered_named_pools'] = get_pools_in_order(dict_search('client_ip_pool', sstp))
 
     sstp['server_type'] = 'sstp'
+    # FIPS 140-3: classic RADIUS (MD5) has no approved form.
+    if fips.fips_enabled(conf) and conf.exists(base + ['authentication', 'radius']):
+        sstp['fips_reject_radius'] = {}
     return sstp
 
 
 def verify(sstp):
     if not sstp:
         return None
+
+    if 'fips_reject_radius' in sstp:
+        fips.reject_feature('RADIUS (SSTP)')
 
     port = sstp.get('port')
     proto = 'tcp'

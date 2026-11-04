@@ -30,6 +30,10 @@
 OPENSSL_CNF=/etc/ssl/openssl.cnf
 FIPSMODULE_CNF=/run/ssl/fipsmodule.cnf
 FAIL_MARKER=/run/vyos-fips-selftest-failed
+# Runtime (tmpfs) marker recording that this boot came up with FIPS active.
+# Being in /run it is recreated on every boot, so op-mode can derive the
+# pending-reboot state as (configured != booted) without any persistent state.
+BOOTED_MARKER=/run/vyos-fips-booted
 
 # Network-exposed crypto services disabled on self-test failure (console getty
 # is intentionally left running for recovery).
@@ -57,6 +61,10 @@ fail_closed() {
     exit 1
 }
 
+# Clear any stale boot-state marker in case the service is re-run manually; it
+# is (re)written below only if this boot actually brings FIPS up successfully.
+rm -f "${BOOTED_MARKER}" 2>/dev/null || true
+
 # Only act if the active OpenSSL config actually expects the FIPS module config;
 # otherwise FIPS mode is not enabled and there is nothing to do.
 if ! grep -q 'fipsmodule.cnf' "${OPENSSL_CNF}" 2>/dev/null; then
@@ -76,6 +84,8 @@ if ! OPENSSL_CONF=/dev/null openssl fipsinstall -module "${FIPS_SO}" -out "${FIP
     fail_closed "fipsinstall self-test did not pass for ${FIPS_SO}"
 fi
 
-# Success: clear any stale failure marker from a previous boot attempt.
+# Success: clear any stale failure marker from a previous boot attempt, and
+# record that this boot is operating with FIPS active.
 rm -f "${FAIL_MARKER}" 2>/dev/null || true
+: > "${BOOTED_MARKER}" 2>/dev/null || true
 exit 0

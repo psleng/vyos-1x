@@ -34,6 +34,7 @@ from vyos.accel_ppp_util import verify_accel_ppp_authentication
 from vyos.accel_ppp_util import verify_accel_ppp_ip_pool
 from vyos.accel_ppp_util import get_pools_in_order
 from vyos import ConfigError
+from vyos import fips
 from vyos import airbag
 from vyos.vpp.control_vpp import VPPControl
 
@@ -134,6 +135,9 @@ def get_config(config=None):
     if any(conditions):
         pppoe.update({'restart_required': {}})
     pppoe['server_type'] = 'pppoe'
+    # FIPS 140-3: classic RADIUS (MD5) has no approved form.
+    if fips.fips_enabled(conf) and conf.exists(base + ['authentication', 'radius']):
+        pppoe['fips_reject_radius'] = {}
     return pppoe
 
 def verify_pado_delay(pppoe):
@@ -167,6 +171,9 @@ def verify_pado_delay(pppoe):
 def verify(pppoe):
     if 'remove' in pppoe:
         return None
+
+    if 'fips_reject_radius' in pppoe:
+        fips.reject_feature('RADIUS (PPPoE server)')
 
     verify_accel_ppp_authentication(pppoe)
     verify_accel_ppp_ip_pool(pppoe)

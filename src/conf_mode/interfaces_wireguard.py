@@ -38,6 +38,7 @@ from vyos.utils.network import is_wireguard_key_pair
 from vyos.utils.process import call
 from vyos import ConfigError
 from vyos import airbag
+from vyos import fips
 from vyos import tpm
 airbag.enable()
 
@@ -76,6 +77,10 @@ def get_config(config=None):
         else:
             wireguard['is_source_interface'] = tmp
 
+    # FIPS 140-3: WireGuard (Curve25519/ChaCha20/BLAKE2) has no approved form.
+    if 'deleted' not in wireguard and fips.fips_enabled(conf):
+        wireguard['fips'] = {}
+
     return wireguard
 
 
@@ -88,6 +93,9 @@ def verify(wireguard):
                 f'as source interface for "{wireguard["is_source_interface"]}"!'
             )
         return None
+
+    if 'fips' in wireguard:
+        fips.reject_feature('WireGuard')
 
     verify_mtu_ipv6(wireguard)
     verify_address(wireguard)

@@ -66,6 +66,7 @@ from vyos.utils.network import interface_exists
 
 from vyos import ConfigError
 from vyos import airbag
+from vyos import fips
 from vyos import tpm
 airbag.enable()
 
@@ -153,6 +154,29 @@ def get_config(config=None):
         openvpn['protocol_modifier']  = '6'
     else:
         openvpn['protocol_modifier'] = ''
+
+    # FIPS 140-3: flag FIPS mode so the config renders `providers fips base` and
+    # verify() rejects non-approved crypto. Uses the single Config instance.
+    if fips.fips_enabled(conf):
+        openvpn['fips'] = {}
+        # OpenVPN's --auth defaults to SHA1 downstream; emit an approved hash
+        # when the operator left it unset (all modes). `hash` is a single-value
+        # leaf, so take the first policy default. Explicit values are left for
+        # verify() to reject.
+        if 'hash' not in openvpn:
+            hash_default = fips.default('interfaces openvpn hash')
+            if hash_default:
+                openvpn['hash'] = hash_default[0]
+        # Emit the approved data-ciphers set from the policy (single source of
+        # truth) when the operator left it unset (TLS modes only; OpenVPN's
+        # compiled default now offers chacha20, which the FIPS provider does
+        # not). Explicitly-set values are left for verify() to reject.
+        if openvpn.get('mode') in ('client', 'server'):
+            encryption = openvpn.setdefault('encryption', {})
+            fips.apply_fips_defaults(
+                encryption,
+                {'data_ciphers': 'interfaces openvpn encryption data-ciphers'},
+            )
 
     return openvpn
 
@@ -277,6 +301,25 @@ def verify(openvpn):
 
     if 'mode' not in openvpn:
         raise ConfigError('Must specify OpenVPN operation mode!')
+
+    # FIPS 140-3: fail closed on non-approved crypto and on TPM-backed operation
+    # (uncertified fTPM is not approved under FIPS -- igos-fips-140-3-design.md
+    # section 6.1).
+    if 'fips' in openvpn:
+        encryption = openvpn.get('encryption', {})
+        messages = fips.reject_unapproved(encryption, {
+            'cipher': 'interfaces openvpn encryption cipher',
+            'data_ciphers': 'interfaces openvpn encryption data-ciphers',
+            'data_ciphers_fallback': 'interfaces openvpn encryption data-ciphers-fallback',
+        })
+        messages += fips.reject_unapproved(openvpn, {'hash': 'interfaces openvpn hash'})
+        if messages:
+            raise ConfigError('\n'.join(messages))
+        if 'tls' in openvpn and tpm.tpm_enabled():
+            raise ConfigError(
+                'FIPS mode: TPM-backed OpenVPN (TLS/PKI) is not approved on this '
+                'platform; disable "system option fips" or do not use the TPM.'
+            )
 
     #
     # OpenVPN client mode - VERIFY

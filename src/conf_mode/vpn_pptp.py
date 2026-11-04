@@ -29,6 +29,7 @@ from vyos.accel_ppp_util import verify_accel_ppp_ip_pool
 from vyos.accel_ppp_util import get_pools_in_order
 from vyos import ConfigError
 from vyos.configdict import get_accel_dict
+from vyos import fips
 
 from vyos import airbag
 airbag.enable()
@@ -55,12 +56,18 @@ def get_config(config=None):
             dict_search('client_ip_pool', pptp))
     pptp['chap_secrets_file'] = pptp_chap_secrets
     pptp['server_type'] = 'pptp'
+    # FIPS 140-3: PPTP (MS-CHAP / MPPE / RC4) has no approved form.
+    if fips.fips_enabled(conf):
+        pptp['fips'] = {}
     return pptp
 
 
 def verify(pptp):
     if not pptp:
         return None
+
+    if 'fips' in pptp:
+        fips.reject_feature('PPTP VPN')
 
     verify_accel_ppp_authentication(pptp)
     verify_accel_ppp_ip_pool(pptp)

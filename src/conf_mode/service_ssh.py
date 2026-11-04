@@ -30,6 +30,7 @@ from vyos.configverify import verify_vrf
 from vyos.configverify import verify_pki_openssh_key
 from vyos.defaults import config_files
 from vyos.defaults import SSH_DSA_DEPRECATION_WARNING
+from vyos import fips
 from vyos.utils.process import call
 from vyos.utils.process import rc_cmd
 from vyos.template import render
@@ -110,6 +111,22 @@ def get_config(config=None):
         # accounts for the entire system.
         break
 
+    # FIPS 140-3: flag FIPS mode so the template selects approved host keys and
+    # verify() rejects explicitly-set non-approved values. Emit the approved
+    # algorithm defaults from the policy (single source of truth) for the leaves
+    # the operator left unset -- otherwise OpenSSH would fall back to its own
+    # non-approved compiled defaults. Explicit values are left for verify() to
+    # reject. Uses the single Config instance (configd-safe).
+    if fips.fips_enabled(conf):
+        ssh['fips'] = {}
+        fips.apply_fips_defaults(ssh, {
+            'cipher': 'service ssh cipher',
+            'mac': 'service ssh mac',
+            'key_exchange': 'service ssh key-exchange',
+            'hostkey_algorithm': 'service ssh hostkey-algorithm',
+            'pubkey_accepted_algorithm': 'service ssh pubkey-accepted-algorithm',
+        })
+
     return ssh
 
 
@@ -119,6 +136,18 @@ def verify(ssh):
 
     if 'rekey' in ssh and 'data' not in ssh['rekey']:
         raise ConfigError('Rekey data is required!')
+
+    if 'fips' in ssh:
+        ssh_fips_leaf_map = {
+            'cipher': 'service ssh cipher',
+            'mac': 'service ssh mac',
+            'key_exchange': 'service ssh key-exchange',
+            'hostkey_algorithm': 'service ssh hostkey-algorithm',
+            'pubkey_accepted_algorithm': 'service ssh pubkey-accepted-algorithm',
+        }
+        messages = fips.reject_unapproved(ssh, ssh_fips_leaf_map)
+        if messages:
+            raise ConfigError('\n'.join(messages))
 
     if 'trusted_user_ca' in ssh:
         verify_pki_openssh_key(ssh, ssh['trusted_user_ca'])
@@ -141,7 +170,21 @@ def generate(ssh):
     # PERLE check if tpm allowed before generating RSA server host key text files
     # PERLE for some reason vyos is not generating ECDSA server host key text files
     # PERLE else if tpm is allowed, remove old rsa/ecdsa files, then create tpm backed rsa  ecdsa keys
-    if not tpm_allowed():
+    if 'fips' in ssh:
+        # FIPS 140-3: the (uncertified fTPM) TPM host-key path is not approved,
+        # so disable the TPM agent drop-in and present approved RSA + ECDSA text
+        # host keys. ed25519/DSA are not FIPS-approvable and are not referenced
+        # by the FIPS sshd_config, so they are not (re)generated here -- their
+        # keygen would also fail under the active FIPS provider.
+        if os.path.isfile(f'{tpm_agent_cfile_name}.conf'):
+            call(f'sudo mv {tpm_agent_cfile_name}.conf {tpm_agent_cfile_name}.tpm')
+        if not os.path.isfile(key_rsa):
+            syslog(LOG_INFO, 'FIPS: generating approved SSH RSA host key!')
+            call(f'ssh-keygen -q -N "" -t rsa -b 3072 -f {key_rsa}')
+        if not os.path.isfile(key_ecdsa):
+            syslog(LOG_INFO, 'FIPS: generating approved SSH ECDSA host key!')
+            call(f'ssh-keygen -q -N "" -t ecdsa -b 384 -f {key_ecdsa}')
+    elif not tpm_allowed():
         # This usually happens only once on a fresh system, SSH keys need to be
         # freshly generated, one per every system!
         if not os.path.isfile(key_rsa):
@@ -167,12 +210,13 @@ def generate(ssh):
         # restore the config file that loads tpm socket and tpm back rsa/ecdsa host key
         call(f'sudo mv {tpm_agent_cfile_name}.tpm {tpm_agent_cfile_name}.conf')
 
-    if not os.path.isfile(key_dsa):
-        syslog(LOG_INFO, 'SSH DSA host key not found, generating new key!')
-        call(f'ssh-keygen -q -N "" -t dsa -f {key_dsa}')
-    if not os.path.isfile(key_ed25519):
-        syslog(LOG_INFO, 'SSH ed25519 host key not found, generating new key!')
-        call(f'ssh-keygen -q -N "" -t ed25519 -f {key_ed25519}')
+    if 'fips' not in ssh:
+        if not os.path.isfile(key_dsa):
+            syslog(LOG_INFO, 'SSH DSA host key not found, generating new key!')
+            call(f'ssh-keygen -q -N "" -t dsa -f {key_dsa}')
+        if not os.path.isfile(key_ed25519):
+            syslog(LOG_INFO, 'SSH ed25519 host key not found, generating new key!')
+            call(f'ssh-keygen -q -N "" -t ed25519 -f {key_ed25519}')
 
     if 'trusted_user_ca' in ssh:
         key_name = ssh['trusted_user_ca']
