@@ -50,6 +50,10 @@ GRAMMAR_SOURCES = {
         'interface-definitions/interfaces_openvpn.xml.in', 'data-ciphers-fallback'),
     'interfaces openvpn hash': (
         'interface-definitions/interfaces_openvpn.xml.in', 'hash'),
+    'service https cipher-suite': (
+        'interface-definitions/service_https.xml.in', 'cipher-suite'),
+    'service https cipher-suite-tls13': (
+        'interface-definitions/service_https.xml.in', 'cipher-suite-tls13'),
 }
 
 

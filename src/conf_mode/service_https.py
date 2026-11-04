@@ -42,6 +42,7 @@ from vyos.utils.network import is_listen_port_bind_service
 from vyos.utils.file import write_file
 from vyos import ConfigError
 from vyos import airbag
+from vyos import fips
 
 airbag.enable()
 
@@ -90,12 +91,30 @@ def get_config(config=None):
     children_changed = diff.node_changed_children(base)
     https['nginx_restart_required'] = bool(set(children_changed) != set(['api']))
 
+    # FIPS 140-3: flag FIPS mode so verify() rejects non-approved TLS cipher
+    # suites and the approved defaults are emitted from the policy when the
+    # operator left the cipher-suite leaves unset.
+    if fips.fips_enabled(conf):
+        https['fips'] = {}
+        fips.apply_fips_defaults(https, {
+            'cipher_suite': 'service https cipher-suite',
+            'cipher_suite_tls13': 'service https cipher-suite-tls13',
+        })
+
     return https
 
 
 def verify(https):
     if https is None:
         return None
+
+    if 'fips' in https:
+        messages = fips.reject_unapproved(https, {
+            'cipher_suite': 'service https cipher-suite',
+            'cipher_suite_tls13': 'service https cipher-suite-tls13',
+        })
+        if messages:
+            raise ConfigError('\n'.join(messages))
 
     if dict_search('certificates.certificate', https) != None:
         verify_pki_certificate(https, https['certificates']['certificate'])

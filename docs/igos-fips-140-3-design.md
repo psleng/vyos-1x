@@ -165,17 +165,36 @@ configd-inspect/test clean):**
     crypto and keeps working**, so the clock is preserved. On-target validated:
     FIPS enables fine with plain pool servers; adding `nts` is refused with a
     message pointing to plain NTP.
+  - **HTTPS / GUI cipher selection** — new operator-selectable
+    `service https cipher-suite` (TLS 1.2 `ssl_ciphers`) and `cipher-suite-tls13`
+    (TLS 1.3 `ssl_conf_command Ciphersuites`) leaves
+    ([service_https.xml.in](../interface-definitions/service_https.xml.in),
+    [nginx.default.j2](../data/templates/https/nginx.default.j2),
+    [service_https.py](../src/conf_mode/service_https.py)) — **feature parity with
+    SSH** (the GUI previously had a hard-coded cipher list, no CLI control). TLS
+    1.0/1.1 stay blocked. FIPS-aware via the same policy machinery: `verify()`
+    rejects non-approved, approved defaults emitted when unset (no SHA1/DSS/
+    chacha). The **non-FIPS default was also hardened** to AEAD-only (Mozilla
+    "intermediate": AES-GCM + ChaCha20, dropping the old SHA1-CBC/DSS suites);
+    SHA1-CBC/DSS are intentionally **not selectable** (consistent with blocking
+    TLS 1.0/1.1), though operators can still pick AEAD + CBC-SHA2. On-target
+    validated: under FIPS the GUI negotiates TLSv1.3 / `TLS_AES_256_GCM_SHA384`
+    and serves 200; the hardened default is active when FIPS is off. (The new CLI
+    leaves need the next image build to be settable on-target; the FIPS
+    auto-default + hardened-default paths are build-independent and were
+    validated.)
 
-**WORKING-TREE STATE (for resuming):** all of the above lives in the `vyos-1x`
-source tree and is **staged but not yet committed** (`git status` on branch
-`vyos-1x-jf` shows 24 changed/new files, currently in the index). The on-target
-copies on 10.10.50.165 are **ephemeral test deploys** (scp'd into `/usr/libexec`
-+ `/usr/share`) and were reverted to a clean config (FIPS off, unsaved) after
-each test — they do **not** survive a reboot/rebuild. Durable delivery = commit +
-rebuild the package. New (added) files: `python/vyos/fips.py`,
-`data/fips/approved-algorithms.toml`, `data/templates/ipsec/fips_plugins.conf.j2`,
-`src/tests/test_fips_policy.py` (re-stage the design doc's latest edits before
-committing).
+**WORKING-TREE STATE (for resuming):** the main enforcement batch is **committed**
+(`99acd2dda` on branch `vyos-1x-jf`, "FIPS 140-3 Phases 2-3 …", 24 files). On top
+of it, the **HTTPS GUI cipher-suite feature is uncommitted** (6 files:
+`interface-definitions/service_https.xml.in`, `src/conf_mode/service_https.py`,
+`data/templates/https/nginx.default.j2`, `data/fips/approved-algorithms.toml`,
+`data/config-mode-dependencies/vyos-1x.json`, `src/tests/test_fips_policy.py`, plus
+this doc). On-target copies on 10.10.50.165 are **ephemeral test deploys** (reverted
+to a clean config after each test); durable delivery = commit + rebuild. The new
+HTTPS CLI leaves (`cipher-suite`, `cipher-suite-tls13`) need a grammar rebuild
+(node.def/reftree regeneration) to be settable on the unit — not doable via the
+file-level test deploys.
 
 **ON-TARGET VALIDATION PENDING (needs the booted image):**
 - Toggle `set system option fips` → `show system fips` → reboot survives (tmpfs
@@ -193,9 +212,9 @@ committing).
   customizations our template would overwrite (§7.1 note). **(Confirmed stock.)**
 
 **NEXT UP:**
-1. **HTTPS + Wireless + SNMPv3 + haproxy** — the ✔verified needs-work items from
-   the audit below (approved-only `ssl_ciphers`; reject WEP/TKIP/WPA1; reject
-   SNMP `md5`/`des`; haproxy approved cipher-suite). NTP/NTS reject **landed**.
+1. **Wireless + SNMPv3 + haproxy** — the remaining ✔verified needs-work items
+   from the audit below (reject WEP/TKIP/WPA1; reject SNMP `md5`/`des`; haproxy
+   approved cipher-suite). HTTPS cipher control + NTP/NTS reject **landed**.
 2. Then: TPM operator rejects for `ssh-tpm-agent` + TPM-PKI (§6.1; OpenVPN TPM
    reject already landed), password-hash KDF (§8.5), and the ⚠audit rows below.
    Drop the "incomplete" warning once enforcement lands.
@@ -223,7 +242,7 @@ traced yet. Treat ⚠audit as "must be looked at", not "confirmed non-compliant"
 
 | Feature | CLI / file | Non-approved exposure | Fix pattern |
 |---|---|---|---|
-| **HTTPS / GUI** | [`service https`](../interface-definitions/service_https.xml.in), [nginx.default.j2](../data/templates/https/nginx.default.j2) | hard-coded `ssl_ciphers` offers SHA1-CBC (`AES128-SHA`, `AES256-SHA`) + DSS suites; `tls-version` already limited to 1.2/1.3 | approved-only `ssl_ciphers` under FIPS (approved default) |
+| **HTTPS / GUI** | [`service https`](../interface-definitions/service_https.xml.in), [nginx.default.j2](../data/templates/https/nginx.default.j2) | hard-coded `ssl_ciphers` offered SHA1-CBC + DSS suites; no operator cipher control | **LANDED** — new `cipher-suite` (TLS 1.2) + `cipher-suite-tls13` leaves (operator-selectable, parity with SSH); under FIPS, `verify()` rejects non-approved and the approved default is emitted (no SHA1/DSS/chacha); 1.0/1.1 stay blocked. On-target: TLS negotiates TLSv1.3/AES-256-GCM, GUI 200 |
 | **Wireless / WiFi** | [`interfaces wireless`](../interface-definitions/interfaces_wireless.xml.in) (hostapd) | `security wep`, cipher `TKIP`, `mode wpa` (WPA1/TKIP) | reject WEP/TKIP/WPA1; allow WPA2/WPA3 + CCMP/GCMP |
 | **SNMPv3** | [`service snmp`](../interface-definitions/service_snmp.xml.in) (`authentication-type.xml.i`, `privacy-type.xml.i`) | auth `md5` (and `sha`=SHA1); privacy `des` | reject `md5`/`des` (and `sha`); require SHA-2 + AES |
 | **haproxy** (if used) | [`load-balancing haproxy`](../interface-definitions/load-balancing_haproxy.xml.in) | `ssl-cipher-suite` list includes `*-chacha20-poly1305` | reject/approved-default cipher suite under FIPS |
