@@ -22,6 +22,7 @@ show
                     ├── signal                              # RF signal metrics
                     ├── sim                                 # SIM/slot/PIN information
                     ├── status                              # connection state and IP config
+                    ├── firmware                            # compatible releases, cache state, and running version
                     ├── bearer-leases                       # who is holding the bearer up (failover/operator) and why
                     ├── wait-failover-alert                 # wait for next failover alert
                     │     └── timeout <1-600>               # override wait timeout (seconds)
@@ -42,6 +43,19 @@ connect
 
 disconnect
   └── interface <wwanN>                                    # tear down WWAN bearer
+
+update
+  └── firmware
+        └── wwan <wwanN>
+              ├── <igos_version|latest> [now]              # install a cataloged release
+              └── archive <URL|local-path>
+                    ├── now                               # signed archive, no prompt
+                    └── force-unsigned [now]               # enabled development images, local files only
+
+delete
+  └── firmware
+        └── wwan <wwanN>
+              └── <igos_version> [now]                     # delete a retained archive
 
 generate
   └── interfaces
@@ -637,6 +651,339 @@ igos@igos:~$ change wwan wwan0 sim pin remove
 
 **Script:** `wwan_pin.py delete_pin --interface="$3"`
 
+## Firmware Commands
+
+Firmware updates use signed, per-version archives and a signed schema-1
+`modem-firmware.json` catalog. Firmware payloads are downloaded on demand;
+no firmware Debian packages are installed by these commands. The router must
+already have the appropriate `uxfp` or `tfl` installer.
+
+`src/op_mode/wwan_firmware.py` obtains manufacturer, model, hardware revision,
+and installed firmware revision from `WWANClientSync().get_status(N)` for the
+selected `wwanN`. It does not probe AT ports for modem identity. USB/sysfs
+information is used separately to target the physical modem for flashing.
+
+### Version selection and compatibility
+
+| Field | Meaning |
+|---|---|
+| `igos_version` | Operator-facing release label used by CLI selection and ordering |
+| `telit_version` | Native modem firmware revision used to identify the running release |
+| `telit_package_version` | Vendor package metadata; not the CLI version selector |
+
+igOS labels are compared as numeric tuples within the selected model/hardware
+track: `1.10` is newer than `1.9`. `latest` selects the maximum label in that
+track. It is computed from the catalog rather than stored as a release.
+
+Manufacturer/model and hardware revision must match. `Telit` and
+`Telit Cinterion` are normalized to the same vendor. Revision patterns use
+most-specific precedence: exact (`1.20`), longest matching whole-segment prefix
+(`1.*`), then catch-all (`*`). The winning block supplies the complete track;
+releases from broader patterns are not merged. Ambiguous matches are rejected.
+
+The running release is found by matching the modem's revision to
+`telit_version`. An exact full-string match takes precedence. For numeric
+revisions, a ModemManager build suffix is also supported: for example,
+`25.21.564  1  [Dec 27 2023 05:00:00]` can match catalog `25.21.564`.
+An unmapped revision is reported as unknown; the updater does not guess its
+ordering relative to cataloged releases.
+
+### `show interfaces wwan <wwanN> firmware`
+
+List compatible releases and their cache/running status. Example output with
+illustrative catalog entries:
+
+```text
+igos@igos:~$ show interfaces wwan wwan0 firmware
+Version   Telit Firmware      Released      Cached    Running
+1.1       M0L.001005          2026-11-01    No        No
+1.0       M0L.001004          2026-09-01    Yes       Yes
+```
+
+**Script:** `wwan_firmware.py show_firmware --interface="$4"`
+
+Handler options used by completion and automation:
+
+- `--quiet`: print only igOS labels; return no completion output if lookup fails.
+- `--downloaded-only`: restrict results to retained archives in the archive cache.
+- `--raw`: return structured interface, modem, release, cache, and running data.
+  This is a Python handler option, not an extra node in the operational XML.
+
+Update completion lists compatible labels plus `latest`. Delete completion
+lists only cached labels. Completion uses the authenticated cached catalog;
+a normal `show` refreshes it when the server is reachable.
+
+### `update firmware wwan <wwanN> <igos_version|latest> [now]`
+
+Install one cataloged release on a specific modem:
+
+```text
+update firmware wwan wwan0 1.1
+update firmware wwan wwan0 latest
+update firmware wwan wwan0 1.1 now
+```
+
+**Script:** `wwan_firmware.py set_firmware --interface="$4" --version="$5"`
+The `now` node adds `--no-prompt`. It skips interactive confirmation; signature,
+compatibility, storage, and port-targeting checks still apply.
+
+The updater:
+
+1. Reads the modem identity, authenticates the catalog, and selects the matching
+   hardware track. It uses the release's full archive URL directly.
+2. Returns without flashing if that igOS release is already installed. A lower
+   target label prints a downgrade warning; an unmapped running revision prints
+   an unknown-ordering warning.
+3. Downloads only the selected archive, or reuses an eligible cached copy.
+   Checks free space and the catalog's `archive_sha256` before extraction.
+   Extraction rejects absolute/traversal paths, symbolic/hard links, and special
+   device entries. Storage checks preserve a 32 MiB free-space reserve.
+4. Extracts safely and reads `firmware.json` inside the archive. Manufacturer,
+   model, hardware revision, installer, igOS/Telit versions, and optional package
+   and payload metadata are checked against the selected release/modem.
+5. Captures the selected interface's physical USB path and serial. Checks the
+   installer is available, displays firmware/modem details, and asks for
+   confirmation unless `now` was supplied.
+6. Stops `igos-wwan-manager.service` and confirms ModemManager is inactive.
+   The manager's shutdown tears down bearers and stops ModemManager, freeing
+   diagnostic ports. **This disconnects all managed cellular interfaces.**
+7. Resolves the captured physical modem again and selects only its serial ports.
+   UXFP's reported diagnostic ports are intersected with that modem's port group.
+   TFL loads `qcserial` if needed, selects the highest-numbered `ttyUSB` in that
+   group, and validates with `--port ... --dry-run --debug`. Port resolution is
+   repeated before flashing to handle USB re-enumeration.
+8. Runs `uxfp --file <payload> --port <diag>` or
+   `tfl <payload-directory> --port <diag> --force`.
+9. Removes temporary files. After successful flashing, leaves the WWAN manager
+   stopped and asks the operator to reboot the router.
+
+FN920 TFL vendor ZIPs inside release archives are safely extracted to a temporary
+directory containing a single `contents.xml` before service teardown. UXFP
+receives the selected stream binary. Flashing never relies on another modem's
+ports or the installer's automatic target selection.
+
+Cancellation at the confirmation prompt leaves services running. If teardown or
+pre-flash preparation fails, the updater attempts to restore a manager it
+stopped. Once a flasher process has started, the manager is not automatically
+restarted on failure or interruption because the modem may already have changed.
+Review the error and modem state before recovery; reboot after successful flashing.
+
+### `update firmware wwan <wwanN> archive <URL|local-path> [now]`
+
+Install a self-describing archive independently of the catalog:
+
+```text
+update firmware wwan wwan0 archive https://firmware.example.com/releases/test.tar
+update firmware wwan wwan0 archive /tmp/test.tar now
+```
+
+**Script:** `wwan_firmware.py update_archive --interface="$4" --archive="$6"`
+
+Provide the archive and its detached `.sig` and `.crl` siblings at the same URL
+or local path, for example `/tmp/test.tar.sig` and `/tmp/test.tar.crl`.
+The signing certificate is embedded in the CMS signature; the router does not
+need the publisher's private key or a separately downloaded `.pem` sidecar.
+
+The archive's own signature is authenticated before extraction. Its internal
+`firmware.json` supplies identity and payload metadata, and model/hardware gates
+still apply. HTTP(S) downloads and local regular files are supported. This path
+has no catalog release ordering, so it prints an ordering-unknown notice and
+uses the same confirmation, teardown, explicit-port flashing, and cleanup flow.
+Standalone installs use temporary storage rather than archive retention.
+
+### Development-only `force-unsigned`
+
+```text
+update firmware wwan wwan0 archive /tmp/lab.tar force-unsigned
+update firmware wwan wwan0 archive /tmp/lab.tar force-unsigned now
+```
+
+This bypasses only the standalone archive signature check and prints an unsigned
+firmware warning. All of the following are required:
+
+- The archive is a local file; URL-based unsigned installs are rejected.
+- `/usr/share/vyos/version.json` records `build_type = "development"`.
+- The image was built with `wwan_firmware_allow_unsigned = true`.
+- The operator explicitly supplies `force-unsigned`.
+
+The flag defaults to `false`; release image builds reject enabling it. It is a
+build-time setting, not a router configuration command. Compatibility and safe
+extraction checks remain mandatory. Catalog signature verification is never
+bypassed. `now` skips confirmation, not these checks.
+
+### `delete firmware wwan <wwanN> <igos_version> [now]`
+
+Remove a retained archive and its cache bookkeeping:
+
+```text
+delete firmware wwan wwan0 1.0
+delete firmware wwan wwan0 1.0 now
+```
+
+**Script:** `wwan_firmware.py delete_firmware --interface="$4" --version="$5"`
+
+The label must exist in the compatible catalog track and its archive must be
+cached. The handler uses the authenticated cached catalog, asks for confirmation
+unless `now` is supplied, and serializes cache changes with the update lock.
+Deleting the running release's cached archive is allowed: it does not uninstall
+or change the firmware already flashed into the modem. No Debian package is
+removed. Deletion remains useful for retained files after cache retention is disabled.
+
+### Catalog source and signature trust
+
+The default catalog URL comes from `wwan_firmware_map_url` in
+`/usr/share/vyos/version.json`. Override it in configuration mode:
+
+```text
+configure
+set system update-check cellular-firmware url 'https://firmware.example.com/cellular-firmware/modem-firmware.json'
+commit
+save
+exit
+```
+
+Deleting that `url` node restores the image default. Changing the server does not
+change the trusted signing root. The override accepts HTTP or HTTPS; catalog
+and firmware authentication are enforced independently of transport.
+
+The router downloads the catalog, `.sig`, and `.crl` siblings. It validates the
+detached binary CMS signature, root-issued leaf certificate, certificate purpose
+and validity, and root-signed CRL before accepting catalog data. Learned CRL
+numbers are persisted to reject revocation-list rollback. A cataloged archive is
+then authenticated by its hash in that signed catalog; standalone installation
+checks the archive's own signature and current trust/expiry/revocation status.
+
+On transport failure, the updater may use the same-source cached catalog only
+after re-verifying its signature and CRL. An expired or invalid cached trust
+state is rejected. A downloaded catalog with an invalid signature does not fall
+back to an older valid cache. No catalog is bundled as a fallback in the image.
+
+| Router path | Purpose |
+|---|---|
+| `/usr/share/vyos/igos-firmware-keys/` | Public root CA certificates installed by the ISO builder |
+| `/var/cache/vyos/modem-firmware.json` | Authenticated catalog cache envelope, including signature and CRL |
+| `/config/firmware-signing/revocations.json` | Persistent authenticated CRL rollback state |
+| `/var/cache/vyos/wwan-firmware/` | Optional retained archives and `.sha256` bookkeeping |
+| `/usr/lib/modem/<vendor>/<model>/<hw_rev>/<telit_version>/` | Temporary cataloged-release work directory; version is path-escaped when needed |
+| `/run/lock/igos-wwan-firmware.lock` | Serializes firmware installs and cache deletion |
+
+The root private key stays offline. Leaf private keys and passphrases are needed
+on the signing host, never on the router. Public certificate/CRL sidecars must
+be renewed and distributed before expiry; successful signature creation alone
+does not mean a release will pass router trust checks.
+
+### Optional archive retention
+
+Retention is off by default. Enable it in configuration mode:
+
+```text
+configure
+set system update-check cellular-firmware cache enable
+set system update-check cellular-firmware cache max-archives '2'
+set system update-check cellular-firmware cache max-size '512'
+commit
+save
+exit
+```
+
+`max-archives` accepts 1–100 (default 2); `max-size` accepts 1–409600 MiB
+(default 512). Limits apply to the shared archive cache. Least-recently-used
+archives are pruned to meet the count and size budgets. An archive larger than
+the size budget is not retained. Retained files use readable archive basenames
+and are hash-checked before reuse; corrupt entries are discarded and downloaded
+again. Cache-storage failure does not invalidate an otherwise authenticated install.
+
+With retention disabled, cataloged installs download, authenticate, extract, and
+clean up their selected archive. Temporary extraction directories are removed
+on normal completion, cancellation, and handled failures regardless of retention.
+Deletion of the `cache enable` node stops future reuse/retention but does not
+immediately erase previously retained archives; use `delete firmware wwan` to
+remove cataloged cached releases.
+
+### Automatic checks and notifications
+
+Enable notification-only checks, optionally broadcasting changed notices:
+
+```text
+configure
+set system update-check cellular-firmware auto-check
+set system update-check cellular-firmware wall
+commit
+save
+exit
+```
+
+`vyos-cellular-firmware-check.service` runs an immediate check when started and
+then every 12 hours, with a 180-second timeout per check. It uses the same FSM
+identity, authenticated catalog, revision matching, and running-version mapping
+as the operational handler. It checks present configured WWAN interfaces and
+aggregates newer-release notices into `/run/motd.d/11-vyos-cellular-firmware`.
+Each notice names the interface, available igOS label, and exact update command.
+Unknown running versions are not guessed to be upgrades. Unavailable modems are
+skipped; checks never stop the manager, download firmware archives, or auto-flash.
+
+`wall` broadcasts only when notice content changes. Removing `wall` leaves MOTD
+notices enabled. To disable cellular checks explicitly:
+
+```text
+configure
+delete system update-check cellular-firmware auto-check
+set system update-check cellular-firmware disable
+commit
+save
+exit
+```
+
+`auto-check` and `disable` cannot coexist. Removing `auto-check`, or setting
+`disable`, stops/disables the cellular service and clears its MOTD fragment.
+Delete `disable` before enabling `auto-check` again. These cellular toggles are
+independent of the parent image-update notification toggle.
+
+For diagnostics from the router shell:
+
+```bash
+systemctl status vyos-cellular-firmware-check.service
+journalctl -u vyos-cellular-firmware-check.service
+```
+
+### Firmware build and signing workflow
+
+The separate private `igos-modem-firmwares` repository supplies the release
+builder. Source layout is `telit/<model>/<hardware>/<igos_version>/meta.toml`
+plus a `payload/` directory. The generator extracts LN920/LE910 stream binaries
+from source ZIPs while assembling `.tar` archives; FN920 vendor ZIPs stay intact
+inside the release archive for the TFL preparation step on the router.
+
+On a provisioned signing host, run `./docker-build.sh` in that repository. It
+fetches private `igos-firmware-keys`, runs tests/build/signing in Docker, and
+writes the catalog and archives under `dist/`. Public certificates, CRL, and an
+encrypted leaf key come from the keys repository; the passphrase is supplied
+separately in the ignored `.signing-secrets/leaf.passphrase` or through
+`FIRMWARE_SIGNING_PASSWORD_FILE`. Root private keys are not part of daily builds.
+
+Generated archive directories/names use `telit_version`, for example:
+
+```text
+telit/LN920A12-WW/1.20/M0L.001004/LN920A12-WW-1.20-M0L.001004.tar
+```
+
+`telit_package_version` remains metadata. `FIRMWARE_BASE_URL` supplies the archive
+hosting prefix; the catalog URL baked into the ISO must point to that deployment's
+`modem-firmware.json`. The current signer creates fresh archive and catalog
+signatures each run, and writes `.sig`, `.pem`, and `.crl` sidecars. The signer
+creates signatures; router trust verification occurs separately.
+
+Nexus provides an independent `bin/iGOS-firmware-build` job that calls this Docker
+workflow and records logs. ISO assembly separately fetches the keys repository
+and stages only validated public roots through `vyos-build`'s
+`--firmware-signing-key-dir`. Offline root creation, leaf issuance, and CRL
+maintenance live in the separate `igos-firmware-ca/wwan-firmware-ca` tool.
+
+The build does not publish releases or flash routers. Configure scheduling and
+hosting separately. Publish completed archives and all sidecars first, then the
+signed catalog and its sidecars. No GraphQL firmware integration is included in
+this implementation.
+
 ---
 
 ## SMS Commands
@@ -886,8 +1233,17 @@ an HTTPS POST body, use `syslog-identifier igos-wwan-alertbus-json` and parse
 | `op-mode-definitions/connect.xml.in` | XML: `connect interface` (shared with PPPoE/SSTPC) |
 | `op-mode-definitions/disconnect.xml.in` | XML: `disconnect interface` (shared with PPPoE/SSTPC) |
 | `src/op_mode/show_wwan.py` | Python: status, hardware, sim, signal, detail, bearer-leases, clear data-usage handlers |
+| `op-mode-definitions/wwan-firmware.xml.in` | XML: firmware update, standalone archive, and cache-delete commands |
 | `src/op_mode/wwan_sms.py` | Python: send, list, read, delete SMS handlers |
 | `src/op_mode/connect_disconnect.py` | Python: connect/disconnect handler (shared) |
+| `src/op_mode/wwan_firmware.py` | Python: firmware listing, install/delete, USB targeting, service lifecycle, and notify-only checks |
+| `python/vyos/utils/wwan/interfaces_wwan_firmware.py` | Catalog, CMS trust/CRL, archive safety, compatibility, and cache helpers |
+| `interface-definitions/system_update-check.xml.in` | Configuration: cellular catalog URL, cache policy, and notification controls |
+| `src/conf_mode/system_update-check.py` | Apply image/cellular update-check settings and manage notification services |
+| `src/system/vyos-cellular-firmware-check.py` | 12-hour notify-only firmware check loop |
+| `src/systemd/vyos-cellular-firmware-check.service` | Systemd unit for cellular firmware notifications |
+| `src/tests/test_wwan_firmware_archive.py` | Archive, cache, compatibility, USB targeting, notification, and lifecycle tests |
+| `src/tests/test_wwan_firmware_signing.py` | CMS trust, revocation, catalog cache, and development-bypass tests |
 | `python/vyos/utils/wwan/wwan_client.py` | Python: `WWANClientSync` D-Bus client library |
 | `python/vyos/utils/wwan/alert_adapters.py` | Python: AlertBus subscriber adapters (REST/MQTT/SNMP skeletons) |
 | `python/vyos/utils/wwan/interfaces_wwan_config.py` | Python: D-Bus service — per-interface methods |
@@ -920,6 +1276,12 @@ an HTTPS POST body, use `syslog-identifier igos-wwan-alertbus-json` and parse
 | `show interfaces wwan wwan0 event-log category connectivity` | Connectivity events only |
 | `connect interface wwan0` | Bring up WWAN bearer |
 | `disconnect interface wwan0` | Tear down WWAN bearer |
+| `show interfaces wwan wwan0 firmware` | Show compatible igOS labels, native revisions, dates, cache/running status |
+| `update firmware wwan wwan0 1.1` | Authenticate and install a cataloged release with confirmation |
+| `update firmware wwan wwan0 latest now` | Install the newest compatible label without confirmation |
+| `update firmware wwan wwan0 archive /tmp/test.tar` | Authenticate and install a standalone archive |
+| `update firmware wwan wwan0 archive /tmp/lab.tar force-unsigned` | Explicit local unsigned install on an enabled development image |
+| `delete firmware wwan wwan0 1.0` | Delete a retained archive without changing flashed firmware |
 | `generate interfaces wwan wwan0 sms number '+15551234567' message 'hello'` | Send an SMS |
 | `clear interfaces wwan wwan0 sms` | Clear all SMS messages |
 | `clear interfaces wwan wwan0 sms message 3` | Clear SMS message #3 |

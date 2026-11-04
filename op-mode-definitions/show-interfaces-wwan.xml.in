@@ -56,6 +56,12 @@
                     </properties>
                     <command>${vyos_op_scripts_dir}/show_wwan.py show_status --interface="$4"</command>
                   </leafNode>
+                  <leafNode name="firmware">
+                    <properties>
+                      <help>Show compatible WWAN firmware versions</help>
+                    </properties>
+                    <command>sudo ${vyos_op_scripts_dir}/wwan_firmware.py show_firmware --interface="$4"</command>
+                  </leafNode>
                   <leafNode name="bearer-leases">
                     <properties>
                       <help>Show bearer-demand leases holding the link up (failover/traffic/operator)</help>

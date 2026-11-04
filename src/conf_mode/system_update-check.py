@@ -31,6 +31,8 @@ base = ['system', 'update-check']
 service_name = 'vyos-system-update'
 service_conf = Path(f'/run/{service_name}.conf')
 motd_file = Path('/run/motd.d/10-vyos-update')
+cellular_service = 'vyos-wwan-firmware-check'
+cellular_motd = Path('/run/motd.d/11-vyos-cellular-firmware')
 
 
 def get_config(config=None):
@@ -52,6 +54,10 @@ def verify(config):
     # bail out early - looks like removal from running config
     if config is None:
         return
+
+    cellular = config.get('cellular_firmware', {})
+    if 'auto_check' in cellular and 'disable' in cellular:
+        raise ConfigError('Cellular firmware auto-check and disable are mutually exclusive')
 
     # Nothing to verify when the user has disabled update checks.
     if 'disable' in config:
@@ -96,6 +102,13 @@ def generate(config):
 
 
 def apply(config):
+    cellular = (config or {}).get('cellular_firmware', {})
+    if 'auto_check' in cellular and 'disable' not in cellular:
+        call(f'systemctl enable {cellular_service}.service')
+        call(f'systemctl restart {cellular_service}.service')
+    else:
+        call(f'systemctl disable --now {cellular_service}.service')
+        cellular_motd.unlink(missing_ok=True)
     # Update-check notifications are enabled by default in the image (the
     # service uses the URL baked into /usr/share/vyos/version.json when nothing
     # is configured). `system update-check disable` turns them off persistently;
