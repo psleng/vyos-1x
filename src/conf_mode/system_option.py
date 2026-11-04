@@ -207,6 +207,11 @@ def get_config(config=None):
         base, key_mangling=('-', '_'), get_first_key=True, with_recursive_defaults=True
     )
 
+    # FIPS 140-3: record the previously-committed state here, using the single
+    # Config instance, so apply() can detect a real change without creating a
+    # second Config instance (enforced by test_configd_inspect).
+    options['fips_effective'] = conf.exists_effective(['system', 'option', 'fips'])
+
     if 'performance' in options:
         # Update IPv4/IPv6 and sysctl options after tuned applied it's settings
         set_dependents('ip_ipv6', conf)
@@ -555,7 +560,7 @@ def apply(options):
     # than auto-rebooting; a persistent marker records the pending state.
     if boot_configuration_complete():
         fips_now = 'fips' in options
-        fips_was = Config().exists_effective(['system', 'option', 'fips'])
+        fips_was = options.get('fips_effective', False)
         if fips_now != fips_was:
             if fips_now:
                 write_file(fips_reboot_marker, '')
