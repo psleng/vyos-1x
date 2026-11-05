@@ -124,10 +124,15 @@ def evaluate_strength(passwd: str) -> dict[str, str]:
     return result
 
 
-def make_password_hash(password):
-    """Makes a password hash for /etc/shadow using mkpasswd"""
+def make_password_hash(password, fips=False):
+    """Makes a password hash for /etc/shadow using mkpasswd.
 
-    mkpassword = 'mkpasswd --method=yescrypt --stdin'
+    Under FIPS mode the approved SHA-512-crypt KDF is used; otherwise the
+    stronger (but not FIPS-approved) yescrypt default is kept.
+    """
+
+    method = 'sha512crypt' if fips else 'yescrypt'
+    mkpassword = f'mkpasswd --method={method} --stdin'
     return cmd(mkpassword, input=password, timeout=5)
 
 
@@ -144,14 +149,13 @@ def split_ssh_public_key(key_string, defaultname=""):
 
     if key_type not in [
         'ssh-rsa',
-        'ssh-dss',
         'ecdsa-sha2-nistp256',
         'ecdsa-sha2-nistp384',
         'ecdsa-sha2-nistp521',
         'ssh-ed25519',
     ]:
         raise ValueError(
-            "Bad key type \'{0}\', must be one of must be one of ssh-rsa, ssh-dss, ecdsa-sha2-nistp<256|384|521> or ssh-ed25519".format(
+            "Bad key type \'{0}\', must be one of ssh-rsa, ecdsa-sha2-nistp<256|384|521> or ssh-ed25519".format(
                 key_type
             )
         )

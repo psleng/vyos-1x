@@ -18,19 +18,17 @@ import re
 import os
 import json
 
-from copy import deepcopy
 from passlib.hosts import linux_context
+from passlib.hash import sha512_crypt
 from psutil import users
 from sys import exit
 from time import sleep
 
 from vyos.base import Warning
-from vyos.base import DeprecationWarning
 from vyos.config import Config
 from vyos.configdep import set_dependents
 from vyos.configdep import call_dependents
 from vyos.configverify import verify_pki_certificate, verify_vrf
-from vyos.defaults import SSH_DSA_DEPRECATION_WARNING
 from vyos.pki import wrap_certificate, wrap_private_key
 from vyos.template import render
 from vyos.template import is_ipv4
@@ -68,7 +66,6 @@ radius_config_file = "/etc/pam_radius_auth.conf"
 tacacs_pam_config_file = "/etc/tacplus_servers"
 tacacs_nss_config_file = "/etc/tacplus_nss.conf"
 nss_config_file = "/etc/nsswitch.conf"
-login_motd_dsa_warning = r'/run/motd.d/92-vyos-user-dsa-deprecation-warning'
 saml_sp_dir = '/etc/saml-sp'
 saml_config_file = f'{saml_sp_dir}/saml.conf'
 saml_user_map_file = f'{saml_sp_dir}/saml-user.map'
@@ -103,12 +100,6 @@ PASSWORD_POLICY_DEFAULT_MINIMUM_SPECIAL = 1
 # no longer matches and neither default is applied.
 DEFAULT_LOGIN_USER = 'igos'
 PASSWORD_SENTINEL = '!'
-
-# As of OpenSSH 9.8p1 in Debian trixie, DSA keys are no longer supported
-SSH_DSA_DEPRECATION_WARNING: str = (
-    f'{SSH_DSA_DEPRECATION_WARNING} '
-    'The following users are using SSH-DSS keys for authentication.'
-)
 
 
 def password_policy_check(
@@ -278,6 +269,19 @@ def verify(login):
             fips.reject_feature('RADIUS (system login)')
         if 'tacacs' in login:
             fips.reject_feature('TACACS+ (system login)')
+        # Reject an operator-supplied encrypted-password that uses a
+        # non-approved KDF (yescrypt/scrypt/bcrypt/MD5/DES). SHA-2-crypt
+        # ($5$/$6$) is the approved family; a plaintext-password is hashed with
+        # an approved KDF at generation time.
+        for user, user_config in login.get('user', {}).items():
+            enc = dict_search('authentication.encrypted_password', user_config)
+            if not enc or enc in ('!', '*', '', PASSWORD_SENTINEL):
+                continue
+            if not enc.startswith(('$5$', '$6$')):
+                raise ConfigError(
+                    f'FIPS 140-3: user "{user}" encrypted-password uses a '
+                    f'non-approved hash algorithm; use SHA-512-crypt ($6$) or '
+                    f'set a plaintext-password (hashed with an approved KDF).')
     if 'rm_users' in login:
         # This check is required as the script is also executed from vyos-router
         # init script and there is no SUDO_USER environment variable available
@@ -469,18 +473,8 @@ def verify(login):
                         f'User {user} is configured as an operator but is not assigned to any operator groups'
                     )
 
-    # Deprecation Warning for SSH DSS keys.
-    gen_header = True
     if 'user' in login:
         for user, user_config in login['user'].items():
-            for pubkey, pubkey_options in (
-                dict_search('authentication.public_keys', user_config) or {}
-            ).items():
-                if 'type' in pubkey_options and pubkey_options['type'] == 'ssh-dss':
-                    if gen_header:
-                        gen_header = False
-                        DeprecationWarning(SSH_DSA_DEPRECATION_WARNING)
-                    print(f'User "{user}" with deprecated public-key named: {pubkey}')
             if 'serial' in user_config:
                 if 'access' in user_config['serial']:
                     existing = {}
@@ -609,6 +603,15 @@ def verify(login):
 
 def generate(login):
     # calculate users encrypted password
+    fips_mode = 'fips' in login
+
+    def hash_password(password):
+        # Under FIPS pin the approved SHA-512-crypt KDF; otherwise defer to the
+        # host crypt policy (passlib's linux_context -> yescrypt/sha512_crypt).
+        if fips_mode:
+            return sha512_crypt.hash(password)
+        return linux_context.hash(password)
+
     if 'user' in login:
         for user, user_config in login['user'].items():
             # PERLE: default-account sticker password.
@@ -645,14 +648,14 @@ def generate(login):
                 else:
                     login['user'][user]['authentication'][
                         'encrypted_password'
-                    ] = linux_context.hash(effective_password)
+                    ] = hash_password(effective_password)
                 # Do not fall through to the plaintext / config-writeback path:
                 # the sentinel must remain '!' in the CLI config.
                 continue
 
             tmp = dict_search('authentication.plaintext_password', user_config)
             if tmp:
-                encrypted_password = linux_context.hash(tmp)
+                encrypted_password = hash_password(tmp)
                 login['user'][user]['authentication'][
                     'encrypted_password'
                 ] = encrypted_password
@@ -787,20 +790,6 @@ def generate(login):
             if policy is not None:
                 policy = list(map(lambda s: re.split(r'\s+', s), policy))
                 operator_config['groups'][g]['command_policy']['allow'] = policy
-
-    # Generate MOTD informing the user(s) for possible deprecated SSH keys
-    tmp = deepcopy(login)
-    tmp['ssh_dsa_deprecation_warning'] = (
-        f'DEPRECATION WARNING: {SSH_DSA_DEPRECATION_WARNING}'
-    )
-    render(
-        login_motd_dsa_warning,
-        'login/motd_user_dsa_warning.j2',
-        tmp,
-        permission=0o644,
-        user='root',
-        group='root',
-    )
 
     with open('/etc/vyos/operators.json', 'w') as of:
         json.dump(operator_config, of)

@@ -34,8 +34,10 @@ def set_default_gateway(config, gateway):
     config.set_tag(["protocols", "static", "route", "0.0.0.0/0", "next-hop"])
 
 def set_user_password(config, user, password):
-    # Make a password hash
-    hash = make_password_hash(password)
+    # Make a password hash; under FIPS use the approved SHA-512-crypt KDF when
+    # the seed config has already enabled it.
+    fips = config.exists(["system", "option", "fips"])
+    hash = make_password_hash(password, fips=fips)
 
     config.set(["system", "login", "user", user, "authentication", "encrypted-password"], value=hash)
     config.set(["system", "login", "user", user, "authentication", "plaintext-password"], value="")

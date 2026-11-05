@@ -95,11 +95,14 @@ def get_config(config=None):
     if conf.exists(country_code_path):
         wifi['country_code'] = conf.return_value(country_code_path)
 
-    # FIPS 140-3: WPA-Enterprise RADIUS (classic RADIUS = MD5) has no approved
-    # form; flag so verify() fails closed.
+    # FIPS 140-3: WPA-Enterprise RADIUS (classic RADIUS = MD5) and WEP have no
+    # approved form; flag so verify() fails closed.
     if 'deleted' not in wifi and fips.fips_enabled(conf):
+        wifi['fips'] = {}
         if conf.exists(base + [ifname, 'security', 'wpa', 'radius']):
             wifi['fips_reject_radius'] = {}
+        if conf.exists(base + [ifname, 'security', 'wep']):
+            wifi['fips_reject_wep'] = {}
 
     if 'deleted' not in wifi:
         # then get_interface_dict provides default keys
@@ -107,6 +110,16 @@ def get_config(config=None):
             del wifi['security']['wep']
         if wifi.from_defaults(['security', 'wpa']): # if not set by user
             del wifi['security']['wpa']
+
+    # FIPS 140-3: the grammar default WPA mode is `wpa+wpa2`, which enables WPA1
+    # (and thus TKIP). Emit the approved `wpa2` default when the operator left
+    # `mode` unset so the AP does not silently come up WPA1-capable; explicitly
+    # set non-approved modes/ciphers are rejected in verify().
+    if 'fips' in wifi and dict_search('security.wpa', wifi) is not None:
+        if wifi.from_defaults(['security', 'wpa', 'mode']):
+            tmp = fips.default('interfaces wireless security wpa mode')
+            if tmp:
+                wifi['security']['wpa']['mode'] = tmp[0]
 
     # XXX: Jinja2 can not operate on a dictionary key when it starts of with a number
     if '40mhz_incapable' in (dict_search('capabilities.ht', wifi) or []):
@@ -199,6 +212,19 @@ def verify(wifi):
 
     if 'fips_reject_radius' in wifi:
         fips.reject_feature('RADIUS (wireless WPA-Enterprise)')
+
+    if 'fips_reject_wep' in wifi:
+        fips.reject_feature('WEP (wireless)')
+
+    if 'fips' in wifi:
+        wpa = dict_search('security.wpa', wifi) or {}
+        messages = fips.reject_unapproved(wpa, {
+            'mode': 'interfaces wireless security wpa mode',
+            'cipher': 'interfaces wireless security wpa cipher',
+            'group_cipher': 'interfaces wireless security wpa group-cipher',
+        })
+        if messages:
+            raise ConfigError('\n'.join(messages))
 
     if 'physical_device' not in wifi:
         raise ConfigError('You must specify a physical-device "phy"')

@@ -54,6 +54,19 @@ GRAMMAR_SOURCES = {
         'interface-definitions/service_https.xml.in', 'cipher-suite'),
     'service https cipher-suite-tls13': (
         'interface-definitions/service_https.xml.in', 'cipher-suite-tls13'),
+    'interfaces wireless security wpa cipher': (
+        'interface-definitions/interfaces_wireless.xml.in', 'cipher'),
+    'interfaces wireless security wpa group-cipher': (
+        'interface-definitions/interfaces_wireless.xml.in', 'group-cipher'),
+    # 'interfaces wireless security wpa mode' is intentionally omitted: the
+    # grammar has several <leafNode name="mode"> and _grammar_tokens() matches
+    # the first, so it cannot be uniquely resolved by name here.
+    'service snmp v3 user auth type': (
+        'interface-definitions/include/snmp/authentication-type.xml.i', 'type'),
+    'service snmp v3 user privacy type': (
+        'interface-definitions/include/snmp/privacy-type.xml.i', 'type'),
+    'load-balancing haproxy global-parameters ssl-bind-ciphers': (
+        'interface-definitions/load-balancing_haproxy.xml.in', 'ssl-bind-ciphers'),
 }
 
 

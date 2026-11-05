@@ -41,6 +41,7 @@ from vyos.utils.process import call
 from vyos.utils.permission import chmod_755
 from vyos.version import get_version_data
 from vyos import ConfigError
+from vyos import fips
 from vyos import airbag
 airbag.enable()
 
@@ -130,6 +131,25 @@ def get_config(config=None):
 
             snmp['script_extensions']['extension_name'][key]['script'] = script_path
 
+    # FIPS 140-3: SNMPv3 auth must be SHA-2 (not MD5/SHA-1) and privacy must be
+    # AES (not DES). The grammar defaults are md5/des, so emit the approved
+    # defaults for any v3 user/trap that configured auth/privacy but left the
+    # protocol unset; explicitly-set non-approved protocols are rejected in
+    # verify().
+    if fips.fips_enabled(conf):
+        snmp['fips'] = {}
+        auth_default = fips.default('service snmp v3 user auth type')
+        priv_default = fips.default('service snmp v3 user privacy type')
+        for dict_key, cli_name in (('user', 'user'), ('trap_target', 'trap-target')):
+            section = dict_search(f'v3.{dict_key}', snmp) or {}
+            for name, cfg in section.items():
+                if auth_default and 'auth' in cfg and \
+                        not conf.exists(base + ['v3', cli_name, name, 'auth', 'type']):
+                    cfg['auth']['type'] = auth_default[0]
+                if priv_default and 'privacy' in cfg and \
+                        not conf.exists(base + ['v3', cli_name, name, 'privacy', 'type']):
+                    cfg['privacy']['type'] = priv_default[0]
+
     return snmp
 
 
@@ -177,6 +197,19 @@ def verify(snmp):
     # bail out early if SNMP v3 is not configured
     if 'v3' not in snmp:
         return None
+
+    # FIPS 140-3: reject explicitly-set non-approved SNMPv3 auth/privacy
+    # protocols (MD5/SHA-1 auth, DES privacy) for every v3 user and trap-target.
+    if 'fips' in snmp:
+        messages = []
+        for dict_key in ('user', 'trap_target'):
+            for name, cfg in snmp['v3'].get(dict_key, {}).items():
+                messages += fips.reject_unapproved(
+                    cfg.get('auth', {}), {'type': 'service snmp v3 user auth type'})
+                messages += fips.reject_unapproved(
+                    cfg.get('privacy', {}), {'type': 'service snmp v3 user privacy type'})
+        if messages:
+            raise ConfigError('\n'.join(messages))
 
     if 'user' in snmp['v3']:
         if 'engineid' not in snmp['v3']:

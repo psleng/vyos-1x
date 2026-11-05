@@ -1,8 +1,11 @@
 # igOS FIPS 140-3 — Design Sketch
 
 Status: **implementation in progress** (Phases 0, 1, and the vyos-1x half of
-Phase 4 landed; enforcement started — helper/policy + SSH + IPsec-verify landed,
-remaining enforcement pending — see "Implementation status" below).
+Phase 4 landed; enforcement largely landed — helper/policy + SSH + IPsec + HTTPS +
+NTP/NTS + WireGuard/PPTP + RADIUS/TACACS+ + OpenVPN-TPM + Wireless + SNMPv3 +
+haproxy + password-hash KDF; remaining = TPM operator rejects + the traced audit
+rows + on-target validation + the vyos-build kernel half — see "Implementation
+status" below).
 Scope: run a **single igOS image** that can be placed into a **FIPS 140-3 mode**
 by configuration (`set system option fips`, applied on **reboot**), so that the
 system performs its cryptography using a **FIPS 140-3 validated module** (the
@@ -19,7 +22,37 @@ kernel.
 
 ---
 
-## Implementation status (checkpoint: 2026-11-04 — SSH/OpenVPN/IPsec + rejects landed & on-target validated)
+## Implementation status (checkpoint: 2026-11-05 — enforcement wave 2 (Wireless/SNMPv3/haproxy) + password-hash KDF + DSA removal landed; audit rows traced)
+
+**Checkpoint 2026-11-05 (session summary):**
+- **Landed this session** (code complete; `py_compile` + `ruff` + `test_fips_policy`
+  12/12 clean; on-target validation pending a new image build):
+  - **Wireless / SNMPv3 / haproxy** — the audit "needs-work ✔verified" trio.
+    Wireless: whole-feature reject of WEP + WPA-Enterprise RADIUS, reject TKIP
+    (`cipher`/`group-cipher`) and WPA1 (`mode wpa`/`wpa+wpa2`), approved `wpa2`
+    default. SNMPv3: reject `md5`/`sha` auth and `des` privacy on every v3
+    user/trap-target, approved `sha256`/`aes` defaults. haproxy: reject CHACHA20
+    `ssl-bind-ciphers`, AES-GCM approved default. (policy + conf-mode + grammar-
+    drift test all updated.)
+  - **Password-hash KDF (§8.5)** — `system_login.py` pins SHA-512-crypt under
+    FIPS (plaintext + NVMEM sticker paths), rejects a non-approved operator
+    `encrypted-password` (`$5$`/`$6$` only), and `initialsetup.make_password_hash()`
+    emits SHA-512-crypt under FIPS (yescrypt kept for non-FIPS).
+  - **Greenfield DSA removal** (adjacent cleanup — OpenSSH 10.4 dropped DSA):
+    host keys (service_ssh + grammar + MOTD), user public keys (system_login +
+    `utils/auth.py` + grammar + MOTD), and the PKI op-mode host-key import
+    (`op_mode/pki.py` + op-mode def). ed25519 kept (alive in non-FIPS, already
+    rejected under FIPS).
+  - **Audit rows traced** (2026-11-05) — findings table below; two quick-wins
+    (PKI key-gen floor, TLS-version floor) + two decisions (PPP auth, VRRP auth)
+    + one newly-found surface (routing-protocol MD5) identified.
+- **Remaining vyos-1x code:** TPM operator rejects (`ssh-tpm-agent` + TPM-PKI,
+  §6.1); the traced audit-row fixes; then drop the "incomplete" warning.
+- **Validation pending (needs a booted build):** reboot-survives the toggle,
+  fail-closed `fips.so` removal, end-to-end IKE SA against a live peer.
+- **Owned elsewhere:** Phase 4 kernel build (`CONFIG_CRYPTO_FIPS` + HMAC
+  initramfs — vyos-build); RadSec (§8.8); claim wording (§8.2); am64x OE + TPM
+  cert (§8.6/§8.7).
 
 **Scope decisions locked in:** validated-module claim = **OpenSSL provider only**
 (#4985); kernel **FIPS _mode_** (`fips=1`) is additionally enabled as approved-mode
@@ -212,11 +245,15 @@ file-level test deploys.
   customizations our template would overwrite (§7.1 note). **(Confirmed stock.)**
 
 **NEXT UP:**
-1. **Wireless + SNMPv3 + haproxy** — the remaining ✔verified needs-work items
-   from the audit below (reject WEP/TKIP/WPA1; reject SNMP `md5`/`des`; haproxy
-   approved cipher-suite). HTTPS cipher control + NTP/NTS reject **landed**.
+1. **Wireless + SNMPv3 + haproxy** — **LANDED** (2026-11-05): wireless rejects
+   WEP + WPA-Enterprise RADIUS (whole-feature) and TKIP / WPA1 (`mode wpa`,
+   `wpa+wpa2`), emitting the approved `wpa2` default; SNMPv3 rejects `md5`/`sha`
+   auth and `des` privacy, emitting `sha256`/`aes` defaults; haproxy rejects
+   non-approved (CHACHA20) `ssl-bind-ciphers`, emitting the AES-GCM default.
+   HTTPS cipher control + NTP/NTS reject **landed**.
 2. Then: TPM operator rejects for `ssh-tpm-agent` + TPM-PKI (§6.1; OpenVPN TPM
-   reject already landed), password-hash KDF (§8.5), and the ⚠audit rows below.
+   reject already landed; password-hash KDF §8.5 **landed**), and the ⚠audit
+   rows below.
    Drop the "incomplete" warning once enforcement lands.
 
 **Smoketest-level validation (needs a live IPsec peer):** end-to-end IKE SA
@@ -225,10 +262,10 @@ approved connection with only the openssl plugin, but not a completed handshake
 against a second endpoint).
 
 **Decision-gated / owned elsewhere:** p4-kernel-build (`CONFIG_CRYPTO_FIPS` +
-HMAC initramfs — vyos-build, user owns); RadSec scope (§8.8); password KDF (§8.5);
-claim wording (§8.2); am64x OE + TPM certification (§8.6/§8.7).
+HMAC initramfs — vyos-build, user owns); RadSec scope (§8.8); claim wording
+(§8.2); am64x OE + TPM certification (§8.6/§8.7).
 
-### Remaining enforcement surface — crypto-consumer audit (2026-11-04)
+### Remaining enforcement surface — crypto-consumer audit (2026-11-04; rows traced 2026-11-05)
 
 **Audit coverage — honest scope:** this is a **breadth-complete, depth-partial**
 audit. I grepped *all* of `interface-definitions/` for crypto-bearing config
@@ -243,20 +280,40 @@ traced yet. Treat ⚠audit as "must be looked at", not "confirmed non-compliant"
 | Feature | CLI / file | Non-approved exposure | Fix pattern |
 |---|---|---|---|
 | **HTTPS / GUI** | [`service https`](../interface-definitions/service_https.xml.in), [nginx.default.j2](../data/templates/https/nginx.default.j2) | hard-coded `ssl_ciphers` offered SHA1-CBC + DSS suites; no operator cipher control | **LANDED** — new `cipher-suite` (TLS 1.2) + `cipher-suite-tls13` leaves (operator-selectable, parity with SSH); under FIPS, `verify()` rejects non-approved and the approved default is emitted (no SHA1/DSS/chacha); 1.0/1.1 stay blocked. On-target: TLS negotiates TLSv1.3/AES-256-GCM, GUI 200 |
-| **Wireless / WiFi** | [`interfaces wireless`](../interface-definitions/interfaces_wireless.xml.in) (hostapd) | `security wep`, cipher `TKIP`, `mode wpa` (WPA1/TKIP) | reject WEP/TKIP/WPA1; allow WPA2/WPA3 + CCMP/GCMP |
-| **SNMPv3** | [`service snmp`](../interface-definitions/service_snmp.xml.in) (`authentication-type.xml.i`, `privacy-type.xml.i`) | auth `md5` (and `sha`=SHA1); privacy `des` | reject `md5`/`des` (and `sha`); require SHA-2 + AES |
-| **haproxy** (if used) | [`load-balancing haproxy`](../interface-definitions/load-balancing_haproxy.xml.in) | `ssl-cipher-suite` list includes `*-chacha20-poly1305` | reject/approved-default cipher suite under FIPS |
+| **Wireless / WiFi** | [`interfaces wireless`](../interface-definitions/interfaces_wireless.xml.in) (hostapd) | `security wep`, cipher `TKIP`, `mode wpa` (WPA1/TKIP) | **LANDED** — `verify()` whole-feature rejects WEP (and WPA-Enterprise RADIUS); rejects explicit TKIP (`cipher`/`group-cipher`) and WPA1 (`mode wpa`/`wpa+wpa2`); emits approved `wpa2` default when `mode` unset (grammar default is `wpa+wpa2`). Allows WPA2/WPA3 + CCMP/GCMP |
+| **SNMPv3** | [`service snmp`](../interface-definitions/service_snmp.xml.in) (`authentication-type.xml.i`, `privacy-type.xml.i`) | auth `md5` (and `sha`=SHA1); privacy `des` | **LANDED** — `verify()` rejects explicit `md5`/`sha` auth and `des` privacy for every v3 user + trap-target; emits approved `sha256`/`aes` defaults (grammar defaults `md5`/`des`) so a configured user/trap is approved by default. Requires SHA-2 + AES |
+| **haproxy** (if used) | [`load-balancing haproxy`](../interface-definitions/load-balancing_haproxy.xml.in) | `ssl-bind-ciphers` list includes `*-chacha20-poly1305` | **LANDED** — `verify()` rejects explicit non-approved (CHACHA20) `global-parameters ssl-bind-ciphers`; emits the AES-GCM approved default when unset (grammar default includes chacha20) |
 | **NTP / NTS** | [`service ntp`](../interface-definitions/service_ntp.xml.in) (`server <x> nts`), chrony 4.3 | NTS mandates `AEAD_AES_SIV_CMAC_256`; **AES-SIV is only in OpenSSL's `default` provider, absent from `fips`+`base`** (verified on-target) — so NTS fails under FIPS, and AES-SIV is not a NIST-approved mode anyway (NTS-KE TLS is fine; the AEAD is the blocker, no interoperable approved substitute) | reject `service ntp server <x> nts` under FIPS — **LANDED** (plain NTP has no crypto and keeps the clock) |
 | **WireGuard, PPTP** | [`interfaces wireguard`](../interface-definitions/interfaces_wireguard.xml.in), [`vpn pptp`](../interface-definitions/vpn_pptp.xml.in) | whole feature (Curve25519/ChaCha20; MPPE/RC4) | whole-feature `verify()` reject — **LANDED** |
 
 **Confirmed already approved (no action):**
 - **MACsec** ([`interfaces macsec`](../interface-definitions/interfaces_macsec.xml.in)): cipher `gcm-aes-128`/`gcm-aes-256` only — AES-GCM, approved. (CAK/CKN key strength is an operational concern, not an algorithm one.)
 
-**⚠audit — touches crypto, not yet individually traced:**
-- **TLS servers/clients that are OpenSSL-backed** (provider likely auto-enforces, but audit cipher/version config + ship approved defaults): `vpn openconnect` (ocserv), `vpn sstp` / `interfaces sstpc`, `service pppoe-server`/`service ipoe-server` (accel-ppp, incl. MSCHAP/MPPE), `system syslog` (TLS), `system email` (SMTP TLS), `container` (registry TLS), `service monitoring zabbix-agent` (PSK/TLS), `service salt-minion`.
-- **PKI** ([`pki`](../interface-definitions/pki.xml.in)): enforce RSA ≥ 2048 / approved ECDSA curves; reject weak/legacy keys and MD5/SHA1 digests.
-- **VRRP auth** ([`high-availability`](../interface-definitions/high-availability.xml.in)): `plaintext-password`/`ah` — weak, but plaintext isn't a crypto-algorithm claim; classify intent.
-- **Password hashing** (`yescrypt` default — §8.5), **HTTP API `hashlib`/`ssl`** call-site MD5 audit.
+**⚠audit — traced 2026-11-05 (findings):**
+
+| Row | Finding | Verdict | Action |
+|---|---|---|---|
+| **PKI cert signing digest** | [`vyos/pki.py`](../python/vyos/pki.py) signs with **SHA-256** (`create_certificate`/`_request`); fingerprints sha256/384/512 — no MD5/SHA1 | ✅ already approved | none |
+| **PKI key generation** | op-mode [`generate pki`](../src/op_mode/pki.py) `size_valid = [512, 1024, 2048, 4096]` allows **512/1024-bit RSA** (config `pki` RSA list is already 2048/3072/4096) | ❌ non-approved exposure | **quick win** — drop 512/1024 (greenfield) or floor ≥2048 under FIPS; DH default 2048 ✓ |
+| **accel-ppp PPP auth** (pppoe/ipoe/l2tp) | [`auth-protocols.xml.i`](../interface-definitions/include/accel-ppp/auth-protocols.xml.i) = `pap chap mschap mschap-v2`, **all enabled by default** (plaintext / MD5 / MD4+DES) | ❌ non-approved; **decision** | PPP auth can't be FIPS-approved — reject the PPP servers (or chap/mschap) under FIPS, like RADIUS |
+| **VRRP auth** ([`high-availability`](../interface-definitions/high-availability.xml.in)) | `authentication type` = `plaintext-password \| ah` (AH = HMAC-MD5) | ⚠ **decision** | both non-approved; VRRPv3 drops auth anyway → reject `authentication` under FIPS, or declare out-of-scope |
+| **TLS version floor** | shared [`tls-version-min.xml.i`](../interface-definitions/include/tls-version-min.xml.i) allows **1.0/1.1**/1.2/1.3 (used by openconnect, …) | ⚠ low-risk | **quick win** — OpenSSL provider blocks <1.2 at runtime; floor/reject explicit 1.0/1.1 under FIPS on the include |
+| **TLS consumers** (sstp, sstpc, syslog, email, container, zabbix, salt) | none expose a cipher-list CLI leaf (unlike SSH/HTTPS/haproxy) | ⚠ **backend-dependent** | OpenSSL-backed → fips provider auto-rejects at runtime; **ocserv (openconnect) is historically GnuTLS, NOT the OpenSSL fips module** — needs per-daemon confirmation |
+| **HTTP API** | **no** md5/hashlib weak-hash in the API; [`rest/routers.py`](../src/services/api/rest/routers.py) has `verify=False` (×5) | ✅ algorithms clean; ⚠ TLS-trust | the MD5 audit is **clean**; `verify=False` is cert-validation (not an algorithm claim) — track separately |
+| **Routing-protocol auth (NEW — found 2026-11-05)** | OSPF / IS-IS / RIP / BGP use **MD5 / plaintext** auth keys (`include/ospf/authentication.xml.i`, etc.) | ❌ non-approved; newly found | add to backlog — reject MD5/plaintext routing auth under FIPS (or classify intent) |
+
+Remaining-ordering: **quick wins** = PKI key-gen floor + TLS-version floor;
+**decisions needed** = PPP auth + VRRP auth (reject-under-FIPS vs. out-of-scope,
+like RADIUS); **deeper** = per-daemon TLS-backend verification (ocserv/GnuTLS)
+and imported-cert strength enforcement in config `pki`.
+- **Password hashing** — **LANDED** (2026-11-05): `system_login.py` pins the
+  approved SHA-512-crypt KDF under FIPS for both the plaintext-password and the
+  NVMEM sticker-password paths, rejects an operator-supplied `encrypted-password`
+  that uses a non-approved KDF (`$y$` yescrypt / `$7$` scrypt / `$2*` bcrypt /
+  `$1$` MD5 / DES — only `$5$`/`$6$` SHA-2-crypt accepted), and
+  `initialsetup.make_password_hash()` emits SHA-512-crypt when the seed config
+  enables FIPS (yescrypt retained for non-FIPS). (The **HTTP API `hashlib`/`ssl`**
+  MD5 audit is now **traced clean** — see the findings table below.)
 
 **Whole-feature rejects — no approvable configuration (LANDED 2026-11-04):**
 RADIUS and TACACS+ are treated like WireGuard/PPTP: they **cannot be used under
@@ -1269,8 +1326,16 @@ ordering) is recorded in §5.6.** Revisit if GUI UX or a cert requirement makes
 invisible-not-just-rejected options worth the build cost.
 
 ### 8.5 Password hashing
-`yescrypt` is not FIPS-approved; decide the FIPS-mode local-auth KDF (e.g.
-SHA-512-crypt / PBKDF2) and how migration/interop works when toggling.
+**Resolved (LANDED 2026-11-05):** the FIPS-mode local-auth KDF is **SHA-512-crypt**
+(`$6$`). There is no operator-selectable hash method, so enforcement is internal:
+`src/conf_mode/system_login.py` pins `sha512_crypt` under FIPS for both the
+plaintext-password and the NVMEM sticker-password hashing paths; an
+operator-supplied `encrypted-password` is rejected unless it is SHA-2-crypt
+(`$5$`/`$6$`); and `python/vyos/initialsetup.py` (installer/first-boot provisioning)
+emits SHA-512-crypt when the seed config has `system option fips`. Non-FIPS keeps
+the stronger (but unapproved) `yescrypt`. Migration/interop: toggling FIPS does
+not rewrite existing shadow hashes; a password is re-hashed with the approved KDF
+on its next change (and the sticker/first-login-change flow re-derives it).
 
 ### 8.6 Embedded target (am64x)
 Confirm the validated provider's operational environment covers aarch64/the SoC,

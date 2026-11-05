@@ -98,6 +98,10 @@ label = "RADIUS (wireless WPA-Enterprise)"
 path = ["interfaces", "wireless", "*", "security", "wpa", "radius"]
 
 [[reject_under_fips]]
+label = "WEP (wireless)"
+path = ["interfaces", "wireless", "*", "security", "wep"]
+
+[[reject_under_fips]]
 label = "NTS (Network Time Security)"
 path = ["service", "ntp", "server", "*", "nts"]
 
@@ -252,3 +256,54 @@ approved = [
 default = ["TLS_AES_256_GCM_SHA384", "TLS_AES_128_GCM_SHA256"]
 
 
+# ---------------------------------------------------------------------------
+# Wireless / WiFi (hostapd). WEP and WPA-Enterprise RADIUS are whole-feature
+# rejects (reject_under_fips, above). Here the WPA pairwise/group cipher and the
+# WPA mode are restricted: AES-based CCMP/GCMP only (no TKIP), and WPA2/WPA3 only
+# (no WPA1, no wpa+wpa2 mix). The grammar default is `wpa+wpa2`, which enables
+# WPA1/TKIP, so the approved `wpa2` default is emitted when the operator leaves
+# `mode` unset.
+# ---------------------------------------------------------------------------
+[leaf."interfaces wireless security wpa cipher"]
+approved = ["GCMP-256", "GCMP", "CCMP-256", "CCMP"]
+
+[leaf."interfaces wireless security wpa group-cipher"]
+approved = ["GCMP-256", "GCMP", "CCMP-256", "CCMP"]
+
+[leaf."interfaces wireless security wpa mode"]
+approved = ["wpa2", "wpa3"]
+default = ["wpa2"]
+
+# ---------------------------------------------------------------------------
+# SNMPv3 (net-snmp). Authentication protocol must be SHA-2 (reject MD5 and the
+# SHA-1 `sha`); privacy protocol must be AES (reject DES). The grammar defaults
+# are `md5`/`des`, both non-approved, so approved defaults are emitted when the
+# operator configures a v3 user/trap but leaves the protocol unset. The privacy
+# default is AES-128 so it never out-strengths an explicitly chosen approved
+# auth protocol (RFC 3414 localizes the privacy key with the auth hash).
+# ---------------------------------------------------------------------------
+[leaf."service snmp v3 user auth type"]
+approved = ["sha224", "sha256", "sha384", "sha512"]
+default = ["sha256"]
+
+[leaf."service snmp v3 user privacy type"]
+approved = ["aes", "aes192", "aes256"]
+default = ["aes"]
+
+# ---------------------------------------------------------------------------
+# haproxy (OpenSSL-backed). The TLS bind cipher list must not offer CHACHA20;
+# approved = the AES-GCM suites only. The grammar default includes the two
+# chacha20-poly1305 suites, so the approved default is emitted when the operator
+# leaves `ssl-bind-ciphers` unset.
+# ---------------------------------------------------------------------------
+[leaf."load-balancing haproxy global-parameters ssl-bind-ciphers"]
+approved = [
+    "ecdhe-ecdsa-aes128-gcm-sha256", "ecdhe-rsa-aes128-gcm-sha256",
+    "ecdhe-ecdsa-aes256-gcm-sha384", "ecdhe-rsa-aes256-gcm-sha384",
+    "dhe-rsa-aes128-gcm-sha256", "dhe-rsa-aes256-gcm-sha384",
+]
+default = [
+    "ecdhe-ecdsa-aes256-gcm-sha384", "ecdhe-rsa-aes256-gcm-sha384",
+    "ecdhe-ecdsa-aes128-gcm-sha256", "ecdhe-rsa-aes128-gcm-sha256",
+    "dhe-rsa-aes256-gcm-sha384", "dhe-rsa-aes128-gcm-sha256",
+]
