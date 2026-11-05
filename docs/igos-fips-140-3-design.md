@@ -1,10 +1,11 @@
 # igOS FIPS 140-3 — Design Sketch
 
-Status: **implementation in progress** (Phases 0, 1, and the vyos-1x half of
-Phase 4 landed; enforcement largely landed — helper/policy + SSH + IPsec + HTTPS +
-NTP/NTS + WireGuard/PPTP + RADIUS/TACACS+ + OpenVPN-TPM + Wireless + SNMPv3 +
-haproxy + password-hash KDF; remaining = TPM operator rejects + the traced audit
-rows + on-target validation + the vyos-build kernel half — see "Implementation
+Status: **implementation in progress** (Phases 0, 1, the vyos-1x half of Phase 4,
+and the Phase 4 **kernel `CONFIG_CRYPTO_FIPS` defconfig** landed; enforcement
+largely landed — helper/policy + SSH + IPsec + HTTPS + NTP/NTS + WireGuard/PPTP +
+RADIUS/TACACS+ + OpenVPN-TPM + Wireless + SNMPv3 + haproxy + password-hash KDF;
+remaining = TPM operator rejects + the traced audit rows + on-target validation +
+the vyos-build kernel **integrity chain** (HMAC initramfs) — see "Implementation
 status" below).
 Scope: run a **single igOS image** that can be placed into a **FIPS 140-3 mode**
 by configuration (`set system option fips`, applied on **reboot**), so that the
@@ -46,12 +47,25 @@ kernel.
   - **Audit rows traced** (2026-11-05) — findings table below; two quick-wins
     (PKI key-gen floor, TLS-version floor) + two decisions (PPP auth, VRRP auth)
     + one newly-found surface (routing-protocol MD5) identified.
+  - **Phase 4 kernel (vyos-build) — `fips=1` now recognized.** Enabled
+    `CONFIG_CRYPTO_FIPS=y` (+ its deps `CONFIG_CRYPTO_SELFTESTS=y` and
+    `CONFIG_MODULE_SIG=y`, **without** `MODULE_SIG_FORCE` so unsigned out-of-tree
+    drivers still load; SHA-512 sig hash) in the **perle-igos arm64 defconfig**
+    (`vyos-build/scripts/package-build/linux-kernel/platform/perle-igos/...`).
+    Verified via `make ARCH=arm64 vyos_defconfig` on the 6.18.38 tree — the
+    symbol survives dependency resolution. After a kernel rebuild, `fips=1` is
+    recognized (no "Unknown parameter"), boot KAT self-tests run, and
+    `fips_enabled=1` → `show system fips` Kernel FIPS flips to **yes**. The
+    larger integrity chain (kernel/module `.hmac` + integrity-checked initramfs)
+    is still pending.
 - **Remaining vyos-1x code:** TPM operator rejects (`ssh-tpm-agent` + TPM-PKI,
   §6.1); the traced audit-row fixes; then drop the "incomplete" warning.
 - **Validation pending (needs a booted build):** reboot-survives the toggle,
-  fail-closed `fips.so` removal, end-to-end IKE SA against a live peer.
-- **Owned elsewhere:** Phase 4 kernel build (`CONFIG_CRYPTO_FIPS` + HMAC
-  initramfs — vyos-build); RadSec (§8.8); claim wording (§8.2); am64x OE + TPM
+  fail-closed `fips.so` removal, end-to-end IKE SA against a live peer; **kernel
+  `fips=1` recognized + `fips_enabled=1`** on the next kernel build.
+- **Owned elsewhere:** Phase 4 kernel **integrity chain** (kernel/module `.hmac`
+  + HMAC initramfs — vyos-build; the `CONFIG_CRYPTO_FIPS` defconfig half is now
+  done); RadSec (§8.8); claim wording (§8.2); am64x OE + TPM
   cert (§8.6/§8.7).
 
 **Scope decisions locked in:** validated-module claim = **OpenSSL provider only**
@@ -261,9 +275,11 @@ establishment under FIPS (the on-target check here proved charon loads the
 approved connection with only the openssl plugin, but not a completed handshake
 against a second endpoint).
 
-**Decision-gated / owned elsewhere:** p4-kernel-build (`CONFIG_CRYPTO_FIPS` +
-HMAC initramfs — vyos-build, user owns); RadSec scope (§8.8); claim wording
-(§8.2); am64x OE + TPM certification (§8.6/§8.7).
+**Decision-gated / owned elsewhere:** p4-kernel-build — `CONFIG_CRYPTO_FIPS=y`
+(+ `CRYPTO_SELFTESTS`/`MODULE_SIG`) **now enabled in the perle-igos defconfig**
+(2026-11-05; needs a kernel rebuild), **HMAC integrity initramfs still pending** —
+vyos-build, user owns; RadSec scope (§8.8); claim wording (§8.2); am64x OE + TPM
+certification (§8.6/§8.7).
 
 ### Remaining enforcement surface — crypto-consumer audit (2026-11-04; rows traced 2026-11-05)
 
@@ -343,7 +359,7 @@ daemons not surfaced through the VyOS CLI.
 | **T9040 — build FIPS-provider OpenSSL** | `vyos/vyos-build#1233` | **merged** 2026-07-03 | Patches OpenSSL build with `enable-fips` (`0001-Enable-FIPS-module.patch`) so `fips.so` is produced. Built against the Debian **3.0.20** base. |
 | **T8508 — build OpenSSL 3.1.2** (the validated version) | `vyos/vyos-build#1161` | **not merged** (closed) | Attempted to ship the specific FIPS-**validated** OpenSSL 3.1.2. Superseded by the enable-fips-on-base approach. |
 | **T861 — secure boot** | `vyos/vyos-build#1223` | merged | UEFI Secure Boot / shim — relevant to module/boot integrity (§6). |
-| Kernel FIPS (`CONFIG_CRYPTO_FIPS`, `fips=1`) | `vyos/vyos-build` kernel config | **absent** | No kernel crypto FIPS mode is wired up. |
+| Kernel FIPS (`CONFIG_CRYPTO_FIPS`, `fips=1`) | `vyos/vyos-build` kernel config | **defconfig enabled (2026-11-05)** | `CONFIG_CRYPTO_FIPS=y` (+ `CRYPTO_SELFTESTS`/`MODULE_SIG`) set in the perle-igos arm64 defconfig; `fips=1` recognized + self-tests after rebuild. HMAC integrity initramfs still pending. |
 
 Key takeaways:
 
@@ -1440,9 +1456,13 @@ in/out for the first release.*
     no `enable-fips`, no `fips.so`).
   - **`radsecproxy`** (conditional, §4.1/§8.8) — new package if RADIUS is required
     under FIPS (RadSec/TLS wrapper for the UDP RADIUS clients).
-  - **Kernel config + initramfs (Phase 4, §8.3)** — `CONFIG_CRYPTO_FIPS=y`,
-    integrity-checked initramfs (kernel + crypto-module `.hmac`), approved
-    DRBG/entropy; **approved-mode only, not a validated kernel module**.
+  - **Kernel config + initramfs (Phase 4, §8.3)** — `CONFIG_CRYPTO_FIPS=y`
+    **DONE (2026-11-05):** enabled in the perle-igos arm64 defconfig with its
+    deps (`CRYPTO_SELFTESTS=y`, `MODULE_SIG=y` without `MODULE_SIG_FORCE`,
+    SHA-512 module-sig hash); kconfig-resolution verified on the 6.18.38 tree.
+    **Still pending:** integrity-checked initramfs (kernel + crypto-module
+    `.hmac`), approved DRBG/entropy review; **approved-mode only, not a validated
+    kernel module**.
   - **Secure Boot (T861) tie-in** — optional, for the integrity chain backing
     kernel FIPS mode.
 
