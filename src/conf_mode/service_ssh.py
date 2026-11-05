@@ -20,7 +20,6 @@ from sys import exit
 from syslog import syslog
 from syslog import LOG_INFO
 
-from vyos.base import DeprecationWarning
 from vyos.config import Config
 from vyos.configdep import set_dependents
 from vyos.configdep import call_dependents
