@@ -860,7 +860,7 @@ back to an older valid cache. No catalog is bundled as a fallback in the image.
 
 | Router path | Purpose |
 |---|---|
-| `/usr/share/vyos/igos-firmware-keys/` | Public root CA certificates installed by the ISO builder |
+| `/usr/share/vyos/keys/igos-firmware-root-*.pem` | Public root CA certificates installed by the ISO builder |
 | `/var/cache/vyos/modem-firmware.json` | Authenticated catalog cache envelope, including signature and CRL |
 | `/config/firmware-signing/revocations.json` | Persistent authenticated CRL rollback state |
 | `/var/cache/vyos/wwan-firmware/` | Optional retained archives and `.sha256` bookkeeping |

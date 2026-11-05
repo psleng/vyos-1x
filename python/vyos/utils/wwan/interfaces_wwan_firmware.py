@@ -41,7 +41,7 @@ DEFAULT_CACHE_BYTES = 512 * 1024**2
 STANDALONE_METADATA_URL = 'https://local.invalid/archive'
 
 
-TRUST_DIR = Path('/usr/share/vyos/igos-firmware-keys')
+TRUST_DIR = Path('/usr/share/vyos/keys')
 REVOCATION_STATE = Path('/config/firmware-signing/revocations.json')
 MAX_METADATA = 4 * 1024 * 1024
 MAX_SIGNATURE = 128 * 1024
@@ -86,7 +86,9 @@ def _certificates(data):
 
 def load_roots(trust_dir=TRUST_DIR):
     roots = []
-    for path in sorted(Path(trust_dir).glob('*.pem')):
+    # The shared image key directory contains other trust domains.
+    pattern = 'igos-firmware-root-*.pem' if Path(trust_dir) == TRUST_DIR else '*.pem'
+    for path in sorted(Path(trust_dir).glob(pattern)):
         data = path.read_bytes()
         if b'PRIVATE KEY' in data:
             raise FirmwareTrustError('Private keys are forbidden in firmware trust directory')
