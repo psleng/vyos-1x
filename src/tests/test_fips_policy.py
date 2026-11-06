@@ -82,6 +82,8 @@ GRAMMAR_SOURCES = {
     'service dhcp-server dynamic-dns-update tsig-key algorithm': (
         'interface-definitions/include/dhcp/dhcp-server-common-config.xml.i',
         'algorithm'),
+    'tls-version-min': (
+        'interface-definitions/include/tls-version-min.xml.i', 'tls-version-min'),
 }
 
 

@@ -313,6 +313,9 @@ def verify(openvpn):
             'data_ciphers_fallback': 'interfaces openvpn encryption data-ciphers-fallback',
         })
         messages += fips.reject_unapproved(openvpn, {'hash': 'interfaces openvpn hash'})
+        if 'tls' in openvpn:
+            messages += fips.reject_unapproved(
+                openvpn['tls'], {'tls_version_min': 'tls-version-min'})
         if messages:
             raise ConfigError('\n'.join(messages))
         if 'tls' in openvpn and tpm.tpm_enabled():

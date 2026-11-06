@@ -73,8 +73,10 @@ def get_config(config=None):
     )
 
     # FIPS 140-3: classic RADIUS (MD5) has no approved form.
-    if fips.fips_enabled(conf) and conf.exists(base + ['authentication', 'radius']):
-        ocserv['fips_reject_radius'] = {}
+    if fips.fips_enabled(conf):
+        ocserv['fips'] = {}
+        if conf.exists(base + ['authentication', 'radius']):
+            ocserv['fips_reject_radius'] = {}
 
     return ocserv
 
@@ -85,6 +87,12 @@ def verify(ocserv):
 
     if 'fips_reject_radius' in ocserv:
         fips.reject_feature('RADIUS (OpenConnect)')
+    # FIPS 140-3: ocserv is GnuTLS (no provider backstop), so the config floor is
+    # the only enforcement -- reject an explicit TLS 1.0/1.1 minimum.
+    if 'fips' in ocserv:
+        messages = fips.reject_unapproved(ocserv, {'tls_version_min': 'tls-version-min'})
+        if messages:
+            raise ConfigError('\n'.join(messages))
     # Check if listen-ports not binded other services
     # It can be only listen by 'ocserv-main'
     for proto, port in ocserv.get('listen_ports').items():

@@ -357,3 +357,14 @@ default = ["sha256"]
 # ---------------------------------------------------------------------------
 [leaf."service dhcp-server dynamic-dns-update tsig-key algorithm"]
 approved = ["sha1", "sha224", "sha256", "sha384", "sha512"]
+
+# ---------------------------------------------------------------------------
+# TLS minimum version -- shared include tls-version-min.xml.i (openvpn tls,
+# openconnect). Keyed by the include name since the approved floor is identical
+# for every consumer. TLS 1.0/1.1 are below the FIPS floor. For OpenSSL-backed
+# OpenVPN the provider blocks <1.2 at runtime anyway; openconnect is GnuTLS
+# (no provider backstop) but its grammar already defaults to 1.2 -- so this is a
+# reject-only gate on an explicit 1.0/1.1.
+# ---------------------------------------------------------------------------
+[leaf."tls-version-min"]
+approved = ["1.2", "1.3"]
