@@ -135,9 +135,11 @@ def get_config(config=None):
     if any(conditions):
         pppoe.update({'restart_required': {}})
     pppoe['server_type'] = 'pppoe'
-    # FIPS 140-3: classic RADIUS (MD5) has no approved form.
-    if fips.fips_enabled(conf) and conf.exists(base + ['authentication', 'radius']):
-        pppoe['fips_reject_radius'] = {}
+    # FIPS 140-3: PPP subscriber auth (PAP/CHAP/MS-CHAP/MS-CHAPv2) has no
+    # approved protocol and there is no EAP option, so the whole server is
+    # non-approvable (this also covers RADIUS-under-pppoe).
+    if fips.fips_enabled(conf):
+        pppoe['fips_reject_ppp'] = {}
     return pppoe
 
 def verify_pado_delay(pppoe):
@@ -172,8 +174,11 @@ def verify(pppoe):
     if 'remove' in pppoe:
         return None
 
-    if 'fips_reject_radius' in pppoe:
-        fips.reject_feature('RADIUS (PPPoE server)')
+    if 'fips_reject_ppp' in pppoe:
+        fips.reject_feature(
+            'PPPoE server',
+            'PPP subscriber authentication (PAP/CHAP/MS-CHAP/MS-CHAPv2) has no '
+            'FIPS-approved protocol. Remove it, or disable FIPS.')
 
     verify_accel_ppp_authentication(pppoe)
     verify_accel_ppp_ip_pool(pppoe)

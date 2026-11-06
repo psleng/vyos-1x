@@ -70,20 +70,23 @@ label = "TACACS+ (system login)"
 path = ["system", "login", "tacacs"]
 
 [[reject_under_fips]]
-label = "RADIUS (PPPoE server)"
-path = ["service", "pppoe-server", "authentication", "radius"]
+# PPP subscriber auth (PAP/CHAP/MS-CHAP/MS-CHAPv2) has no FIPS-approved protocol
+# and there is no EAP option, so the whole server is non-approvable (this also
+# subsumes the RADIUS-under-pppoe case).
+label = "PPPoE server (no FIPS-approved PPP authentication)"
+path = ["service", "pppoe-server"]
 
 [[reject_under_fips]]
 label = "RADIUS (IPoE server)"
 path = ["service", "ipoe-server", "authentication", "radius"]
 
 [[reject_under_fips]]
-label = "RADIUS (L2TP remote-access)"
-path = ["vpn", "l2tp", "remote-access", "authentication", "radius"]
+label = "L2TP remote-access (no FIPS-approved PPP authentication)"
+path = ["vpn", "l2tp", "remote-access"]
 
 [[reject_under_fips]]
-label = "RADIUS (SSTP)"
-path = ["vpn", "sstp", "authentication", "radius"]
+label = "SSTP (no FIPS-approved PPP authentication)"
+path = ["vpn", "sstp"]
 
 [[reject_under_fips]]
 label = "RADIUS (OpenConnect)"
@@ -344,3 +347,13 @@ default = ["ecdh-ecdsa"]
 # md5 disallowed; sha1 approved-as-HMAC but discouraged -> require SHA-2.
 approved = ["sha256", "sha384"]
 default = ["sha256"]
+
+# ---------------------------------------------------------------------------
+# DHCP dynamic-DNS-update TSIG key (kea-dhcp-ddns, OpenSSL-backed on target:
+# libkea-cryptolink -> libcrypto.so.3, so the FIPS provider is a runtime
+# backstop). HMAC-MD5 is disallowed; HMAC-SHA1 remains FIPS-approved, SHA-2
+# preferred. The `algorithm` leaf is mandatory (no grammar default), so this is
+# a reject-only gate with no default to emit.
+# ---------------------------------------------------------------------------
+[leaf."service dhcp-server dynamic-dns-update tsig-key algorithm"]
+approved = ["sha1", "sha224", "sha256", "sha384", "sha512"]

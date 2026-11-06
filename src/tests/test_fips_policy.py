@@ -79,6 +79,9 @@ GRAMMAR_SOURCES = {
         'interface-definitions/include/serial/global/tls-global.xml.i', 'key-exchange'),
     'service serial global-parameters tls template cipher-options hmac': (
         'interface-definitions/include/serial/global/tls-global.xml.i', 'hmac'),
+    'service dhcp-server dynamic-dns-update tsig-key algorithm': (
+        'interface-definitions/include/dhcp/dhcp-server-common-config.xml.i',
+        'algorithm'),
 }
 
 

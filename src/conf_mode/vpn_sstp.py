@@ -65,9 +65,10 @@ def get_config(config=None):
         sstp['ordered_named_pools'] = get_pools_in_order(dict_search('client_ip_pool', sstp))
 
     sstp['server_type'] = 'sstp'
-    # FIPS 140-3: classic RADIUS (MD5) has no approved form.
-    if fips.fips_enabled(conf) and conf.exists(base + ['authentication', 'radius']):
-        sstp['fips_reject_radius'] = {}
+    # FIPS 140-3: PPP subscriber auth (PAP/CHAP/MS-CHAP/MS-CHAPv2) has no
+    # approved protocol, so the whole server is non-approvable.
+    if fips.fips_enabled(conf):
+        sstp['fips_reject_ppp'] = {}
     return sstp
 
 
@@ -75,8 +76,11 @@ def verify(sstp):
     if not sstp:
         return None
 
-    if 'fips_reject_radius' in sstp:
-        fips.reject_feature('RADIUS (SSTP)')
+    if 'fips_reject_ppp' in sstp:
+        fips.reject_feature(
+            'SSTP',
+            'PPP subscriber authentication (PAP/CHAP/MS-CHAP/MS-CHAPv2) has no '
+            'FIPS-approved protocol. Remove it, or disable FIPS.')
 
     port = sstp.get('port')
     proto = 'tcp'

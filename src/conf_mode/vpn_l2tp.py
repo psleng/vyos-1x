@@ -58,9 +58,10 @@ def get_config(config=None):
         l2tp['ordered_named_pools'] = get_pools_in_order(
             dict_search('client_ip_pool', l2tp))
     l2tp['server_type'] = 'l2tp'
-    # FIPS 140-3: classic RADIUS (MD5) has no approved form.
-    if fips.fips_enabled(conf) and conf.exists(base + ['authentication', 'radius']):
-        l2tp['fips_reject_radius'] = {}
+    # FIPS 140-3: PPP subscriber auth (PAP/CHAP/MS-CHAP/MS-CHAPv2) has no
+    # approved protocol, so the whole server is non-approvable.
+    if fips.fips_enabled(conf):
+        l2tp['fips_reject_ppp'] = {}
     return l2tp
 
 
@@ -68,8 +69,11 @@ def verify(l2tp):
     if not l2tp:
         return None
 
-    if 'fips_reject_radius' in l2tp:
-        fips.reject_feature('RADIUS (L2TP remote-access)')
+    if 'fips_reject_ppp' in l2tp:
+        fips.reject_feature(
+            'L2TP remote-access',
+            'PPP subscriber authentication (PAP/CHAP/MS-CHAP/MS-CHAPv2) has no '
+            'FIPS-approved protocol. Remove it, or disable FIPS.')
 
     verify_accel_ppp_authentication(l2tp)
     verify_accel_ppp_ip_pool(l2tp)
