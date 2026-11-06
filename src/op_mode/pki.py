@@ -387,10 +387,18 @@ def write_file(filename, contents):
 
 # Generation functions
 def generate_private_key():
+    from vyos.fips import fips_enabled
+
+    fips = fips_enabled()
+
+    # FIPS input gate (igos-fips-140-3-design.md): DSA is non-approved; RSA must
+    # be >= 2048; EC is restricted to P-256/384/521. Approved-only choices are
+    # offered so a non-approved key cannot be requested under FIPS.
+    key_types = ['rsa', 'ec'] if fips else ['rsa', 'dsa', 'ec']
     key_type = ask_input(
-        'Enter private key type: [rsa, dsa, ec]',
+        f'Enter private key type: [{", ".join(key_types)}]',
         default='rsa',
-        valid_responses=['rsa', 'dsa', 'ec'],
+        valid_responses=key_types,
     )
 
     size_valid = []
@@ -398,10 +406,10 @@ def generate_private_key():
 
     if key_type in ['rsa', 'dsa']:
         size_default = 2048
-        size_valid = [512, 1024, 2048, 4096]
+        size_valid = [2048, 4096] if fips else [512, 1024, 2048, 4096]
     elif key_type == 'ec':
         size_default = 256
-        size_valid = [224, 256, 384, 521]
+        size_valid = [256, 384, 521] if fips else [224, 256, 384, 521]
 
     size = ask_input(
         'Enter private key bits:',
@@ -833,7 +841,18 @@ def generate_ssh_keypair(name, install=False, file=False):
 
 
 def generate_dh_parameters(name, install=False, file=False):
+    from vyos.fips import fips_enabled
+
     bits = ask_input('Enter DH parameters key size:', default=2048, numeric_only=True)
+
+    # FIPS input gate: only the approved RFC 7919 FFDHE groups are allowed; an
+    # arbitrary on-the-fly safe prime is not an approved group under FIPS.
+    if fips_enabled() and bits not in FFDHE_SIZES:
+        print(
+            f'FIPS mode: DH parameter size {bits} is not an approved FFDHE '
+            f'group. Approved sizes: {", ".join(str(s) for s in FFDHE_SIZES)}'
+        )
+        return None
 
     if bits in FFDHE_SIZES:
         # Standard sizes use the pre-computed RFC 7919 FFDHE groups - instant.

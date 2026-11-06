@@ -13,15 +13,16 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import base64
+import contextlib
 import datetime
 import ipaddress
+import os
+import subprocess
 import textwrap
 
 from cryptography import x509
 from cryptography.exceptions import InvalidSignature
 from cryptography.x509.extensions import ExtensionNotFound
-from cryptography.x509.oid import NameOID
-from cryptography.x509.oid import ExtendedKeyUsageOID
 from cryptography.x509.oid import ExtensionOID
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives import serialization
@@ -153,103 +154,261 @@ def get_elliptic_curve(size):
 
 # Creation functions
 
+# OpenSSL curve names for the EC key sizes we support. OpenSSL rejects the RFC
+# 'secp256r1' spelling for P-256 (it expects 'prime256v1'), so map explicitly.
+_EC_SIZE_TO_OPENSSL_CURVE = {
+    224: 'secp224r1',
+    256: 'prime256v1',
+    384: 'secp384r1',
+    521: 'secp521r1',
+}
+
+def _run_openssl(args, stdin=None, pass_fds=()):
+    """Run an ``openssl`` subcommand and return its stdout (PEM) bytes.
+
+    Cryptographic work runs in the system OpenSSL process, so when FIPS mode is
+    active it is performed by the validated FIPS provider (and a non-approved
+    request fails closed inside the module). pyca/``cryptography`` is
+    deliberately avoided for generation/signing because it self-loads the
+    ``default`` provider and never routes through ``fips.so`` (see
+    igos-fips-140-3-design.md). Results are parsed back into ``cryptography``
+    objects for callers; parsing existing material is not FIPS-critical.
+    """
+    proc = subprocess.run(
+        ['openssl', *args],
+        input=stdin,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        pass_fds=tuple(pass_fds),
+    )
+    if proc.returncode != 0 or not proc.stdout:
+        raise ValueError(
+            f"openssl {args[0] if args else ''} failed: "
+            + proc.stderr.decode(errors='replace').strip()
+        )
+    return proc.stdout
+
+@contextlib.contextmanager
+def _fd_inputs(inputs):
+    """Expose byte blobs to an ``openssl`` child as anonymous, RAM-only,
+    seekable ``memfd`` file descriptors -- no filesystem path ever exists.
+
+    ``inputs`` maps a label to ``bytes``/``str``. Yields ``(paths, fds)`` where
+    ``paths[label]`` is the ``/proc/self/fd/N`` string to hand to openssl and
+    ``fds`` is the list to pass via ``pass_fds`` (which clears close-on-exec for
+    the child while keeping the fd numbers stable). This is how the CA private
+    key reaches openssl for signing without touching disk -- see the "Private
+    key on disk" subsection of igos-fips-140-3-design.md.
+    """
+    fds = []
+    paths = {}
+    try:
+        for label, data in inputs.items():
+            if isinstance(data, str):
+                data = data.encode()
+            fd = os.memfd_create(label, os.MFD_CLOEXEC)
+            os.write(fd, data)
+            os.lseek(fd, 0, os.SEEK_SET)
+            fds.append(fd)
+            paths[label] = f'/proc/self/fd/{fd}'
+        yield paths, fds
+    finally:
+        for fd in fds:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+
 def create_private_key(key_type, key_size=None):
-    private_key = None
     if key_type == 'rsa':
-        private_key = rsa.generate_private_key(public_exponent=65537, key_size=key_size)
+        pem = _run_openssl(
+            ['genpkey', '-algorithm', 'RSA',
+             '-pkeyopt', f'rsa_keygen_bits:{int(key_size)}']
+        )
     elif key_type == 'dsa':
-        private_key = dsa.generate_private_key(key_size=key_size)
+        # DSA needs parameters first; stream them to the key step over stdin so
+        # nothing lands on disk. DSA is non-approved and is gated out under FIPS.
+        params = _run_openssl(
+            ['genpkey', '-genparam', '-algorithm', 'DSA',
+             '-pkeyopt', f'dsa_paramgen_bits:{int(key_size)}']
+        )
+        pem = _run_openssl(['genpkey', '-paramfile', '/dev/stdin'], stdin=params)
     elif key_type == 'ec':
-        curve = get_elliptic_curve(key_size)
-        private_key = ec.generate_private_key(curve)
-    return private_key
+        curve = _EC_SIZE_TO_OPENSSL_CURVE.get(int(key_size) if key_size else 256,
+                                              'prime256v1')
+        pem = _run_openssl(
+            ['genpkey', '-algorithm', 'EC', '-pkeyopt', f'ec_paramgen_curve:{curve}']
+        )
+    else:
+        return None
+
+    return serialization.load_pem_private_key(pem, password=None)
+
+def _openssl_subject_arg(subject):
+    """Build an ``openssl`` ``-subj`` string, escaping the DN metacharacters."""
+    def esc(value):
+        return (str(value).replace('\\', '\\\\')
+                .replace('/', '\\/').replace('+', '\\+'))
+
+    return (f"/C={esc(subject['country'])}/ST={esc(subject['state'])}"
+            f"/L={esc(subject['locality'])}/O={esc(subject['organization'])}"
+            f"/CN={esc(subject['common_name'])}")
+
+def _san_openssl_value(subject_alt_names):
+    """Render a ``subjectAltName`` value from mixed IP/str alt-name objects."""
+    parts = []
+    for obj in subject_alt_names:
+        if isinstance(obj, (ipaddress.IPv4Address, ipaddress.IPv6Address)):
+            parts.append(f'IP:{obj}')
+        elif isinstance(obj, str):
+            parts.append(f'email:{obj}' if '@' in obj else f'DNS:{obj}')
+    return ','.join(parts)
+
+def _san_from_request(cert_req):
+    """Re-render the SAN of a loaded CSR as an openssl ``subjectAltName`` value.
+
+    The CSRs produced here only ever carry a (non-critical) SAN, mirroring the
+    previous pyca behaviour of copying the request's extensions into the cert.
+    """
+    try:
+        ext = cert_req.extensions.get_extension_for_class(
+            x509.SubjectAlternativeName)
+    except ExtensionNotFound:
+        return ''
+    parts = []
+    for gn in ext.value:
+        if isinstance(gn, x509.DNSName):
+            parts.append(f'DNS:{gn.value}')
+        elif isinstance(gn, x509.RFC822Name):
+            parts.append(f'email:{gn.value}')
+        elif isinstance(gn, x509.IPAddress):
+            parts.append(f'IP:{gn.value}')
+    return ','.join(parts)
 
 def create_certificate_request(subject, private_key, subject_alt_names=[]):
-    subject_obj = x509.Name([
-        x509.NameAttribute(NameOID.COUNTRY_NAME, subject['country']),
-        x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, subject['state']),
-        x509.NameAttribute(NameOID.LOCALITY_NAME, subject['locality']),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, subject['organization']),
-        x509.NameAttribute(NameOID.COMMON_NAME, subject['common_name'])])
+    key_pem = encode_private_key(private_key)
 
-    builder = x509.CertificateSigningRequestBuilder() \
-        .subject_name(subject_obj)
+    args = ['req', '-new', '-sha256', '-subj', _openssl_subject_arg(subject)]
+    san = _san_openssl_value(subject_alt_names) if subject_alt_names else ''
+    if san:
+        args += ['-addext', f'subjectAltName={san}']
 
-    if subject_alt_names:
-        alt_names = []
-        for obj in subject_alt_names:
-            if isinstance(obj, ipaddress.IPv4Address) or isinstance(obj, ipaddress.IPv6Address):
-                alt_names.append(x509.IPAddress(obj))
-            elif isinstance(obj, str):
-                alt_names.append(x509.RFC822Name(obj) if '@' in obj else x509.DNSName(obj))
-        if alt_names:
-            builder = builder.add_extension(x509.SubjectAlternativeName(alt_names), critical=False)
+    with _fd_inputs({'key': key_pem}) as (paths, fds):
+        pem = _run_openssl(args + ['-key', paths['key']], pass_fds=fds)
 
-    return builder.sign(private_key, hashes.SHA256())
+    return load_certificate_request(pem.decode(), wrap_tags=False)
 
-def add_key_identifier(ca_cert):
-    try:
-        ski_ext = ca_cert.extensions.get_extension_for_class(x509.SubjectKeyIdentifier)
-        return x509.AuthorityKeyIdentifier.from_issuer_subject_key_identifier(ski_ext.value)
-    except:
-        return x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_cert.public_key())
+def _certificate_v3_section(cert_type, is_ca, is_sub_ca, san_value):
+    """Render the openssl x509 v3 extension section, matching the prior pyca set.
 
-def create_certificate(cert_req, ca_cert, ca_private_key, valid_days=365, cert_type='server', is_ca=False, is_sub_ca=False):
-    ext_key_usage = []
+    * BasicConstraints (critical): CA:TRUE[,pathlen:0] for a sub-CA, else CA:FALSE.
+    * KeyUsage (critical): digitalSignature always; keyCertSign+cRLSign for a CA.
+    * ExtendedKeyUsage: client/serverAuth per role (both for a CA).
+    * subjectKeyIdentifier=hash; authorityKeyIdentifier=keyid for non-root certs.
+    * subjectAltName copied from the request.
+    """
+    lines = ['[v3]']
+
+    basic = 'critical,CA:TRUE' if is_ca else 'critical,CA:FALSE'
+    if is_ca and is_sub_ca:
+        basic += ',pathlen:0'
+    lines.append(f'basicConstraints={basic}')
+
+    key_usage = 'critical,digitalSignature'
     if is_ca:
-        ext_key_usage = [ExtendedKeyUsageOID.CLIENT_AUTH, ExtendedKeyUsageOID.SERVER_AUTH]
+        key_usage += ',keyCertSign,cRLSign'
+    lines.append(f'keyUsage={key_usage}')
+
+    if is_ca:
+        ext_key_usage = 'clientAuth,serverAuth'
     elif cert_type == 'client':
-        ext_key_usage = [ExtendedKeyUsageOID.CLIENT_AUTH]
+        ext_key_usage = 'clientAuth'
     elif cert_type == 'server':
-        ext_key_usage = [ExtendedKeyUsageOID.SERVER_AUTH]
+        ext_key_usage = 'serverAuth'
+    else:
+        ext_key_usage = ''
+    if ext_key_usage:
+        lines.append(f'extendedKeyUsage={ext_key_usage}')
 
-    builder = x509.CertificateBuilder() \
-        .subject_name(cert_req.subject) \
-        .issuer_name(ca_cert.subject) \
-        .public_key(cert_req.public_key()) \
-        .serial_number(x509.random_serial_number()) \
-        .not_valid_before(datetime.datetime.utcnow()) \
-        .not_valid_after(datetime.datetime.utcnow() + datetime.timedelta(days=int(valid_days)))
-
-    builder = builder.add_extension(x509.BasicConstraints(ca=is_ca, path_length=0 if is_sub_ca else None), critical=True)
-    builder = builder.add_extension(x509.KeyUsage(
-        digital_signature=True,
-        content_commitment=False,
-        key_encipherment=False,
-        data_encipherment=False,
-        key_agreement=False,
-        key_cert_sign=is_ca,
-        crl_sign=is_ca,
-        encipher_only=False,
-        decipher_only=False), critical=True)
-    builder = builder.add_extension(x509.ExtendedKeyUsage(ext_key_usage), critical=False)
-    builder = builder.add_extension(x509.SubjectKeyIdentifier.from_public_key(cert_req.public_key()), critical=False)
+    lines.append('subjectKeyIdentifier=hash')
 
     if not is_ca or is_sub_ca:
-        builder = builder.add_extension(add_key_identifier(ca_cert), critical=False)
+        lines.append('authorityKeyIdentifier=keyid:always')
 
-    for ext in cert_req.extensions:
-        builder = builder.add_extension(ext.value, critical=False)
+    if san_value:
+        lines.append(f'subjectAltName={san_value}')
 
-    return builder.sign(ca_private_key, hashes.SHA256())
+    return '\n'.join(lines) + '\n'
+
+def create_certificate(cert_req, ca_cert, ca_private_key, valid_days=365, cert_type='server', is_ca=False, is_sub_ca=False):
+    # The self-signed cases pass the request itself as ``ca_cert`` (issuer ==
+    # subject); a CA-signed cert passes a real certificate.
+    self_signed = isinstance(ca_cert, x509.CertificateSigningRequest)
+
+    ext_section = _certificate_v3_section(
+        cert_type, is_ca, is_sub_ca, _san_from_request(cert_req))
+
+    inputs = {
+        'csr': cert_req.public_bytes(serialization.Encoding.PEM),
+        'cakey': encode_private_key(ca_private_key),
+        'ext': ext_section,
+    }
+    if not self_signed:
+        inputs['cacert'] = encode_certificate(ca_cert)
+
+    args = ['x509', '-req', '-sha256', '-days', str(int(valid_days)),
+            '-set_serial', str(x509.random_serial_number())]
+
+    with _fd_inputs(inputs) as (paths, fds):
+        args += ['-in', paths['csr'],
+                 '-extfile', paths['ext'], '-extensions', 'v3']
+        if self_signed:
+            args += ['-signkey', paths['cakey']]
+        else:
+            args += ['-CA', paths['cacert'], '-CAkey', paths['cakey']]
+        pem = _run_openssl(args, pass_fds=fds)
+
+    return load_certificate(pem.decode(), wrap_tags=False)
+
+def _index_txt_serial(serial_number):
+    """Serial as openssl's index.txt expects it: uppercase, even-length hex."""
+    value = format(serial_number, 'X')
+    return value if len(value) % 2 == 0 else '0' + value
 
 def create_certificate_revocation_list(ca_cert, ca_private_key, serial_numbers=[]):
     if not serial_numbers:
         return False
 
-    builder = x509.CertificateRevocationListBuilder() \
-        .issuer_name(ca_cert.subject) \
-        .last_update(datetime.datetime.today()) \
-        .next_update(datetime.datetime.today() + datetime.timedelta(1, 0, 0))
+    now = datetime.datetime.now(datetime.timezone.utc)
+    revoked = now.strftime('%y%m%d%H%M%SZ')
+    # index.txt needs a (cosmetic) expiry per row; it is not emitted in the CRL.
+    expiry = (now + datetime.timedelta(days=3650)).strftime('%y%m%d%H%M%SZ')
+    index = ''.join(
+        f"R\t{expiry}\t{revoked}\t{_index_txt_serial(sn)}\tunknown\t/CN=revoked\n"
+        for sn in serial_numbers
+    )
 
-    for serial_number in serial_numbers:
-        revoked_cert = x509.RevokedCertificateBuilder() \
-            .serial_number(serial_number) \
-            .revocation_date(datetime.datetime.today()) \
-            .build()
-        builder = builder.add_revoked_certificate(revoked_cert)
+    inputs = {
+        'cakey': encode_private_key(ca_private_key),
+        'cacert': encode_certificate(ca_cert),
+        'index': index,
+    }
+    with _fd_inputs(inputs) as (paths, fds):
+        config = (
+            '[ca]\n'
+            'default_ca = CA_default\n'
+            '[CA_default]\n'
+            f"database = {paths['index']}\n"
+            f"certificate = {paths['cacert']}\n"
+            f"private_key = {paths['cakey']}\n"
+            'default_md = sha256\n'
+            'default_crl_days = 1\n'
+        )
+        with _fd_inputs({'config': config}) as (cfg_paths, cfg_fds):
+            pem = _run_openssl(
+                ['ca', '-config', cfg_paths['config'], '-gencrl'],
+                pass_fds=fds + cfg_fds,
+            )
 
-    return builder.sign(private_key=ca_private_key, algorithm=hashes.SHA256())
+    return load_crl(pem.decode(), wrap_tags=False)
 
 # RFC 7919 finite-field Diffie-Hellman (FFDHE) group primes, all with
 # generator g=2.  These are standardised, publicly vetted safe primes, so they

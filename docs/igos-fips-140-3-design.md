@@ -45,8 +45,23 @@ kernel.
     (`op_mode/pki.py` + op-mode def). ed25519 kept (alive in non-FIPS, already
     rejected under FIPS).
   - **Audit rows traced** (2026-11-05) — findings table below; two quick-wins
-    (PKI key-gen floor, TLS-version floor) + two decisions (PPP auth, VRRP auth)
-    + one newly-found surface (routing-protocol MD5) identified.
+    (PKI input gate, TLS-version floor) + two decisions (PPP auth, VRRP auth)
+    + newly-found surfaces (routing-protocol MD5; **DHCP TSIG HMAC-MD5**;
+    **Perle serial global TLS** — `any` version + 40-bit keys + MD5 + anon-DH
+    defaults, the biggest new surface). SNMPv3 "failures" in testing are just the
+    morning build predating today's SNMPv3 enforcement.
+  - **PKI generation bypasses the FIPS provider (found 2026-11-05).** `generate
+    pki ca` produces a **DSA/weak-RSA** CA even in FIPS mode because pyca
+    `cryptography` self-loads the `default` provider and ignores the system FIPS
+    config (proven: DSA keygen succeeds even with `OPENSSL_CONF` forced). This
+    generalizes to **all** vyos `cryptography` usage. **Decision: migrate PKI
+    generation to the `openssl` CLI backend _always_** (in-boundary) + an item‑1
+    input gate — see the audit subsection. **PKI migration COMPLETE 2026-11-06**
+    (Phase 1 key/DH gen via `openssl genpkey` + input gate; Phase 2 cert/CSR
+    signing via `openssl x509 -req`/`req` with the CA key in an anonymous `memfd`
+    fd; Phase 3 CRL via `openssl ca -gencrl`). Byte-for-byte extension/SKI/AKI
+    parity vs the old pyca path proven; on-target validation on a booted FIPS
+    image still pending.
   - **Phase 4 kernel (vyos-build) — `fips=1` now recognized.** Enabled
     `CONFIG_CRYPTO_FIPS=y` (+ its deps `CONFIG_CRYPTO_SELFTESTS=y` and
     `CONFIG_MODULE_SIG=y`, **without** `MODULE_SIG_FORCE` so unsigned out-of-tree
@@ -309,19 +324,167 @@ traced yet. Treat ⚠audit as "must be looked at", not "confirmed non-compliant"
 
 | Row | Finding | Verdict | Action |
 |---|---|---|---|
-| **PKI cert signing digest** | [`vyos/pki.py`](../python/vyos/pki.py) signs with **SHA-256** (`create_certificate`/`_request`); fingerprints sha256/384/512 — no MD5/SHA1 | ✅ already approved | none |
-| **PKI key generation** | op-mode [`generate pki`](../src/op_mode/pki.py) `size_valid = [512, 1024, 2048, 4096]` allows **512/1024-bit RSA** (config `pki` RSA list is already 2048/3072/4096) | ❌ non-approved exposure | **quick win** — drop 512/1024 (greenfield) or floor ≥2048 under FIPS; DH default 2048 ✓ |
+| **PKI generation (`cryptography`)** | op-mode [`generate pki`](../src/op_mode/pki.py) via [`vyos.pki`](../python/vyos/pki.py) / pyca‑`cryptography`. Cert signing digest is **SHA‑256** ✅, but **key generation is NOT FIPS‑enforced**: `dsa` and RSA‑512/1024 all succeed under active FIPS (reproduced on the secure unit) — see the subsection below | ❌ **generation runs outside the validated module** | **Decision (2026‑11‑05): move generation to the `openssl` CLI backend, _always_** + item‑1 input gate (reject `dsa`/RSA<2048) as defense‑in‑depth |
 | **accel-ppp PPP auth** (pppoe/ipoe/l2tp) | [`auth-protocols.xml.i`](../interface-definitions/include/accel-ppp/auth-protocols.xml.i) = `pap chap mschap mschap-v2`, **all enabled by default** (plaintext / MD5 / MD4+DES) | ❌ non-approved; **decision** | PPP auth can't be FIPS-approved — reject the PPP servers (or chap/mschap) under FIPS, like RADIUS |
 | **VRRP auth** ([`high-availability`](../interface-definitions/high-availability.xml.in)) | `authentication type` = `plaintext-password \| ah` (AH = HMAC-MD5) | ⚠ **decision** | both non-approved; VRRPv3 drops auth anyway → reject `authentication` under FIPS, or declare out-of-scope |
 | **TLS version floor** | shared [`tls-version-min.xml.i`](../interface-definitions/include/tls-version-min.xml.i) allows **1.0/1.1**/1.2/1.3 (used by openconnect, …) | ⚠ low-risk | **quick win** — OpenSSL provider blocks <1.2 at runtime; floor/reject explicit 1.0/1.1 under FIPS on the include |
 | **TLS consumers** (sstp, sstpc, syslog, email, container, zabbix, salt) | none expose a cipher-list CLI leaf (unlike SSH/HTTPS/haproxy) | ⚠ **backend-dependent** | OpenSSL-backed → fips provider auto-rejects at runtime; **ocserv (openconnect) is historically GnuTLS, NOT the OpenSSL fips module** — needs per-daemon confirmation |
 | **HTTP API** | **no** md5/hashlib weak-hash in the API; [`rest/routers.py`](../src/services/api/rest/routers.py) has `verify=False` (×5) | ✅ algorithms clean; ⚠ TLS-trust | the MD5 audit is **clean**; `verify=False` is cert-validation (not an algorithm claim) — track separately |
 | **Routing-protocol auth (NEW — found 2026-11-05)** | OSPF / IS-IS / RIP / BGP use **MD5 / plaintext** auth keys (`include/ospf/authentication.xml.i`, etc.) | ❌ non-approved; newly found | add to backlog — reject MD5/plaintext routing auth under FIPS (or classify intent) |
+| **DHCP TSIG key (NEW — found 2026-11-05)** | [`dhcp-server-common-config.xml.i`](../interface-definitions/include/dhcp/dhcp-server-common-config.xml.i) `dynamic-dns-update … tsig-key … algorithm` = `md5 sha1 sha224 sha256 sha384 sha512` — **HMAC-MD5** offered (non-approved) | ❌ non-approved; newly found | reject `md5` under FIPS (HMAC-SHA1 is approved but weak → prefer SHA-2); emit `sha256` default |
+| **Serial global TLS — Perle (NEW — found 2026-11-05)** | [`serial/global/tls-global.xml.i`](../interface-definitions/include/serial/global/tls-global.xml.i): `version` default **`any`** (allows TLS<1.2); `cipher-options` defaults **`encryption any`** (non-AES), **`min-key-size 40`** (40-bit!), **`key-exchange any`** (incl. anonymous-DH / DSS), **`hmac any/md5`** | ❌ **many non-approved defaults** — **biggest new surface**; newly found | under FIPS: floor TLS ≥1.2, AES/AES-GCM only, key-size ≥128, approved KX (rsa/ecdh), SHA-2 hmac; reject `any`/`md5`/40-56-64-bit/adh/dss |
+| **stunnel TLS proxy (NEW — found 2026-11-05)** | [`service_stunnel`](../interface-definitions/service_stunnel.xml.in) + [`ssl.xml.i`](../interface-definitions/include/stunnel/ssl.xml.i)/[`psk.xml.i`](../interface-definitions/include/stunnel/psk.xml.i): cert/CA + **TLS-PSK**; no cipher/version CLI leaf | ⚠ backend-dependent | OpenSSL-backed → fips provider auto-rejects at runtime; verify TLS-PSK uses approved suites; `options` `ntlm` is app-layer auth (MD4) — note |
+| **WWAN APN auth (NEW — found 2026-11-05)** | [`interfaces_wwan`](../interface-definitions/interfaces_wwan.xml.in) `authentication type` = `none pap chap both` (PAP=plaintext, CHAP=MD5) | ⚠ **decision** (carrier-mandated) | like PPP auth — classify intent; the cellular carrier dictates PAP/CHAP, likely out-of-scope (link-layer to carrier) |
 
-Remaining-ordering: **quick wins** = PKI key-gen floor + TLS-version floor;
-**decisions needed** = PPP auth + VRRP auth (reject-under-FIPS vs. out-of-scope,
-like RADIUS); **deeper** = per-daemon TLS-backend verification (ocserv/GnuTLS)
-and imported-cert strength enforcement in config `pki`.
+Remaining-ordering: **quick wins** = TLS-version floor + the PKI **input gate**
+(reject `dsa`/RSA<2048); **decisions needed** = PPP auth + VRRP auth
+(reject-under-FIPS vs. out-of-scope, like RADIUS); **deeper** = the PKI
+**`openssl`-CLI backend migration** (below), per-daemon TLS-backend verification
+(ocserv/GnuTLS), and imported-cert strength enforcement in config `pki`.
+
+**Completeness sweep (2026-11-05).** A full grep of `interface-definitions/` for
+crypto tokens was cross-checked against the rows above. Also-ran results:
+- **No action / not a configured-algorithm surface:** DNS-forwarding **DNSSEC**
+  (validation only — algorithms are set by remote zones); **SRv6 HMAC**
+  (`protocols segment-routing` — SHA-256, approved; verify no MD5 option);
+  webproxy **LDAP-over-SSL** and **ddclient/RFC2136 TSIG** (the TSIG algorithm is
+  carried in the key *file*, not a CLI leaf) — both OpenSSL-backed, so the
+  provider auto-enforces.
+- **Reference-only:** serial `tls-port` / `modbus-gateway` just reference the
+  global serial TLS *template* (already covered by the serial-TLS row).
+- **False positives (no crypto):** `nat-rule` / `qos` (protocol names),
+  router-advert `dnssl` (DNS search list), **Suricata** (IDS protocol *parsers* +
+  file-hash *logging*, `usedforsecurity`-style), dhcp `option-v4`.
+
+The crypto-consumer audit is now considered **breadth-complete** (2026-11-05).
+
+#### PKI generation & the Python `cryptography` FIPS-provider bypass (found 2026-11-05)
+
+**Finding.** `generate pki ca`/`certificate` happily produces a **DSA** (and
+RSA‑512/1024) CA *while the system is in FIPS mode* — reproduced on the secure
+build (`IGOS_SECURE=1`, 10.10.99.250: FIPS provider **active**, module self-test
+**passed**). Root cause: the op-mode PKI generator
+([src/op_mode/pki.py](../src/op_mode/pki.py) → [python/vyos/pki.py](../python/vyos/pki.py))
+uses **pyca/`cryptography`**, which **does not route through the OpenSSL FIPS
+provider**:
+
+- The box's `python3-cryptography` (Debian 38.0.4) links the **system** OpenSSL
+  3.5.7 (the same lib as the `openssl` CLI), yet `cryptography` **self-initializes
+  OpenSSL and explicitly loads the `default`(+`legacy`) providers**, and does
+  **not** load `/etc/ssl/openssl.cnf`. So `fips` is never activated in its
+  process and `default_properties = fips=yes` never applies. Proven: DSA keygen
+  succeeds **even with `OPENSSL_CONF=/etc/ssl/openssl.cnf` forced**.
+- This is **by design and version-independent** — pyca/`cryptography` does not
+  support FIPS mode, and PyPI wheels additionally **static-link their own
+  OpenSSL** (no `fips.so` at all). Upgrading the library does **not** fix it.
+
+**Generalization.** *Any* vyos code using `cryptography` (not just PKI) runs
+outside the validated module. The "validated module = OpenSSL provider" claim
+(§8.2) only covers the `openssl` CLI and the C daemons that load the config
+(strongSwan, nginx, …). Python `cryptography` paths need an explicit remedy.
+
+**Decision (2026-11-05): adopt the `openssl` CLI backend for PKI generation,
+_always_** (single maintainable path; in-boundary automatically when FIPS is on;
+`openssl` CLI is fine in non-FIPS too). Rejected alternatives: (a) RHEL-style
+downstream-patched `cryptography`+OpenSSL — distro-specific, not available on
+Debian; (c) code-level input gating *alone* — yields "approved algorithm
+selected" but **not** "computed by the validated module".
+
+**Scope (bounded).** Generation/signing is confined to the five `create_*`
+functions in `vyos/pki.py`, called **only** from `src/op_mode/pki.py`; conf-mode
+scripts and services only *parse/encode* existing material (not FIPS-critical),
+so nothing outside the PKI op-mode tool changes. Tests to keep green:
+`smoketest/scripts/cli/test_pki.py`, `src/tests/test_pki_dh.py`.
+
+**Difficulty: moderate (~2–3 focused days).** 🟢 Easy: key gen
+(`openssl genpkey`), DH params, passphrase encrypt (`openssl pkcs8`). 🟡 Moderate:
+CSR (`openssl req`). 🟠 Moderate-hard (the real work / regression risk): cert
+signing with the exact extension set (BasicConstraints/KeyUsage/EKU/SKI/AKI/SAN,
+path_length, self-signed vs CA-signed) via `openssl x509 -req -extfile`, and the
+CRL (`openssl ca -gencrl`, needs a temp CA `index.txt` scaffold). Caveats: the
+CA private key must transit an in-RAM fd for signing — see the "Private key on
+disk" subsection below for why this is a non-issue and how to make it anonymous;
+SKI/AKI use SHA-1, which **is** in the FIPS provider (verified on the box); needs
+`openssl` ≥ 3 (box has 3.5.7).
+
+**Private key on disk — reframed, and the anonymous-fd mitigation.** The obvious
+worry with an `openssl` CLI backend is "a plaintext private key now lands in a
+file." Two things defuse it:
+
+1. **It is not a new exposure class.** In VyOS the CA/cert private key is
+   *already persisted at rest* as base64-encoded PEM in the config tree
+   ([cli-private-key-base64.xml.i](../interface-definitions/include/pki/cli-private-key-base64.xml.i),
+   used by every `private` node in [pki.xml.in](../interface-definitions/pki.xml.in)) —
+   it lives in `config.boot` and the running config, unencrypted. A momentary,
+   RAM-backed copy during a signing call is **strictly less exposure** than the
+   key's permanent home, not a new disclosure surface.
+2. **The transient copy can be made anonymous (no filesystem path at all).**
+   Preferred mechanisms, best to worst:
+   - **Key *generation* touches no file.** `openssl genpkey`/`genrsa` write to
+     **stdout** (`-out -`); capture the child's stdout pipe straight into Python
+     memory. The most FIPS-critical step (RNG + fresh key material in the module)
+     needs zero filesystem.
+   - **Signing feeds the CA key via `memfd_create(2)`.** Anonymous, RAM-only,
+     **seekable** (OpenSSL's key `BIO` may `seek()`/rewind, which a plain `pipe`
+     cannot satisfy — so pipes are fragile here), with **no directory entry** any
+     other process can `open()` by name. Write the PEM into the memfd, then pass
+     `-CAkey /proc/self/fd/N` to the subprocess. Nothing appears in the directory
+     tree. Fallback: `O_TMPFILE` on tmpfs (unnamed inode, no path from the start,
+     strictly better than create-then-unlink). Weakest acceptable option: the
+     original "`0600` tmpfs + `unlink()` **before** spawning the child, passing
+     `/proc/self/fd/N`" so the path is already gone when OpenSSL runs.
+   - **Hardening either way:** `umask(0o077)`; hold the PEM in a mutable
+     `bytearray` and overwrite it after use (not an immutable `bytes`/`str`);
+     tmpfs/memfd never hit persistent storage and free their pages on close.
+
+   **Compliance note:** the reason to adopt the `openssl` CLI was *"computed by
+   the validated module,"* which is satisfied by `genpkey`/signing routing
+   through the FIPS provider — **not** by whether a temp file exists. A
+   root-owned, RAM-only, anonymous fd on the box is within the operator's control
+   boundary; the file is a key-*handling* detail, not a validated-module-boundary
+   violation. **Lean: memfd for the CA-key input + stdout for generation**; test
+   on the box that OpenSSL 3.5.7 is happy seeking the memfd before committing.
+
+**Plan.** Phase 1 — **LANDED** (2026-11-06): key + DH generation routed through
+`openssl genpkey` (the most FIPS-critical — RNG + key material in the module),
+**streamed via stdout (no temp file)** and parsed back into a `cryptography`
+object for callers (parse/encode of existing material is not FIPS-critical);
+`create_private_key`/`create_dh_parameters` in
+[python/vyos/pki.py](../python/vyos/pki.py). DSA uses a 2-step genparam→genkey
+piped over stdin (still non-approved, gated out under FIPS). The **item‑1 input
+gate** lives at the interactive generation entry points in
+[src/op_mode/pki.py](../src/op_mode/pki.py) (`generate_private_key` offers
+approved-only choices under FIPS — no `dsa`, RSA ∈ {2048, 4096}, EC ∈
+{256, 384, 521}; `generate_dh_parameters` allows only the RFC 7919 FFDHE groups).
+Belt-and-suspenders: under FIPS a bypassed gate still **fails closed** because
+`openssl genpkey` for a weak/DSA key is refused inside the FIPS provider.
+Code-complete; compile + `ruff` + `test_pki_dh` (6/6) + full CA→leaf→CRL signing
+chain green. *On-target validation pending:* confirm weak/DSA keygen actually
+fails under a booted FIPS image.
+
+Phase 2 — **LANDED** (2026-11-06): certificate + CSR signing moved off pyca to
+`openssl req` / `openssl x509 -req` (`create_certificate_request`,
+`create_certificate` in [python/vyos/pki.py](../python/vyos/pki.py)). The CA
+private key (and the CSR / CA cert / extfile) reach openssl through **anonymous,
+RAM-only, seekable `memfd_create` fds** referenced as `/proc/self/fd/N` and
+handed to the child via `subprocess` `pass_fds` — **no key material ever touches
+the filesystem** (the `_fd_inputs` helper; "Private key on disk" subsection).
+Self-signed vs CA-signed is detected by whether `ca_cert` is the request itself
+(`-signkey`) or a real cert (`-CA`). An explicit v3 extfile reproduces the exact
+prior extension set (BasicConstraints/KeyUsage/EKU/SKI/AKI + SAN copied from the
+request). Phase 3 — **LANDED** (2026-11-06): the CRL moved to `openssl ca
+-gencrl` over a memfd config + synthesized `index.txt`
+(`create_certificate_revocation_list`). The dead `add_key_identifier` helper (and
+its bare-`except`) was removed.
+
+**Parity proven** against the original pyca implementation: extension set + DN
+match for all five roles (root CA, sub-CA, server, client, self-signed leaf);
+**SKI/AKI values match byte-for-byte** and `AKI == issuer SKI` chains correctly;
+`verify_certificate` passes; CRL serials/issuer/signature and CSR SAN
+(DNS/IP/email) all match. `ruff` + `pylint` W0611 clean (10.00/10; the migration
+also cleared the pre-existing `E722`), `test_pki_dh` 6/6. *On-target validation
+pending:* exercise `generate pki ca/certificate` + `show … revocation` on a
+booted FIPS image and confirm the CA/leaf/CRL are produced by the provider.
 - **Password hashing** — **LANDED** (2026-11-05): `system_login.py` pins the
   approved SHA-512-crypt KDF under FIPS for both the plaintext-password and the
   NVMEM sticker-password paths, rejects an operator-supplied `encrypted-password`
