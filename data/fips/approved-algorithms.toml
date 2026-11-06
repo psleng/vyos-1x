@@ -307,3 +307,40 @@ default = [
     "ecdhe-ecdsa-aes128-gcm-sha256", "ecdhe-rsa-aes128-gcm-sha256",
     "dhe-rsa-aes256-gcm-sha384", "dhe-rsa-aes128-gcm-sha256",
 ]
+
+# ---------------------------------------------------------------------------
+# Serial console-server TLS -- Perle IOLAN daemons (iol_direct/iol_rawd/...).
+# These dynamically link the system OpenSSL 3.x and do NOT override providers,
+# so under FIPS they route through the validated FIPS provider (verified on
+# target: libssl.so.3 + no OPENSSL_CONF/provider overrides). The provider is a
+# runtime backstop; these leaves are the config-layer "clean, not broken" layer.
+# Single-value leaves: `approved` gates explicit values, `default`[0] is emitted
+# when the operator leaves the field at its non-approved grammar default
+# (version=any, min/max-key-size=40, key-exchange=any, hmac=any).
+# ---------------------------------------------------------------------------
+[leaf."service serial global-parameters tls template version"]
+approved = ["tlsv1.2", "tlsv1.2b", "tlsv1.3"]
+default = ["tlsv1.2"]
+
+[leaf."service serial global-parameters tls template cipher-options encryption"]
+approved = ["aes", "aes-gcm"]
+default = ["aes-gcm"]
+
+[leaf."service serial global-parameters tls template cipher-options min-key-size"]
+# 168 = 3DES (disallowed since 2023); 40/56/64 = export/DES. AES-128 floor.
+approved = ["128", "256"]
+default = ["128"]
+
+[leaf."service serial global-parameters tls template cipher-options max-key-size"]
+approved = ["128", "256"]
+default = ["256"]
+
+[leaf."service serial global-parameters tls template cipher-options key-exchange"]
+# reject adh (anonymous -- no auth) and edh-dss (DSA, disallowed); 'any' allows them.
+approved = ["rsa", "edh-rsa", "ecdh-ecdsa"]
+default = ["ecdh-ecdsa"]
+
+[leaf."service serial global-parameters tls template cipher-options hmac"]
+# md5 disallowed; sha1 approved-as-HMAC but discouraged -> require SHA-2.
+approved = ["sha256", "sha384"]
+default = ["sha256"]

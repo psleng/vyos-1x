@@ -67,6 +67,18 @@ GRAMMAR_SOURCES = {
         'interface-definitions/include/snmp/privacy-type.xml.i', 'type'),
     'load-balancing haproxy global-parameters ssl-bind-ciphers': (
         'interface-definitions/load-balancing_haproxy.xml.in', 'ssl-bind-ciphers'),
+    'service serial global-parameters tls template version': (
+        'interface-definitions/include/serial/global/tls-global.xml.i', 'version'),
+    'service serial global-parameters tls template cipher-options encryption': (
+        'interface-definitions/include/serial/global/tls-global.xml.i', 'encryption'),
+    'service serial global-parameters tls template cipher-options min-key-size': (
+        'interface-definitions/include/serial/global/tls-global.xml.i', 'min-key-size'),
+    'service serial global-parameters tls template cipher-options max-key-size': (
+        'interface-definitions/include/serial/global/tls-global.xml.i', 'max-key-size'),
+    'service serial global-parameters tls template cipher-options key-exchange': (
+        'interface-definitions/include/serial/global/tls-global.xml.i', 'key-exchange'),
+    'service serial global-parameters tls template cipher-options hmac': (
+        'interface-definitions/include/serial/global/tls-global.xml.i', 'hmac'),
 }
 
 

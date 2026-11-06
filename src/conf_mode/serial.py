@@ -33,6 +33,9 @@ from vyos.utils.process import is_systemd_service_active
 from vyos.utils.serial import send_command_to_iolan
 from vyos.utils.serial import find_all_ttyS_devices_without_console
 from vyos import ConfigError
+from vyos.fips import fips_enabled
+from vyos.fips import approved as fips_approved
+from vyos.fips import default as fips_default
 from vyos.tpm import tpm_enabled
 from vyos.tpm_pki import get_path_str
 from vyos.tpm_pki import validate_certificate_against_tpm_priv_key
@@ -52,6 +55,69 @@ SERIAL_SERVICE = 'iolan-monitor.service'
 
 PROC = Path('/proc')
 LOGIN_SERVICE_EXE = 'iol_direct'
+
+# FIPS: serial console-server TLS (Perle IOLAN daemons link the system OpenSSL,
+# so the FIPS provider governs them at runtime). These map the template/
+# cipher-options config keys to their approved-algorithms.toml policy leaves.
+# The approved *values* live in data, not here (igos-fips-140-3-design.md).
+_FIPS_TLS_TEMPLATE_LEAVES = {
+    'version': 'service serial global-parameters tls template version',
+}
+_FIPS_TLS_CIPHER_LEAVES = {
+    'encryption': 'service serial global-parameters tls template cipher-options encryption',
+    'min_key_size': 'service serial global-parameters tls template cipher-options min-key-size',
+    'max_key_size': 'service serial global-parameters tls template cipher-options max-key-size',
+    'key_exchange': 'service serial global-parameters tls template cipher-options key-exchange',
+    'hmac': 'service serial global-parameters tls template cipher-options hmac',
+}
+
+def _fips_reject_tls_templates(config):
+    '''verify(): reject explicitly-set non-approved serial TLS template values.'''
+    templates = dict_search('global_parameters.tls.template', config) or {}
+
+    def _check(scope, key, leaf, label):
+        value = scope.get(key)
+        allowed = fips_approved(leaf)
+        if value is not None and allowed is not None and value not in allowed:
+            raise ConfigError(
+                f"FIPS mode: {label} '{value}' is not approved. "
+                f"Approved values: {', '.join(allowed)}"
+            )
+
+    for name, template in templates.items():
+        for key, leaf in _FIPS_TLS_TEMPLATE_LEAVES.items():
+            _check(template, key, leaf,
+                   f"tls template '{name}' {key.replace('_', '-')}")
+        for cid, cipher in (template.get('cipher_options') or {}).items():
+            for key, leaf in _FIPS_TLS_CIPHER_LEAVES.items():
+                _check(cipher, key, leaf,
+                       f"tls template '{name}' cipher-options {cid} "
+                       f"{key.replace('_', '-')}")
+
+def _fips_apply_tls_template_defaults(config):
+    '''generate(): emit approved defaults for unset serial TLS template fields
+    so a configured template is approved-by-default (the daemon's own defaults
+    are non-approved: version=any, min-key-size=40, hmac=any). Only fills unset
+    fields -- explicit values are left for verify() to reject.'''
+    templates = dict_search('global_parameters.tls.template', config) or {}
+
+    def _fill(scope, key, leaf):
+        if key not in scope:
+            value = fips_default(leaf)
+            if value:
+                scope[key] = value[0]
+
+    for template in templates.values():
+        for key, leaf in _FIPS_TLS_TEMPLATE_LEAVES.items():
+            _fill(template, key, leaf)
+        ciphers = template.setdefault('cipher_options', {})
+        if not ciphers:
+            # Pin an approved cipher-options entry so the emitted config is
+            # explicitly approved rather than relying on the daemon's defaults.
+            ciphers['1'] = {}
+        for cipher in ciphers.values():
+            for key, leaf in _FIPS_TLS_CIPHER_LEAVES.items():
+                _fill(cipher, key, leaf)
 
 def _resolve_hw_serial_port(port):
     if not port:
@@ -215,6 +281,8 @@ def get_serial_config(conf):
                                      with_defaults=False,
                                      with_recursive_defaults=False,
                                      with_pki=True)
+
+    proxy['_fips'] = fips_enabled(conf)
 
     # Process profile settings for devices
     # If a device has a profile set, merge profile settings as base, then overlay device settings
@@ -644,6 +712,9 @@ def verify(config):
                 if max_key < min_key:
                     raise ConfigError(f'tls template "{template_name}": max-key-size cannot be less than min-key-size')
 
+            if config.get('_fips'):
+                _fips_reject_tls_templates(config)
+
         modbus_gateway_tls = dict_search('global_parameters.modbus_gateway.tls', config) or {}
         if modbus_gateway_tls:
             if 'template' not in modbus_gateway_tls:
@@ -1057,6 +1128,8 @@ def generate(config):
     if not config:
         return None
     '''Generate serial device configuration.'''
+    if config.get('_fips'):
+        _fips_apply_tls_template_defaults(config)
     if config.get('_invoke_context') == 'interface':
         device = config['device']
         interface_type = config['interface_type']
