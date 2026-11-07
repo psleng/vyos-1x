@@ -34,6 +34,7 @@ from vyos.utils.network import is_ipv6_tentative
 from vyos.utils.process import call
 from vyos import ConfigError
 from vyos import airbag
+from vyos import fips
 airbag.enable()
 
 
@@ -68,6 +69,11 @@ def verify(ha):
     if not ha or 'disable' in ha:
         return None
 
+    # FIPS 140-3: VRRP authentication is plaintext-password or AH (HMAC-MD5),
+    # neither approved; keepalived carries its own crypto (no OpenSSL backstop).
+    # VRRPv3 drops authentication entirely, so there is no approved alternative.
+    ha_fips = fips.fips_enabled()
+
     used_vrid_if = []
     if 'vrrp' in ha and 'group' in ha['vrrp']:
         for group, group_config in ha['vrrp']['group'].items():
@@ -82,6 +88,11 @@ def verify(ha):
                 raise ConfigError(f'Virtual IP address is required but not set in VRRP group "{group}"')
 
             if 'authentication' in group_config:
+                if ha_fips:
+                    fips.reject_feature(
+                        f'VRRP group "{group}" authentication',
+                        'VRRP authentication (plaintext-password / AH-HMAC-MD5) '
+                        'is not FIPS-approved. Remove it, or disable FIPS.')
                 if not {'password', 'type'} <= set(group_config['authentication']):
                     raise ConfigError(f'Authentication requires both type and passwortd to be set in VRRP group "{group}"')
 

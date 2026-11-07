@@ -136,6 +136,23 @@ def _as_list(value) -> list:
     return [value]
 
 
+def reject_present_keys(config: dict, keys, label: str, remedy: str = None) -> None:
+    """Fail closed if any of ``keys`` appears anywhere in ``config`` (recursive).
+
+    For a feature whose only configurable form is non-approved -- e.g. the
+    routing protocols (OSPF/IS-IS/RIP/BGP) expose authentication only as MD5 or
+    plaintext, with no HMAC-SHA option -- the key's mere presence is the
+    violation; there is no approved subset to validate against. ``config`` is the
+    protocol's conf-mode dict (already VRF-resolved by the caller), with keys in
+    the mangled ``plaintext_password`` / ``md5`` / ``password`` form.
+    """
+    from vyos.utils.dict import dict_search_recursive
+
+    for key in _as_list(keys):
+        if next(dict_search_recursive(config, key), None) is not None:
+            reject_feature(label, remedy)
+
+
 def reject_unapproved(config: dict, key_to_leaf: dict, policy: dict = None) -> list:
     """Return human-readable messages for explicitly-set non-approved values.
 

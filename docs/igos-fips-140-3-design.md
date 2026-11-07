@@ -73,14 +73,44 @@ kernel.
     `fips_enabled=1` → `show system fips` Kernel FIPS flips to **yes**. The
     larger integrity chain (kernel/module `.hmac` + integrity-checked initramfs)
     is still pending.
-- **Remaining vyos-1x code:** TPM operator rejects (`ssh-tpm-agent` + TPM-PKI,
-  §6.1); the traced audit-row fixes; then drop the "incomplete" warning.
+  - **Phase 4 kernel — SA2UL self-test panic (found + worked around 2026-11-06).**
+    On the first `fips=1` boot the kernel **panics** during the crypto-manager
+    self-tests (`cryptomgr_test` → `sa_aead_cbc_sha256_setkey` → `sa_init_sc` →
+    `sa_prepare_iopads` → `crypto_shash_init`, NULL `desc->tfm`). Root cause: the
+    **TI K3 `sa2ul` HW crypto driver** is not robust under the mandatory KATs
+    that `fips=1` forces (latent since `d2c8ac187fc9`, exposed only when
+    `CONFIG_CRYPTO_SELFTESTS` runs the test). **Decision: disable the driver for
+    the FIPS build** — `CONFIG_CRYPTO_DEV_SA2UL=m` → **`# … is not set`** in the
+    perle-igos arm64 defconfig (**done 2026-11-06**). Justified on-target (box
+    10.10.50.165, non-FIPS kernel): `sa2ul` is **loaded but idle** (module
+    used-by = 0; no dm-crypt, no active dm-verity, 0 IPsec SAs), it only ever
+    serves **kernel-path** crypto (IPsec AES-CBC ESP / dm-crypt — *not* userspace
+    OpenSSL, which is the entire validated boundary), and it carries **no
+    validated-kernel-module claim** (§8.2/§8.3). Fallback is the ARMv8 Crypto
+    Extensions (`aes-ce`/`sha256-ce`/`gcm-aes-ce`), so AES/SHA stay CPU-accel'd.
+    **⚠ COME BACK TO THIS:** TI has an upstream fix — Manorit Chawdhry's 30-patch
+    *"Clean and improve SA2UL driver"* series (patches 21/23/24 rewrite
+    `sa_prepare_iopads`, adding the `fips_enabled` min-key-size check + over-length
+    key hashing; validated against K3-family self-tests). It is **still in review
+    — v2 posted 2026-11-04**, not merged, not in 6.18. Re-enable `sa2ul` once the
+    series lands in a kernel we can rebase/backport. Lore:
+    `lore.kernel.org/all/?q=sa2ul+cleanup`.
+- **Remaining vyos-1x code:** the enforcement wave landed (2026-11-07) — TPM
+  operator rejects (`ssh-tpm-agent` generation-override + TPM-PKI op-mode/serial
+  reject, §6.1), VRRP auth reject, and routing-protocol auth reject
+  (OSPF/IS-IS/RIP/BGP). The backend-dependent TLS consumers are now **closed**:
+  stunnel (OpenSSL-backed, provider-governed, no code) and the HTTP-API
+  `verify=False` (loopback cert-trust, not an algorithm claim). **Only remaining:
+  drop the "incomplete" warning** (T8529 `apply()`), gated on on-target
+  validation.
 - **Validation pending (needs a booted build):** reboot-survives the toggle,
   fail-closed `fips.so` removal, end-to-end IKE SA against a live peer; **kernel
-  `fips=1` recognized + `fips_enabled=1`** on the next kernel build.
+  `fips=1` recognized + `fips_enabled=1`** on the next kernel build (with
+  `sa2ul` disabled — see the SA2UL note above).
 - **Owned elsewhere:** Phase 4 kernel **integrity chain** (kernel/module `.hmac`
   + HMAC initramfs — vyos-build; the `CONFIG_CRYPTO_FIPS` defconfig half is now
-  done); RadSec (§8.8); claim wording (§8.2); am64x OE + TPM
+  done); **SA2UL re-enable pending TI's upstream series** (vyos-build defconfig;
+  see the SA2UL note above); RadSec (§8.8); claim wording (§8.2); am64x OE + TPM
   cert (§8.6/§8.7).
 
 **Scope decisions locked in:** validated-module claim = **OpenSSL provider only**
@@ -324,16 +354,16 @@ traced yet. Treat ⚠audit as "must be looked at", not "confirmed non-compliant"
 
 | Row | Finding | Verdict | Action |
 |---|---|---|---|
-| **PKI generation (`cryptography`)** | op-mode [`generate pki`](../src/op_mode/pki.py) via [`vyos.pki`](../python/vyos/pki.py) / pyca‑`cryptography`. Cert signing digest is **SHA‑256** ✅, but **key generation is NOT FIPS‑enforced**: `dsa` and RSA‑512/1024 all succeed under active FIPS (reproduced on the secure unit) — see the subsection below | ❌ **generation runs outside the validated module** | **Decision (2026‑11‑05): move generation to the `openssl` CLI backend, _always_** + item‑1 input gate (reject `dsa`/RSA<2048) as defense‑in‑depth |
+| **PKI generation (`cryptography`)** | op-mode [`generate pki`](../src/op_mode/pki.py) via [`vyos.pki`](../python/vyos/pki.py) / pyca‑`cryptography`. Cert signing digest is **SHA‑256** ✅, but **key generation is NOT FIPS‑enforced**: `dsa` and RSA‑512/1024 all succeed under active FIPS (reproduced on the secure unit) — see the subsection below | **LANDED** — migrated to `openssl` CLI (in-boundary) | PKI generation/signing/CRL moved to the `openssl` CLI (stdout gen + `memfd` CA-key signing), always in-boundary, with the op-mode input gate (reject `dsa`/RSA<2048). Byte-for-byte extension/SKI/AKI parity vs pyca proven. See the "PKI migration" subsection. |
 | **accel-ppp PPP auth** (pppoe/l2tp/sstp) | [`auth-protocols.xml.i`](../interface-definitions/include/accel-ppp/auth-protocols.xml.i) = `pap chap mschap mschap-v2`, **all enabled by default** (plaintext / MD5 / MD4+DES); **no EAP option** | **LANDED** — whole-feature reject | Confirmed there is **no approved subset** — all four protocols are non-approvable and accel-ppp implements MS-CHAP in its own MD4/DES modules (`libauth_mschap_v*.so` on target), so a configured server under FIPS would only ever fail auth. Under FIPS the PPP servers are **whole-feature rejected** like RADIUS/PPTP: `reject_under_fips` entries for `service pppoe-server`, `vpn l2tp remote-access`, `vpn sstp` (subsuming the old RADIUS-only rejects, which left local-auth as a gap), + `reject_feature` in each conf-mode `verify()`. (IPoE isn't a PPP-auth server — it keeps its RADIUS-only reject.) |
-| **VRRP auth** ([`high-availability`](../interface-definitions/high-availability.xml.in)) | `authentication type` = `plaintext-password \| ah` (AH = HMAC-MD5) | ⚠ **decision** | both non-approved; VRRPv3 drops auth anyway → reject `authentication` under FIPS, or declare out-of-scope |
+| **VRRP auth** ([`high-availability`](../interface-definitions/high-availability.xml.in)) | `authentication type` = `plaintext-password \| ah` (AH = HMAC-MD5) | **LANDED** — whole-feature reject | Both forms non-approved (plaintext / AH-HMAC-MD5), keepalived native crypto (no OpenSSL backstop), and VRRPv3 drops authentication entirely — no approved alternative. Under FIPS, [high-availability.py](../src/conf_mode/high-availability.py) `verify()` rejects a VRRP group's `authentication` via `fips.reject_feature`. |
 | **TLS version floor** | shared [`tls-version-min.xml.i`](../interface-definitions/include/tls-version-min.xml.i) allows **1.0/1.1**/1.2/1.3 (openvpn tls, openconnect) | **LANDED** | Under FIPS, `verify()` rejects an explicit `tls-version-min` of `1.0`/`1.1` on both consumers via `reject_unapproved` ([interfaces_openvpn.py](../src/conf_mode/interfaces_openvpn.py), [vpn_openconnect.py](../src/conf_mode/vpn_openconnect.py)); shared policy leaf `tls-version-min` (approved `1.2`/`1.3`) + grammar-drift test. OpenVPN is OpenSSL-backed (provider also blocks <1.2 at runtime); **openconnect is GnuTLS (no provider backstop)** so the config gate is the real enforcement there — its grammar already defaults to `1.2`, so unset is safe and this is reject-only. |
-| **TLS consumers** (sstp, sstpc, syslog, email, container, zabbix, salt) | none expose a cipher-list CLI leaf (unlike SSH/HTTPS/haproxy) | ⚠ **backend-dependent** | OpenSSL-backed → fips provider auto-rejects at runtime; **ocserv (openconnect) is historically GnuTLS, NOT the OpenSSL fips module** — needs per-daemon confirmation |
-| **HTTP API** | **no** md5/hashlib weak-hash in the API; [`rest/routers.py`](../src/services/api/rest/routers.py) has `verify=False` (×5) | ✅ algorithms clean; ⚠ TLS-trust | the MD5 audit is **clean**; `verify=False` is cert-validation (not an algorithm claim) — track separately |
-| **Routing-protocol auth (NEW — found 2026-11-05)** | OSPF / IS-IS / RIP / BGP use **MD5 / plaintext** auth keys (`include/ospf/authentication.xml.i`, etc.) | ❌ non-approved; newly found | add to backlog — reject MD5/plaintext routing auth under FIPS (or classify intent) |
+| **TLS consumers** (sstp, sstpc, syslog, email, container, zabbix, salt) | none expose a cipher-list CLI leaf (unlike SSH/HTTPS/haproxy) | **CLOSED** — provider-governed; ocserv gated | OpenSSL-backed → fips provider auto-rejects non-approved suites at runtime. **ocserv (openconnect) confirmed GnuTLS** (not the OpenSSL fips module) — now **gated** via the TLS-version floor (its one cipher knob); its `tls-priorities` string carries approved suites. The remaining consumers are OpenSSL-backed with no CLI leaf to restrict, so the provider auto-enforces — no code needed. |
+| **HTTP API** | **no** md5/hashlib weak-hash in the API; [`rest/routers.py`](../src/services/api/rest/routers.py) has `verify=False` (×5) | **CLOSED** — not a FIPS-algorithm issue | The MD5 audit is clean. The five `verify=False` calls all target **`https://127.0.0.1:{port}/…`** (loopback SSO/JWKS self-calls); it is a **cert-trust posture**, not an algorithm claim — the TLS crypto still runs through OpenSSL (requests→urllib3→OpenSSL), provider-governed. No FIPS code needed; track cert-trust separately if desired. |
+| **Routing-protocol auth** | OSPF / IS-IS / RIP / BGP use **MD5 / plaintext** auth keys (`include/ospf/authentication.xml.i`, etc.) | **LANDED** — whole-feature reject | Confirmed **none of the four exposes a SHA/HMAC-SHA2 option** — OSPF (md5/plaintext), IS-IS (md5/plaintext area/domain/circuit), RIP (md5/plaintext), BGP (TCP-MD5 password) — so there is no approved subset, and it is native FRR crypto (no OpenSSL backstop). Under FIPS each protocol's `verify()` rejects any configured auth via `fips.reject_present_keys` (recursive marker search over the VRF-resolved protocol dict — catches area/virtual-link/interface/peer-group nesting; `null` auth is allowed). [protocols_ospf.py](../src/conf_mode/protocols_ospf.py) / [protocols_isis.py](../src/conf_mode/protocols_isis.py) / [protocols_rip.py](../src/conf_mode/protocols_rip.py) / [protocols_bgp.py](../src/conf_mode/protocols_bgp.py). |
 | **DHCP TSIG key** | [`dhcp-server-common-config.xml.i`](../interface-definitions/include/dhcp/dhcp-server-common-config.xml.i) `dynamic-dns-update … tsig-key … algorithm` = `md5 sha1 sha224 sha256 sha384 sha512` — **HMAC-MD5** offered (non-approved) | **LANDED** — in-boundary, reject-only | Verified on target that `kea-dhcp-ddns` links `libkea-cryptolink`→`libcrypto.so.3` (OpenSSL backend), so the provider is a runtime backstop. `algorithm` is a **mandatory** leaf (no grammar default), so enforcement is reject-only: under FIPS `verify()` rejects an `md5` TSIG algorithm ([service_dhcp-server.py](../src/conf_mode/service_dhcp-server.py)); approved = `sha1`+SHA-2 (HMAC-SHA1 is still FIPS-approved; MD5 disallowed). Policy leaf + grammar-drift test added. |
 | **Serial global TLS — Perle** | [`serial/global/tls-global.xml.i`](../interface-definitions/include/serial/global/tls-global.xml.i): `version` default **`any`** (allows TLS<1.2); `cipher-options` defaults **`encryption any`** (non-AES), **`min-key-size 40`** (40-bit!), **`key-exchange any`** (incl. anonymous-DH / DSS), **`hmac any/md5`** | **LANDED** — in-boundary, **opt-in**, provider-backstopped | **Verified on target (10.10.50.165):** the Perle IOLAN daemons (`iol_direct`/`iol_rawd`/…) **dynamically link the system `libssl.so.3`** and carry **no `OPENSSL_CONF`/provider override**, so under FIPS they route through the validated provider (a *runtime backstop* — weak suites simply won't negotiate). Exposure is **opt-in** (both `tls template` and `cipher-options` are tagNodes — an SSH-only serial box emits no TLS). Enforcement **landed** ([serial.py](../src/conf_mode/serial.py)): under FIPS `verify()` rejects explicit non-approved `version`/`encryption`/`min`+`max-key-size`/`key-exchange`/`hmac`, and `generate()` emits approved defaults (incl. pinning an approved `cipher-options 1`) so a configured template is approved-by-default. Approved values live in [approved-algorithms.toml](../data/fips/approved-algorithms.toml) (6 new leaves, grammar-drift-tested). Downgraded from "biggest surface" → normal priority (not a passive hole). *On-target: exercise a `tls template` under FIPS.* |
-| **stunnel TLS proxy (NEW — found 2026-11-05)** | [`service_stunnel`](../interface-definitions/service_stunnel.xml.in) + [`ssl.xml.i`](../interface-definitions/include/stunnel/ssl.xml.i)/[`psk.xml.i`](../interface-definitions/include/stunnel/psk.xml.i): cert/CA + **TLS-PSK**; no cipher/version CLI leaf | ⚠ backend-dependent | OpenSSL-backed → fips provider auto-rejects at runtime; verify TLS-PSK uses approved suites; `options` `ntlm` is app-layer auth (MD4) — note |
+| **stunnel TLS proxy** | [`service_stunnel`](../interface-definitions/service_stunnel.xml.in) + [`ssl.xml.i`](../interface-definitions/include/stunnel/ssl.xml.i)/[`psk.xml.i`](../interface-definitions/include/stunnel/psk.xml.i): cert/CA + **TLS-PSK**; no cipher/version CLI leaf | **CLOSED** — provider-governed, no code | Verified on target: `stunnel` links system `libssl.so.3`/`libcrypto.so.3`, and the template emits **no `sslVersion`/`ciphers`** forcing — so OpenSSL defaults apply and the FIPS provider auto-rejects non-approved suites/versions at runtime, including for TLS-PSK. `options authentication ntlm` is **application-layer `connect`/`smtp` proxy auth** (MD4), outside the TLS/validated boundary — a note, not a gate. |
 | **WWAN APN auth** | [`interfaces_wwan`](../interface-definitions/interfaces_wwan.xml.in) `authentication type` = `none pap chap both` (PAP=plaintext, CHAP=MD5) | **OUT OF SCOPE** (decided) | **Documented scope exclusion:** this is **carrier-mandated** link-layer authentication to the cellular network — the operator cannot choose the crypto (the carrier dictates PAP/CHAP), and the operator opts in by configuring it. Deliberately excluded rather than rejected; an auditor sees an explicit ruling, not a miss. |
 
 Remaining-ordering: **quick wins** = TLS-version floor + the PKI **input gate**
@@ -522,7 +552,7 @@ daemons not surfaced through the VyOS CLI.
 | **T9040 — build FIPS-provider OpenSSL** | `vyos/vyos-build#1233` | **merged** 2026-07-03 | Patches OpenSSL build with `enable-fips` (`0001-Enable-FIPS-module.patch`) so `fips.so` is produced. Built against the Debian **3.0.20** base. |
 | **T8508 — build OpenSSL 3.1.2** (the validated version) | `vyos/vyos-build#1161` | **not merged** (closed) | Attempted to ship the specific FIPS-**validated** OpenSSL 3.1.2. Superseded by the enable-fips-on-base approach. |
 | **T861 — secure boot** | `vyos/vyos-build#1223` | merged | UEFI Secure Boot / shim — relevant to module/boot integrity (§6). |
-| Kernel FIPS (`CONFIG_CRYPTO_FIPS`, `fips=1`) | `vyos/vyos-build` kernel config | **defconfig enabled (2026-11-05)** | `CONFIG_CRYPTO_FIPS=y` (+ `CRYPTO_SELFTESTS`/`MODULE_SIG`) set in the perle-igos arm64 defconfig; `fips=1` recognized + self-tests after rebuild. HMAC integrity initramfs still pending. |
+| Kernel FIPS (`CONFIG_CRYPTO_FIPS`, `fips=1`) | `vyos/vyos-build` kernel config | **defconfig enabled (2026-11-05); SA2UL disabled (2026-11-06)** | `CONFIG_CRYPTO_FIPS=y` (+ `CRYPTO_SELFTESTS`/`MODULE_SIG`) set in the perle-igos arm64 defconfig; `fips=1` recognized + self-tests after rebuild. The forced self-tests panic the TI `sa2ul` HW crypto driver, so `CONFIG_CRYPTO_DEV_SA2UL` was disabled (out-of-boundary + idle; re-enable when TI's upstream fix series merges — see the SA2UL checkpoint note). HMAC integrity initramfs still pending. |
 
 Key takeaways:
 
@@ -1133,8 +1163,15 @@ implemented), and all operator uses fall outside an uncertified module.
 
 **Enforcement that falls out of this:**
 
-- In FIPS mode, `verify()` **fails closed** on TPM-backed **OpenVPN**,
-  **`ssh-tpm-agent`**, and **TPM-PKI**. Once blocked, the `providers … tpm2`
+- In FIPS mode, TPM operator uses are blocked **(landed)**: TPM-backed
+  **OpenVPN** (`verify()` reject, [interfaces_openvpn.py](../src/conf_mode/interfaces_openvpn.py));
+  **`ssh-tpm-agent`** — [service_ssh.py](../src/conf_mode/service_ssh.py)
+  `generate()` disables the TPM agent drop-in under FIPS and emits approved
+  RSA+ECDSA **text** host keys instead (a generation-time override, so SSH keeps
+  working rather than failing the commit); **TPM-PKI** — the op-mode tool
+  [tpm_pki.py](../src/op_mode/tpm_pki.py) refuses `generate_tpm`/`import_tpm`
+  under FIPS, and serial TLS rejects a **TPM-backed server key** in
+  [serial.py](../src/conf_mode/serial.py). Once blocked, the `providers … tpm2`
   branch is never rendered, so the TPM/provider conflict resolves itself.
 - **Independent of TPM:** OpenVPN's template previously emitted `providers default`
   even in the non-TPM branch — explicitly loading the `default` provider would

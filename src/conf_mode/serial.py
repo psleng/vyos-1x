@@ -36,6 +36,7 @@ from vyos import ConfigError
 from vyos.fips import fips_enabled
 from vyos.fips import approved as fips_approved
 from vyos.fips import default as fips_default
+from vyos.fips import reject_feature as fips_reject_feature
 from vyos.tpm import tpm_enabled
 from vyos.tpm_pki import get_path_str
 from vyos.tpm_pki import validate_certificate_against_tpm_priv_key
@@ -700,6 +701,15 @@ def verify(config):
                 raise ConfigError('global-parameters tls: template required')
             for template_name, template_conf in config['global_parameters']['tls']['template'].items():
                 if template_conf.get('role') == 'server' and tpm_enabled():
+                    # FIPS 140-3 (§6.1): a TPM-backed server key makes the TPM the
+                    # TLS signing operator -- outside the validated OpenSSL
+                    # boundary on an uncertified fTPM. Refuse under FIPS.
+                    if config.get('_fips'):
+                        fips_reject_feature(
+                            f'serial TLS template "{template_name}" (TPM-backed server key)',
+                            'A TPM-backed serial TLS server key is not '
+                            'FIPS-approved. Use a non-TPM certificate, or '
+                            'disable FIPS.')
                     if 'certificate' not in template_conf:
                         # TPM disabled case can use snakeoil cert
                         raise ConfigError(f'tls template "{template_name}": certificate required for TPM server')

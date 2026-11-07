@@ -31,6 +31,7 @@ from vyos.utils.network import get_interface_config
 from vyos.utils.process import is_systemd_service_running
 from vyos import ConfigError
 from vyos import airbag
+from vyos import fips
 airbag.enable()
 
 def get_config(config=None):
@@ -53,6 +54,16 @@ def verify(config_dict):
     ospf = vrf and dict_search(f'vrf.name.{vrf}.protocols.ospf',
                                  config_dict) or config_dict['ospf']
     ospf['policy'] = config_dict['policy']
+
+    # FIPS 140-3: OSPF exposes authentication only as MD5 or plaintext (no
+    # HMAC-SHA option), neither of which is approved, and it is native FRR crypto
+    # (no OpenSSL provider backstop). Reject any configured MD5/plaintext auth.
+    if fips.fips_enabled():
+        fips.reject_present_keys(
+            ospf, ('md5', 'plaintext_password'),
+            'OSPF MD5/plaintext authentication',
+            'No FIPS-approved (HMAC-SHA) OSPF authentication is available. '
+            'Remove it, or disable FIPS.')
 
     verify_common_route_maps(ospf)
 
