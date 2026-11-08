@@ -603,7 +603,7 @@ class InterfaceConfig(ServiceInterface):
                                'connection_mode': mode})
 
             # Apply the configuration
-            await self.set_configuration(dbus_config)
+            await self._apply_config_impl(dbus_config)
 
             logger.info("Restored configuration applied successfully",
                        extra={'interface_number': self.interface_number})
@@ -656,6 +656,18 @@ class InterfaceConfig(ServiceInterface):
 
     @method()
     async def set_configuration(self, config: 'a{sv}') -> 's':  # type: ignore[name-defined]  # noqa: F821, F722
+        # A dbus-next @method()-decorated handler cannot be awaited directly: a
+        # direct in-process call returns None rather than a coroutine. Delegate
+        # to a plain async impl so the crash-recovery restore path
+        # (_apply_restored_config) can reuse the identical logic without hitting
+        # a None-await -- that bug previously left restored dial-on-demand config
+        # unapplied, quarantined the cache, and stranded the modem in always-on
+        # after any bare service restart.
+        return await self._apply_config_impl(config)
+
+    async def _apply_config_impl(self, config) -> str:
+        """Shared config-apply logic for the D-Bus set_configuration handler and
+        the restore path. Must NOT carry the @method decorator."""
         try:
             logger.info("Setting configuration",
                        extra={'interface_number': self.interface_number,
