@@ -103,10 +103,19 @@ kernel.
   `verify=False` (loopback cert-trust, not an algorithm claim). **Only remaining:
   drop the "incomplete" warning** (T8529 `apply()`), gated on on-target
   validation.
-- **Validation pending (needs a booted build):** reboot-survives the toggle,
-  fail-closed `fips.so` removal, end-to-end IKE SA against a live peer; **kernel
-  `fips=1` recognized + `fips_enabled=1`** on the next kernel build (with
-  `sa2ul` disabled — see the SA2UL note above).
+- **On-target validated (2026-11-08, box 10.10.50.165, booted FIPS image):**
+  **kernel** `fips=1` recognized + `fips_enabled=1`, boot crypto self-tests
+  **passed**, **no SA2UL panic** (driver disabled — ghash disabled by FIPS as
+  expected); **OpenSSL FIPS + base providers active** (blocks DSA-1step /
+  RSA-1024 / MD5, allows RSA-2048 / SHA-256); **PKI** library refuses DSA/RSA-1024
+  and builds EC/RSA-2048 + full CA→leaf→verify→CRL, input gate active; and the
+  **conf-mode rejects fire under FIPS** — BGP TCP-MD5, OSPF md5/plaintext, VRRP
+  auth, PPPoE whole-feature, DHCP TSIG-md5, and the openconnect TLS-version floor
+  all fail commit with the expected FIPS message. (Found + fixed a DSA-2048
+  provider-permits gap — see the PKI-migration subsection.)
+- **Validation still pending (needs a live peer / longer soak):** reboot-survives
+  the toggle, fail-closed `fips.so` removal, end-to-end IKE SA against a live
+  peer.
 - **Owned elsewhere:** Phase 4 kernel **integrity chain** (kernel/module `.hmac`
   + HMAC initramfs — vyos-build; the `CONFIG_CRYPTO_FIPS` defconfig half is now
   done); **SA2UL re-enable pending TI's upstream series** (vyos-build defconfig;
@@ -486,11 +495,20 @@ gate** lives at the interactive generation entry points in
 [src/op_mode/pki.py](../src/op_mode/pki.py) (`generate_private_key` offers
 approved-only choices under FIPS — no `dsa`, RSA ∈ {2048, 4096}, EC ∈
 {256, 384, 521}; `generate_dh_parameters` allows only the RFC 7919 FFDHE groups).
-Belt-and-suspenders: under FIPS a bypassed gate still **fails closed** because
-`openssl genpkey` for a weak/DSA key is refused inside the FIPS provider.
-Code-complete; compile + `ruff` + `test_pki_dh` (6/6) + full CA→leaf→CRL signing
-chain green. *On-target validation pending:* confirm weak/DSA keygen actually
-fails under a booted FIPS image.
+Belt-and-suspenders: `create_private_key()` itself **fails closed** under FIPS —
+it refuses DSA (any size) and RSA < 2048 before invoking `openssl`. This library
+guard is **necessary, not redundant**: on-target validation (2026-11-08) found
+the OpenSSL 3.0 FIPS *module* **permits DSA-2048 key generation** via the
+2-step genparam→paramfile path (and even DSA signing) — only RSA < 2048 and the
+1-step `genpkey -algorithm DSA` are refused by the provider. DSA signature
+generation is disallowed under FIPS 140-3 regardless of module capability, so the
+explicit guard (plus the op-mode input gate) is what actually blocks it; the
+guard fails *open* only when FIPS state is unreadable (no config backend, e.g.
+unit tests). Code-complete; compile + `ruff` + `test_pki_dh` (6/6) + full
+CA→leaf→CRL signing chain green. **On-target validated (2026-11-08):** library
+`create_private_key` refuses DSA/RSA-1024 and builds EC/RSA-2048 + full
+CA→leaf→verify→CRL; op-mode input gate confirmed active (`fips_enabled()`→True,
+operator offered `rsa`/`ec` only, RSA ∈ {2048, 4096}).
 
 Phase 2 — **LANDED** (2026-11-06): certificate + CSR signing moved off pyca to
 `openssl req` / `openssl x509 -req` (`create_certificate_request`,

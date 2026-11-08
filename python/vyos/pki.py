@@ -218,6 +218,27 @@ def _fd_inputs(inputs):
                 os.close(fd)
 
 def create_private_key(key_type, key_size=None):
+    # FIPS 140-3 defense-in-depth: the op-mode input gate already blocks these,
+    # but enforce here too because the OpenSSL 3.0 module itself still PERMITS
+    # DSA-2048 key generation via the paramfile path (only RSA < 2048 is refused
+    # by the provider). DSA signature generation is disallowed under FIPS 140-3
+    # regardless of module capability, so refuse DSA (any size) and weak RSA.
+    # Fail open only when FIPS state cannot be read (no config backend, e.g.
+    # unit tests) -- there is no FIPS context to enforce in that case.
+    try:
+        from vyos.fips import fips_enabled
+        fips_on = fips_enabled()
+    except Exception:
+        fips_on = False
+    if fips_on:
+        if key_type == 'dsa':
+            raise ValueError(
+                'FIPS mode: DSA key generation is not FIPS-approved')
+        if key_type == 'rsa' and int(key_size or 0) < 2048:
+            raise ValueError(
+                'FIPS mode: RSA key size must be at least 2048 bits')
+
+
     if key_type == 'rsa':
         pem = _run_openssl(
             ['genpkey', '-algorithm', 'RSA',
