@@ -900,6 +900,11 @@ def build_fsm_config(wwan):
         # MTU
         'mtu': _leaf_int(wwan, 'mtu', 1420),
 
+        # When set, honor the carrier/modem-provided MTU instead of the
+        # configured interface MTU.  Off by default: many modems report a bogus
+        # 1500 when the carrier signals no MTU, which black-holes large packets.
+        'carrier_provided_mtu': _leaf_exists(wwan, 'carrier_provided_mtu'),
+
         # Default route metric — metric for the carrier-assigned default
         # route(s) the FSM installs on wwanN.  Default 220 keeps cellular
         # below a wired primary (failover/static metric 1, DHCP 210), so the

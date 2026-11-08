@@ -14722,6 +14722,7 @@ class ModemStateMachine:
         if self.config:
             interface_mtu = self.config.get('mtu', 1420)
             network_mtu = status.get('mtu', '')
+            carrier_provided = bool(self.config.get('carrier_provided_mtu', False))
 
             # Look up per-SIM MTU for active slot
             sim_mtu = 0
@@ -14738,7 +14739,7 @@ class ModemStateMachine:
                 else:
                     status['mtu_effective'] = str(sim_mtu)
                     status['mtu_source'] = 'per-sim'
-            elif network_mtu:
+            elif carrier_provided and network_mtu:
                 status['mtu_effective'] = str(int(network_mtu))
                 status['mtu_source'] = 'network'
             else:
@@ -20490,8 +20491,14 @@ class ModemStateMachine:
                     logger.warning(f"Failed to add IPv4 address: {stderr.decode()}",
                                  extra={'interface_number': self.interface_number})
 
-                # Set MTU — priority: per-SIM mtu > min(bearer, interface) > interface mtu
+                # Set MTU — priority: per-SIM mtu > carrier mtu (only when
+                # carrier-provided-mtu is enabled) > configured interface mtu.
+                # By default the configured interface MTU is authoritative:
+                # many modems report a bogus 1500 when the carrier signals no
+                # MTU, which black-holes large packets.  Operators who trust
+                # the carrier/modem value opt in with `carrier-provided-mtu`.
                 interface_mtu = self.config.get('mtu', 1420) if self.config else 1420
+                carrier_provided = bool(self.config.get('carrier_provided_mtu', False)) if self.config else False
 
                 # Check per-SIM MTU override for the active SIM
                 sim_mtu = 0
@@ -20509,11 +20516,12 @@ class ModemStateMachine:
                     else:
                         effective_mtu = str(sim_mtu)
                         mtu_source = 'per-sim'
-                elif ipv4_mtu:
-                    # Carrier MTU as-is; interface mtu is a fallback, not a ceiling.
+                elif carrier_provided and ipv4_mtu:
+                    # Operator opted into the carrier/modem-provided MTU.
                     effective_mtu = str(int(ipv4_mtu))
                     mtu_source = 'network'
                 else:
+                    # Default: configured interface MTU is authoritative.
                     effective_mtu = str(interface_mtu)
                     mtu_source = 'interface'
 
@@ -20600,6 +20608,7 @@ class ModemStateMachine:
                 # per-SIM MTU and/or carrier-advertised IPv6 MTU.
                 if not bearer_ips.get('ipv4'):
                     interface_mtu = self.config.get('mtu', 1420) if self.config else 1420
+                    carrier_provided = bool(self.config.get('carrier_provided_mtu', False)) if self.config else False
 
                     sim_mtu = 0
                     if self.config:
@@ -20616,10 +20625,12 @@ class ModemStateMachine:
                         else:
                             effective_mtu = str(sim_mtu)
                             mtu_source = 'per-sim'
-                    elif ipv6_mtu:
+                    elif carrier_provided and ipv6_mtu:
+                        # Operator opted into the carrier/modem-provided MTU.
                         effective_mtu = str(int(ipv6_mtu))
                         mtu_source = 'network'
                     else:
+                        # Default: configured interface MTU is authoritative.
                         effective_mtu = str(interface_mtu)
                         mtu_source = 'interface'
 
