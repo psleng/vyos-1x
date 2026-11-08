@@ -69,9 +69,13 @@ kernel.
     image still pending.
   - **Phase 4 kernel (vyos-build) — `fips=1` now recognized.** Enabled
     `CONFIG_CRYPTO_FIPS=y` (+ its deps `CONFIG_CRYPTO_SELFTESTS=y` and
-    `CONFIG_MODULE_SIG=y`, **without** `MODULE_SIG_FORCE` so unsigned out-of-tree
-    drivers still load; SHA-512 sig hash) in the **perle-igos arm64 defconfig**
+    `CONFIG_MODULE_SIG=y`; SHA-512 sig hash) in the **perle-igos arm64 defconfig**
     (`vyos-build/scripts/package-build/linux-kernel/platform/perle-igos/...`).
+    **`MODULE_SIG_FORCE=y` (2026-11-08):** the only out-of-tree drivers on this
+    platform are the NXP wifi/BT modules (`build_iGOS_drivers`), which were the
+    sole unsigned modules (2 of 950 in the deployed build); they now get signed
+    with the kernel's build-time key in that build script, so enforcement is
+    enabled — no module loads unless signed (fail-closed module integrity).
     Verified via `make ARCH=arm64 vyos_defconfig` on the 6.18.38 tree — the
     symbol survives dependency resolution. After a kernel rebuild, `fips=1` is
     recognized (no "Unknown parameter"), boot KAT self-tests run, and
@@ -1122,9 +1126,11 @@ rigor:
     boundary algorithms ride the GPG-signed kernel image.
   - **dm-verity** integrity-protects the **squashfs rootfs**, covering the
     runtime-loaded accelerator crypto modules (`CRYPTO_AES_ARM64=m`,
-    `aes-ce`/`sha256-ce`/`gcm-aes-ce`) that live on it — closing the one path the
-    boot-chain signature doesn't reach (we intentionally leave
-    `MODULE_SIG_FORCE` off so unsigned vendor drivers still load).
+    `aes-ce`/`sha256-ce`/`gcm-aes-ce`) that live on it. **Belt-and-suspenders
+    (2026-11-08):** `MODULE_SIG_FORCE=y` is now enabled and the NXP out-of-tree
+    drivers are signed, so **every** module is signature-verified at load against
+    the kernel's trusted key — a second, independent fail-closed integrity layer
+    for modules on top of dm-verity.
   - The **validated module (OpenSSL)** performs its **own** integrity self-test —
     `openssl fipsinstall` writes the HMAC of `fips.so` into `fipsmodule.cnf`,
     verified at provider activation (`.include /run/ssl/fipsmodule.cnf`,
@@ -1723,13 +1729,15 @@ in/out for the first release.*
     under FIPS (RadSec/TLS wrapper for the UDP RADIUS clients).
   - **Kernel config (Phase 4, §8.3)** — `CONFIG_CRYPTO_FIPS=y`
     **DONE + on-target validated (2026-11-08):** enabled in the perle-igos arm64
-    defconfig with its deps (`CRYPTO_SELFTESTS=y`, `MODULE_SIG=y` without
-    `MODULE_SIG_FORCE`, SHA-512 module-sig hash); SA2UL disabled; boots `fips=1`
-    with KAT self-tests passing. **Code integrity: no `.hmac` integrity-initramfs
-    required** — provided by the signed boot chain (Secure Boot → grub GPG over
-    kernel/initrd/dtb → dm-verity over the squashfs → OpenSSL self-test; §6).
-    **Still pending:** approved DRBG/entropy review; **approved-mode only, not a
-    validated kernel module**.
+    defconfig with its deps (`CRYPTO_SELFTESTS=y`, `MODULE_SIG=y` +
+    `MODULE_SIG_FORCE=y`, SHA-512 module-sig hash); the NXP out-of-tree drivers
+    are now signed in `build_iGOS_drivers`, so enforcement is on (no unsigned
+    module loads); SA2UL disabled; boots `fips=1` with KAT self-tests passing.
+    **Code integrity: no `.hmac` integrity-initramfs required** — provided by the
+    signed boot chain (Secure Boot → grub GPG over kernel/initrd/dtb → dm-verity
+    over the squashfs → OpenSSL self-test; §6), with signed-module enforcement as
+    an additional fail-closed layer. **Still pending:** approved DRBG/entropy
+    review; **approved-mode only, not a validated kernel module**.
   - **Secure Boot (T861) + grub GPG + dm-verity** — the integrity chain backing
     kernel FIPS mode (replaces the `.hmac` initramfs). A FIPS image must ship with
     dm-verity enabled.
