@@ -136,12 +136,6 @@ def _format(data: dict) -> str:
                          'still running in FIPS mode:')
         lines.append('  save the configuration and reboot to apply.')
 
-    # Phase 0/1 scope note: the provider is switched, but system-wide approved
-    # operation (algorithm restriction, non-approved feature refusal) is not yet
-    # enforced.
-    lines.append('  Note: FIPS 140-3 enforcement is incomplete; only the '
-                 'OpenSSL provider is switched.')
-
     return '\n'.join(lines)
 
 

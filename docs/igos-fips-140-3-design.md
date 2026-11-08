@@ -1,12 +1,15 @@
 # igOS FIPS 140-3 — Design Sketch
 
-Status: **implementation in progress** (Phases 0, 1, the vyos-1x half of Phase 4,
-and the Phase 4 **kernel `CONFIG_CRYPTO_FIPS` defconfig** landed; enforcement
-largely landed — helper/policy + SSH + IPsec + HTTPS + NTP/NTS + WireGuard/PPTP +
-RADIUS/TACACS+ + OpenVPN-TPM + Wireless + SNMPv3 + haproxy + password-hash KDF;
-remaining = TPM operator rejects + the traced audit rows + on-target validation +
-the vyos-build kernel **integrity chain** (HMAC initramfs) — see "Implementation
-status" below).
+Status: **vyos-1x enforcement complete; on-target validated (2026-11-08)**
+(Phases 0, 1, the vyos-1x half of Phase 4, and the Phase 4 **kernel
+`CONFIG_CRYPTO_FIPS` defconfig** landed; enforcement complete — helper/policy +
+SSH + IPsec + HTTPS + NTP/NTS + WireGuard/PPTP + RADIUS/TACACS+ + OpenVPN-TPM +
+Wireless + SNMPv3 + haproxy + password-hash KDF + PKI openssl migration + serial
+TLS + DHCP TSIG + PPP + TLS-version floor + routing-protocol auth + VRRP auth +
+TPM-PKI; the `show system fips` "incomplete" note has been dropped. Remaining is
+**not vyos-1x code**: live-peer IKE SA + reboot-toggle soak (deployment-grade
+validation) and the vyos-build kernel **integrity chain** (HMAC initramfs) — see
+"Implementation status" below).
 Scope: run a **single igOS image** that can be placed into a **FIPS 140-3 mode**
 by configuration (`set system option fips`, applied on **reboot**), so that the
 system performs its cryptography using a **FIPS 140-3 validated module** (the
@@ -95,14 +98,17 @@ kernel.
     — v2 posted 2026-11-04**, not merged, not in 6.18. Re-enable `sa2ul` once the
     series lands in a kernel we can rebase/backport. Lore:
     `lore.kernel.org/all/?q=sa2ul+cleanup`.
-- **Remaining vyos-1x code:** the enforcement wave landed (2026-11-07) — TPM
-  operator rejects (`ssh-tpm-agent` generation-override + TPM-PKI op-mode/serial
-  reject, §6.1), VRRP auth reject, and routing-protocol auth reject
-  (OSPF/IS-IS/RIP/BGP). The backend-dependent TLS consumers are now **closed**:
-  stunnel (OpenSSL-backed, provider-governed, no code) and the HTTP-API
-  `verify=False` (loopback cert-trust, not an algorithm claim). **Only remaining:
-  drop the "incomplete" warning** (T8529 `apply()`), gated on on-target
-  validation.
+- **Remaining vyos-1x code:** **COMPLETE (2026-11-08).** The enforcement wave
+  landed (2026-11-07) — TPM operator rejects (`ssh-tpm-agent` generation-override
+  + TPM-PKI op-mode/serial reject, §6.1), VRRP auth reject, and routing-protocol
+  auth reject (OSPF/IS-IS/RIP/BGP). The backend-dependent TLS consumers are
+  **closed**: stunnel (OpenSSL-backed, provider-governed, no code) and the
+  HTTP-API `verify=False` (loopback cert-trust, not an algorithm claim). The
+  PKI DSA/weak-RSA library guard landed after on-target validation. The
+  **"incomplete" enforcement note was dropped** from `show system fips`
+  (2026-11-08) now that enforcement is on-target validated. No remaining vyos-1x
+  code; only the live-peer IKE SA + reboot-toggle soak remain (deployment-grade
+  validation, not code).
 - **On-target validated (2026-11-08, box 10.10.50.165, booted FIPS image):**
   **kernel** `fips=1` recognized + `fips_enabled=1`, boot crypto self-tests
   **passed**, **no SA2UL panic** (driver disabled — ghash disabled by FIPS as
@@ -322,7 +328,9 @@ file-level test deploys.
 2. Then: TPM operator rejects for `ssh-tpm-agent` + TPM-PKI (§6.1; OpenVPN TPM
    reject already landed; password-hash KDF §8.5 **landed**), and the ⚠audit
    rows below.
-   Drop the "incomplete" warning once enforcement lands.
+   Drop the "incomplete" warning once enforcement lands. **(Done 2026-11-08 —
+   enforcement complete + on-target validated; note removed from `show system
+   fips`.)**
 
 **Smoketest-level validation (needs a live IPsec peer):** end-to-end IKE SA
 establishment under FIPS (the on-target check here proved charon loads the
@@ -1379,7 +1387,9 @@ approved defaults.
 - `show system fips` (op-mode): provider status (`openssl list -providers`),
   self-test result, kernel fips state, and a summary of enforced restrictions.
 - Replace the upstream "incomplete" warning with an accurate status once the
-  scope below is met.
+  scope below is met. **(Done 2026-11-08 — the `show system fips` "incomplete"
+  note was removed; the command now reports provider/self-test/kernel status
+  without the scope caveat.)**
 
 ### 7.5 Packaging the validated provider: separate package, built from pinned source
 
@@ -1613,7 +1623,7 @@ in/out for the first release.*
   consumers (SSH/IPsec/SNMP), rejects classic **RADIUS/TACACS+** admin auth
   (§4.1), rejects TPM-backed operator uses on an uncertified TPM
   (OpenVPN/`ssh-tpm-agent`/TPM-PKI — §6.1), approved-KDF password hashing (§8.5).
-  Drop the "incomplete" warning.
+  Drop the "incomplete" warning. **(All landed; warning dropped 2026-11-08.)**
 - **Phase 3a (conditional) — RadSec.** If RADIUS is required under FIPS, add
   `radsecproxy` + CLI/config/PKI wiring so RADIUS runs over TLS (§4.1/§8.8).
 - **Phase 4 — Kernel FIPS mode (approved-mode operation; NOT a validated kernel
