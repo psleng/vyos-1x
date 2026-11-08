@@ -8,8 +8,10 @@ Wireless + SNMPv3 + haproxy + password-hash KDF + PKI openssl migration + serial
 TLS + DHCP TSIG + PPP + TLS-version floor + routing-protocol auth + VRRP auth +
 TPM-PKI; the `show system fips` "incomplete" note has been dropped. Remaining is
 **not vyos-1x code**: live-peer IKE SA + reboot-toggle soak (deployment-grade
-validation) and the vyos-build kernel **integrity chain** (HMAC initramfs) — see
-"Implementation status" below).
+validation). The kernel **integrity chain needs no initramfs work** — it is
+satisfied by the existing signed boot chain (Secure Boot → grub GPG → dm-verity →
+OpenSSL self-test), see §6/"Code-integrity via the signed boot chain" — so the
+RHEL-style `.hmac` integrity-initramfs is **not required** on this platform.
 Scope: run a **single igOS image** that can be placed into a **FIPS 140-3 mode**
 by configuration (`set system option fips`, applied on **reboot**), so that the
 system performs its cryptography using a **FIPS 140-3 validated module** (the
@@ -73,9 +75,11 @@ kernel.
     Verified via `make ARCH=arm64 vyos_defconfig` on the 6.18.38 tree — the
     symbol survives dependency resolution. After a kernel rebuild, `fips=1` is
     recognized (no "Unknown parameter"), boot KAT self-tests run, and
-    `fips_enabled=1` → `show system fips` Kernel FIPS flips to **yes**. The
-    larger integrity chain (kernel/module `.hmac` + integrity-checked initramfs)
-    is still pending.
+    `fips_enabled=1` → `show system fips` Kernel FIPS flips to **yes**. **Code
+    integrity needs no `.hmac` initramfs** — it is provided by the existing
+    signed boot chain (Secure Boot → grub GPG over kernel/initrd/dtd → dm-verity
+    over the squashfs → OpenSSL's own `fipsmodule.cnf` HMAC self-test); see
+    §6/"Code-integrity via the signed boot chain".
   - **Phase 4 kernel — SA2UL self-test panic (found + worked around 2026-11-06).**
     On the first `fips=1` boot the kernel **panics** during the crypto-manager
     self-tests (`cryptomgr_test` → `sa_aead_cbc_sha256_setkey` → `sa_init_sc` →
@@ -122,11 +126,12 @@ kernel.
 - **Validation still pending (needs a live peer / longer soak):** reboot-survives
   the toggle, fail-closed `fips.so` removal, end-to-end IKE SA against a live
   peer.
-- **Owned elsewhere:** Phase 4 kernel **integrity chain** (kernel/module `.hmac`
-  + HMAC initramfs — vyos-build; the `CONFIG_CRYPTO_FIPS` defconfig half is now
-  done); **SA2UL re-enable pending TI's upstream series** (vyos-build defconfig;
-  see the SA2UL note above); RadSec (§8.8); claim wording (§8.2); am64x OE + TPM
-  cert (§8.6/§8.7).
+- **Owned elsewhere:** Phase 4 kernel **code integrity is already covered by the
+  signed boot chain** (Secure Boot → grub GPG → dm-verity → OpenSSL self-test),
+  so **no `.hmac`/integrity-initramfs work is required** — the only gate is that a
+  FIPS image must ship with **dm-verity enabled** (see §6). **SA2UL re-enable
+  pending TI's upstream series** (vyos-build defconfig; see the SA2UL note above);
+  RadSec (§8.8); claim wording (§8.2); am64x OE + TPM cert (§8.6/§8.7).
 
 **Scope decisions locked in:** validated-module claim = **OpenSSL provider only**
 (#4985); kernel **FIPS _mode_** (`fips=1`) is additionally enabled as approved-mode
@@ -338,10 +343,12 @@ approved connection with only the openssl plugin, but not a completed handshake
 against a second endpoint).
 
 **Decision-gated / owned elsewhere:** p4-kernel-build — `CONFIG_CRYPTO_FIPS=y`
-(+ `CRYPTO_SELFTESTS`/`MODULE_SIG`) **now enabled in the perle-igos defconfig**
-(2026-11-05; needs a kernel rebuild), **HMAC integrity initramfs still pending** —
-vyos-build, user owns; RadSec scope (§8.8); claim wording (§8.2); am64x OE + TPM
-certification (§8.6/§8.7).
+(+ `CRYPTO_SELFTESTS`/`MODULE_SIG`) **enabled in the perle-igos defconfig** and
+on-target validated (2026-11-08); **code integrity is provided by the signed boot
+chain (Secure Boot → grub GPG → dm-verity → OpenSSL self-test) — no `.hmac`
+integrity-initramfs required**, gated only on dm-verity being enabled for a FIPS
+image — vyos-build, user owns; RadSec scope (§8.8); claim wording (§8.2); am64x OE
++ TPM certification (§8.6/§8.7).
 
 ### Remaining enforcement surface — crypto-consumer audit (2026-11-04; rows traced 2026-11-05)
 
@@ -578,7 +585,7 @@ daemons not surfaced through the VyOS CLI.
 | **T9040 — build FIPS-provider OpenSSL** | `vyos/vyos-build#1233` | **merged** 2026-07-03 | Patches OpenSSL build with `enable-fips` (`0001-Enable-FIPS-module.patch`) so `fips.so` is produced. Built against the Debian **3.0.20** base. |
 | **T8508 — build OpenSSL 3.1.2** (the validated version) | `vyos/vyos-build#1161` | **not merged** (closed) | Attempted to ship the specific FIPS-**validated** OpenSSL 3.1.2. Superseded by the enable-fips-on-base approach. |
 | **T861 — secure boot** | `vyos/vyos-build#1223` | merged | UEFI Secure Boot / shim — relevant to module/boot integrity (§6). |
-| Kernel FIPS (`CONFIG_CRYPTO_FIPS`, `fips=1`) | `vyos/vyos-build` kernel config | **defconfig enabled (2026-11-05); SA2UL disabled (2026-11-06)** | `CONFIG_CRYPTO_FIPS=y` (+ `CRYPTO_SELFTESTS`/`MODULE_SIG`) set in the perle-igos arm64 defconfig; `fips=1` recognized + self-tests after rebuild. The forced self-tests panic the TI `sa2ul` HW crypto driver, so `CONFIG_CRYPTO_DEV_SA2UL` was disabled (out-of-boundary + idle; re-enable when TI's upstream fix series merges — see the SA2UL checkpoint note). HMAC integrity initramfs still pending. |
+| Kernel FIPS (`CONFIG_CRYPTO_FIPS`, `fips=1`) | `vyos/vyos-build` kernel config | **defconfig enabled (2026-11-05); SA2UL disabled (2026-11-06)** | `CONFIG_CRYPTO_FIPS=y` (+ `CRYPTO_SELFTESTS`/`MODULE_SIG`) set in the perle-igos arm64 defconfig; `fips=1` recognized + self-tests after rebuild. The forced self-tests panic the TI `sa2ul` HW crypto driver, so `CONFIG_CRYPTO_DEV_SA2UL` was disabled (out-of-boundary + idle; re-enable when TI's upstream fix series merges — see the SA2UL checkpoint note). Code integrity is provided by the signed boot chain (Secure Boot → grub GPG → dm-verity → OpenSSL self-test); **no `.hmac` integrity-initramfs required** (gated on dm-verity enabled). |
 
 Key takeaways:
 
@@ -1098,13 +1105,39 @@ OpenSSL-only FIPS is **not** a complete 140-3 story. The layers, in increasing
 rigor:
 
 - **Kernel crypto FIPS mode (Phase 4 — in scope)** — requires `CONFIG_CRYPTO_FIPS=y`
-  (not currently in the VyOS kernel config), the `fips=1` boot parameter, and an
-  **integrity-checked initramfs** (the kernel refuses `fips=1` without the HMAC of
-  the crypto modules present). Enforces approved algorithms + self-tests for
-  kernel-space crypto (dm-crypt, AF_ALG, IPsec ESP data-plane).
-- **Module/boot integrity** — ties into **Secure Boot** (T861, already in
-  vyos-build): measured/verified boot chain so the module and its config cannot
-  be tampered with.
+  (landed in the perle-igos defconfig) and the `fips=1` boot parameter. Enforces
+  approved algorithms + self-tests (KATs) for kernel-space crypto (dm-crypt,
+  AF_ALG, IPsec ESP data-plane). **No `.hmac` integrity-initramfs is required on
+  this platform** — see "Code-integrity via the signed boot chain" below.
+- **Code-integrity via the signed boot chain (no initramfs work required).** FIPS
+  requires the crypto *code* be integrity-verified, but the RHEL dracut-style
+  `.hmac` self-test is **redundant on the perle-igos platform**, which already
+  carries a fail-closed, approved-algorithm verified-boot chain:
+  - **UEFI Secure Boot** (enabled on target; T861) verifies **shim → grub**.
+  - **grub verifies the kernel, initrd, and dtb with a GPG signature** — so the
+    kernel image and the early initrd (and the crypto modules in it) are
+    fail-closed on tampering.
+  - The **FIPS-core crypto is built into `vmlinuz`** (`CRYPTO_AES=y`,
+    `CRYPTO_SHA256=y`, `CRYPTO_SHA512=y`, `CRYPTO_FIPS=y`), so the self-tested
+    boundary algorithms ride the GPG-signed kernel image.
+  - **dm-verity** integrity-protects the **squashfs rootfs**, covering the
+    runtime-loaded accelerator crypto modules (`CRYPTO_AES_ARM64=m`,
+    `aes-ce`/`sha256-ce`/`gcm-aes-ce`) that live on it — closing the one path the
+    boot-chain signature doesn't reach (we intentionally leave
+    `MODULE_SIG_FORCE` off so unsigned vendor drivers still load).
+  - The **validated module (OpenSSL)** performs its **own** integrity self-test —
+    `openssl fipsinstall` writes the HMAC of `fips.so` into `fipsmodule.cnf`,
+    verified at provider activation (`.include /run/ssl/fipsmodule.cnf`,
+    `fips = fips_sect`) — which is the integrity test that actually matters for
+    the **OpenSSL-only validated-module claim** (§8.2/§8.3).
+
+  Every link uses an approved integrity technique (RSA/SHA-512 Secure Boot + grub
+  GPG, HMAC-SHA dm-verity, HMAC OpenSSL self-test) and is fail-closed. **Net: the
+  kernel-crypto integrity requirement is satisfied by the existing boot chain; no
+  integrity-initramfs / `.hmac` generation step is needed.** The only gate is that
+  a FIPS image must have **dm-verity enabled** (it completes coverage of
+  runtime-loaded rootfs modules); dm-verity may be turned off for development, but
+  not for an image that claims FIPS mode.
 - **Entropy/DRBG** — ensure an approved SP 800-90A/B DRBG seeded from an approved
   entropy source (jitterentropy/`rngd`), especially on embedded (am64x) targets.
 
@@ -1141,10 +1174,11 @@ approved algorithms is a **runtime** effect of `fips=1` only. So one
 This mirrors the OpenSSL provider toggle exactly (one library, provider switched
 by `system option fips`) and is how RHEL/Ubuntu ship — non-FIPS users lose
 nothing. Costs of the build option are limited to a slightly larger kernel
-(self-test vectors), boot-time self-tests **only when `fips=1`**, and the
-mandatory `.hmac`/initramfs integrity infrastructure (without which `fips=1`
-panics — but `fips=0` still boots normally). None of this affects non-FIPS
-runtime behavior, so the FIPS-capable kernel is safe to ship as the single image.
+(self-test vectors) and boot-time self-tests **only when `fips=1`**. Code
+integrity needs **no `.hmac`/initramfs infrastructure** on this platform — it is
+provided by the signed boot chain (Secure Boot → grub GPG → dm-verity → OpenSSL
+self-test; see §6). None of this affects non-FIPS runtime behavior, so the
+FIPS-capable kernel is safe to ship as the single image.
 
 ### 6.1 TPM interaction with FIPS
 
@@ -1553,9 +1587,10 @@ kernel RNG) operates in **approved mode** (approved algorithms + self-tests) and
 `fips_enabled=1` — strengthening posture and satisfying "FIPS mode enabled"
 requirements. A **CMVP-validated kernel module is NOT claimed** (none is available
 for a Debian/am64x build without self-funding a validation — §8-notes). This adds
-real engineering (Phase 4: kernel `CONFIG_CRYPTO_FIPS`, `fips=1` cmdline,
-integrity-checked initramfs) but no validation paperwork; the claim wording stays
-per §8.2 (approved-mode, not validated, for the kernel).
+some engineering (Phase 4: kernel `CONFIG_CRYPTO_FIPS`, `fips=1` cmdline; code
+integrity via the existing signed boot chain, **no `.hmac` initramfs**) but no
+validation paperwork; the claim wording stays per §8.2 (approved-mode, not
+validated, for the kernel).
 
 ### 8.4 Non-approved feature policy (§5)
 Resolved to the lighter design in §5: only **WireGuard** and **PPTP** are
@@ -1627,15 +1662,17 @@ in/out for the first release.*
 - **Phase 3a (conditional) — RadSec.** If RADIUS is required under FIPS, add
   `radsecproxy` + CLI/config/PKI wiring so RADIUS runs over TLS (§4.1/§8.8).
 - **Phase 4 — Kernel FIPS mode (approved-mode operation; NOT a validated kernel
-  module). IN scope (§8.3).** `vyos-build`: kernel `CONFIG_CRYPTO_FIPS=y` +
-  integrity-checked initramfs (HMAC `.hmac` for kernel + crypto modules) +
-  approved DRBG/entropy (jitterentropy), optionally Secure Boot (T861) for the
-  integrity chain. `vyos-1x`: add **`fips=1`** to the kernel cmdline when
-  `system option fips` is set (via the existing `system_option.py` cmdline/kexec
-  path). Result: kernel-space crypto self-tests + enforces approved algorithms and
-  `fips_enabled=1`. **No validated-kernel claim** — approved-mode only (§6/§8.2).
-  Fail-closed if the kernel refuses `fips=1` (missing integrity → boot panic), so
-  the initramfs HMAC infrastructure is a hard prerequisite.
+  module). IN scope (§8.3).** `vyos-build`: kernel `CONFIG_CRYPTO_FIPS=y`
+  (landed) + approved DRBG/entropy (jitterentropy). **Code integrity is provided
+  by the existing signed boot chain (Secure Boot → grub GPG over kernel/initrd/dtb
+  → dm-verity over the squashfs → OpenSSL's own `fipsmodule.cnf` HMAC self-test);
+  no `.hmac` integrity-initramfs is required** (§6). `vyos-1x`: add **`fips=1`**
+  to the kernel cmdline when `system option fips` is set (via the existing
+  `system_option.py` cmdline/kexec path). Result: kernel-space crypto self-tests
+  (KATs) + enforces approved algorithms and `fips_enabled=1`. **No
+  validated-kernel claim** — approved-mode only (§6/§8.2). The only integrity gate
+  is that a FIPS image must ship with **dm-verity enabled** (it completes coverage
+  of runtime-loaded rootfs crypto modules).
 
 ---
 
@@ -1684,15 +1721,18 @@ in/out for the first release.*
     no `enable-fips`, no `fips.so`).
   - **`radsecproxy`** (conditional, §4.1/§8.8) — new package if RADIUS is required
     under FIPS (RadSec/TLS wrapper for the UDP RADIUS clients).
-  - **Kernel config + initramfs (Phase 4, §8.3)** — `CONFIG_CRYPTO_FIPS=y`
-    **DONE (2026-11-05):** enabled in the perle-igos arm64 defconfig with its
-    deps (`CRYPTO_SELFTESTS=y`, `MODULE_SIG=y` without `MODULE_SIG_FORCE`,
-    SHA-512 module-sig hash); kconfig-resolution verified on the 6.18.38 tree.
-    **Still pending:** integrity-checked initramfs (kernel + crypto-module
-    `.hmac`), approved DRBG/entropy review; **approved-mode only, not a validated
-    kernel module**.
-  - **Secure Boot (T861) tie-in** — optional, for the integrity chain backing
-    kernel FIPS mode.
+  - **Kernel config (Phase 4, §8.3)** — `CONFIG_CRYPTO_FIPS=y`
+    **DONE + on-target validated (2026-11-08):** enabled in the perle-igos arm64
+    defconfig with its deps (`CRYPTO_SELFTESTS=y`, `MODULE_SIG=y` without
+    `MODULE_SIG_FORCE`, SHA-512 module-sig hash); SA2UL disabled; boots `fips=1`
+    with KAT self-tests passing. **Code integrity: no `.hmac` integrity-initramfs
+    required** — provided by the signed boot chain (Secure Boot → grub GPG over
+    kernel/initrd/dtb → dm-verity over the squashfs → OpenSSL self-test; §6).
+    **Still pending:** approved DRBG/entropy review; **approved-mode only, not a
+    validated kernel module**.
+  - **Secure Boot (T861) + grub GPG + dm-verity** — the integrity chain backing
+    kernel FIPS mode (replaces the `.hmac` initramfs). A FIPS image must ship with
+    dm-verity enabled.
 
 ---
 
