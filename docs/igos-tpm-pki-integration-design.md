@@ -203,7 +203,9 @@ a TPM key is just a `pki` key. Touch points to rework:
 - Collapse `tpm_allowed()` → `tpm_exist()` (present hardware is sufficient);
   retire `tpm_enabled()`.
 - **Untouched:** disk/config encryption (`src/helpers/vyos-config-encrypt.py`) —
-  separate feature, legitimately early, independent of the flag.
+  separate feature, legitimately early, independent of the flag. The fTPM secure
+  storage (`/var/lib/tee`) is also unaffected; only the `boot/.tpm.enabled` flag
+  partition is obsoleted (see §3.9).
 
 ### 3.7 FIPS interaction
 
@@ -224,6 +226,47 @@ enforcement treat a `storage tpm` key like any other provider-backed key. See
   bootloader + Secure Boot state; changing grub/kernel/SB policy shifts the PCRs
   and unseal fails. This pre-existing property is now surfaced per key rather
   than hidden behind a global mode.
+
+### 3.9 Persistent TPM storage & the enabled-flag partition
+
+There are **two** distinct persistent TPM areas on this platform today; the
+redesign affects only one of them.
+
+- **`/var/lib/tee` (`DIR_TPM_REEFS` in `src/op_mode/image_installer.py`)** — the
+  fTPM's actual **secure-storage objects**. "REEFS" = *REE FS*, the normal-world
+  file system that **OP-TEE** uses to persist secure-world data. This is the
+  tell that the "TPM" on this board is a **firmware TPM (fTPM) running in OP-TEE
+  TrustZone**, not a discrete chip — which is also why "the TPM is always
+  present" is literally true here (it is part of the secure world). This storage
+  **must** persist; the installer migrates it into each image's rw overlay on
+  upgrade (`boot/<image>/rw/var/lib/tee`). **The redesign does not touch this.**
+
+- **`/dev/mmcblk0p3` → `/run/tpm-state`, holding `boot/.tpm.enabled`
+  (`python/vyos/tpm.py`)** — a dedicated raw eMMC partition that holds **only the
+  mode flag**, mounted on-demand, read, then unmounted (the dance in
+  `tpm_enabled()`). The flag was placed on its own partition — rather than in
+  `/config` or an image overlay — for three reasons:
+
+  1. **Image- and reset-independent.** Multiple system images install
+     side-by-side under `boot/<image>/…`, and `/config` or an image overlay can
+     be wiped on reinstall/config-reset. The flag is a **platform security
+     posture**, not per-image config, so it is kept outside any image to survive
+     `add system image`, image delete, upgrade, and config reset.
+  2. **Chicken-and-egg with config encryption.** The TPM can seal the `/config`
+     volume key (`src/helpers/vyos-config-encrypt.py`); a flag that governs TPM
+     behavior cannot live inside the very volume whose key is TPM-sealed, since
+     it must be readable *before* that volume can be unsealed. A small,
+     always-mountable plaintext partition breaks the circular dependency.
+  3. **Read-only / measured root.** With Secure Boot + dm-verity the squashfs
+     root is immutable and measured, so mutable runtime state cannot be written
+     into it; a dedicated partition is a writable home outside the verity tree.
+
+**Effect of the redesign:** removing enable/disable (§3.6) deletes the
+`boot/.tpm.enabled` flag and the mount/unmount logic in `tpm_enabled()`, so p3's
+only current job disappears. During implementation, confirm whether p3 has any
+other role on this board (it appears not to) and whether it can be **retired or
+repurposed** once the flag is gone. `/var/lib/tee` and the config-encryption
+sealing path are unaffected.
 
 ---
 
@@ -258,6 +301,10 @@ enforcement treat a `storage tpm` key like any other provider-backed key. See
   restore/different hardware.
 - **`generate pki` UX** — surface `storage tpm` as an option/flag consistently
   across `certificate`, `key-pair`, `ca`, and self-signed vs CSR flows.
+- **Retire/repurpose `/dev/mmcblk0p3`** — once the `boot/.tpm.enabled` flag is
+  removed (§3.6, §3.9), confirm p3 has no other role and decide whether to retire
+  or repurpose the partition. The OP-TEE secure storage (`/var/lib/tee`) and
+  config-encryption sealing are unaffected.
 
 ---
 
