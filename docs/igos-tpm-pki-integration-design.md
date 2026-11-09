@@ -644,6 +644,59 @@ EK-provenance gates at once, and giving a real per-unit root **even on HS-FS
 SoCs**. Weigh against owning the HS-SE-fusing + fTPM-validation path, especially
 given SA2UL already had to be disabled for FIPS POST.
 
+### 3.15 PKCS#11 enablement — packaging & datastore (findings 2026-11-09)
+
+Inventory of the running unit for the §3.10 / decision-#9 PKCS#11 path.
+
+**Already present (foundation complete):** OpenSSL **3.5.7** (provider-capable);
+full **TSS2** stack incl. `libtss2-tcti-device` → talks to **`/dev/tpmrm0`** (so
+**no `tpm2-abrmd`** needed — the kernel resource manager multiplexes);
+`libp11-kit0`; `libsqlite3`; `tpm2-tools` 5.4; the strongSwan **`pkcs11` plugin**
+(`libstrongswan-pkcs11.so` — no new strongSwan package required); and the
+**tpm2-provider** (`tpm2-openssl` 1.3.0, stays available).
+
+**Missing — the two packages to add (neither is in the configured apt repos):**
+1. **`tpm2-pkcs11`** — the TPM-backed PKCS#11 token (`libtpm2_pkcs11.so`); the
+   piece that makes **multi-key** strongSwan possible. Debian binaries:
+   **`libtpm2-pkcs11-1`** (module) + **`libtpm2-pkcs11-tools`** (`tpm2_ptool`,
+   for token init / key import). Packaged in **Debian bookworm**.
+2. **`pkcs11-provider`** — OpenSSL 3 provider (`ossl-modules/pkcs11.so`) so the
+   OpenSSL-family consumers reach the token via `pkcs11:` URIs. Lands in **Debian
+   trixie (13)** → on a bookworm base, **backport or build in-tree** (fits the
+   existing custom-OpenSSL-3.5.7 build pattern).
+
+Neither new package pulls in a missing dependency — the foundation above covers
+them.
+
+**Version-compatibility note (tpm2-pkcs11 ↔ pkcs11-provider).** At the interface
+level they interoperate: `pkcs11-provider` supports PKCS#11 **2.40** back-compat
+and `tpm2-pkcs11` is a 2.40 module. **But** bookworm's `tpm2-pkcs11` is a ~2022
+build (≈1.9) while `pkcs11-provider` is young/fast-moving (2023→), and both have
+shipped interop fixes since. **Recommendation:** build a **recent `tpm2-pkcs11`
+from upstream** in-tree (alongside the already-in-tree `pkcs11-provider` + custom
+OpenSSL) rather than relying on bookworm's older one, and **bench-test the
+pairing** (RSA/EC sign, PSS, session handling) before locking.
+
+**Datastore.** `tpm2-pkcs11` keeps its token + objects (the **wrapped key blobs**
++ metadata) in a **SQLite store** (`tpm2_pkcs11.sqlite3`) in a directory chosen by
+the **`TPM2_PKCS11_STORE`** env var (default `~/.tpm2_pkcs11`). Only a **single
+persistent primary** lives in the TPM; every key is a blob in this DB — which is
+exactly why it scales to many keys (the strongSwan multi-key requirement).
+Design consequences:
+- **Placement:** point `TPM2_PKCS11_STORE` at a **durable, migrated** location
+  (under `/config`, snapshotted by `add system image`, or the DevID's dedicated
+  partition) — see §3.13 persistence.
+- **Isolation:** the DevID can be its **own token/store** (separate sqlite DB) for
+  clean separation from operator keys — see §3.11.
+- `libsqlite3` is already present; newer `tpm2-pkcs11` also offers a **FAPI**
+  backend as an alternative to the sqlite store.
+
+**To start the work:** (1) add `libtpm2-pkcs11-1` + `libtpm2-pkcs11-tools`
+(bookworm) or build recent upstream; (2) add/build `pkcs11-provider`; (3) wire
+the TCTI as `device:/dev/tpmrm0`, init the token with `tpm2_ptool`, and register
+the module with p11-kit (or reference it directly) for the strongSwan `pkcs11`
+plugin and the OpenSSL `pkcs11-provider`.
+
 ---
 
 ## 4. Locked decisions (2026-11-09)
