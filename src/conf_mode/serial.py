@@ -587,7 +587,7 @@ def verify_mutual_exclusion(config, options, context, require_one=False,
     return configured
 
 
-def validate_ppp_interface_auth(if_config):
+def validate_ppp_interface_auth(if_config, fips=False):
     if if_config.get('interface_type') != 'ppp':
         return
 
@@ -605,6 +605,16 @@ def validate_ppp_interface_auth(if_config):
     if len(selected_protocols) > 1:
         raise ConfigError(
             f'interfaces ppp-tty {if_config.get("ifname", "?")} authentication protocol: only one of chap, pap, or none allowed')
+
+    # FIPS 140-3: PPP link authentication (PAP cleartext / CHAP MD5) has no
+    # approved form; permit only 'none'. A client may run auth-less, so -- unlike
+    # the PPP servers, which are whole-feature rejected -- the interface stays
+    # usable without authentication.
+    if fips and selected_protocols[0] != 'none':
+        fips_reject_feature(
+            f"interfaces ppp-tty {if_config.get('ifname', '?')} authentication "
+            f"protocol {selected_protocols[0]}",
+            remedy="Use 'authentication protocol none' -- PAP/CHAP are not FIPS-approved.")
 
 def verify(config):
     if not config:
@@ -643,7 +653,7 @@ def verify(config):
                 f'not {config.get("interface_type", "serial")}'
             )
 
-        validate_ppp_interface_auth(config)
+        validate_ppp_interface_auth(config, fips=config.get('_fips'))
 
     if run_serial_validation and 'missing_profile' in config:
         for device, profile_name in config['missing_profile'].items():
@@ -658,7 +668,7 @@ def verify(config):
 
     if run_serial_validation and 'interface_config' in config:
         for device, if_config in config['interface_config'].items():
-            validate_ppp_interface_auth(if_config)
+            validate_ppp_interface_auth(if_config, fips=config.get('_fips'))
 
     if run_interface_validation and 'interface_config' in config:
         for device, if_config in config['interface_config'].items():

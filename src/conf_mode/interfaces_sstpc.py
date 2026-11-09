@@ -33,6 +33,7 @@ from vyos.utils.process import is_systemd_service_running
 from vyos.utils.file import write_file
 from vyos import ConfigError
 from vyos import airbag
+from vyos import fips
 airbag.enable()
 
 def get_config(config=None):
@@ -57,6 +58,8 @@ def get_config(config=None):
             # bail out early - no need to further process other nodes
             break
 
+    sstpc['_fips'] = fips.fips_enabled(conf)
+
     return sstpc
 
 def verify(sstpc):
@@ -65,6 +68,15 @@ def verify(sstpc):
 
     verify_authentication(sstpc)
     verify_vrf(sstpc)
+
+    # FIPS 140-3: SSTP's outer TLS is provider-governed/approved, but the inner
+    # PPP authentication (PAP / CHAP MD5 / MS-CHAP MD4+DES) runs non-approved
+    # crypto on-box. A client may connect without it, so only the authentication
+    # is rejected (the PPP servers are whole-feature rejected).
+    if sstpc.get('_fips') and 'authentication' in sstpc:
+        fips.reject_feature(
+            'interfaces sstpc authentication',
+            remedy="PAP/CHAP/MS-CHAP are not FIPS-approved; remove 'authentication'.")
 
     if not dict_search('server', sstpc):
         raise ConfigError('Remote SSTP server must be specified!')

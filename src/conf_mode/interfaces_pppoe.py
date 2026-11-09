@@ -32,6 +32,7 @@ from vyos.utils.process import call
 from vyos.utils.process import is_systemd_service_running
 from vyos import ConfigError
 from vyos import airbag
+from vyos import fips
 airbag.enable()
 
 def get_config(config=None):
@@ -72,6 +73,8 @@ def get_config(config=None):
         if 'mru' not in pppoe:
             pppoe['mru'] = pppoe['mtu']
 
+    pppoe['_fips'] = fips.fips_enabled(conf)
+
     return pppoe
 
 def verify(pppoe):
@@ -81,6 +84,16 @@ def verify(pppoe):
 
     verify_source_interface(pppoe)
     verify_authentication(pppoe)
+
+    # FIPS 140-3: PPP authentication (PAP cleartext / CHAP MD5 / MS-CHAP MD4+DES)
+    # has no approved form. A PPPoE client may connect without it, so -- unlike
+    # the PPP servers (whole-feature rejected) -- only the authentication is
+    # rejected, leaving the interface usable auth-less.
+    if pppoe.get('_fips') and 'authentication' in pppoe:
+        fips.reject_feature(
+            'interfaces pppoe authentication',
+            remedy="PAP/CHAP are not FIPS-approved; remove 'authentication' to "
+                   "connect without PPP authentication.")
     verify_vrf(pppoe)
     verify_mtu_ipv6(pppoe)
     verify_mirror_redirect(pppoe)
