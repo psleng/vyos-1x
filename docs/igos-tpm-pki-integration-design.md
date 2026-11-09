@@ -326,53 +326,98 @@ the OP-TEE fTPM / TSS2 stack. Implications:
 
 > **Discussion point — route *all* consumers through PKCS#11?**
 > Since PKCS#11 is required for strongSwan anyway, a tempting simplification is
-> to make **`tpm2-pkcs11` the single TPM backend for every X.509/TLS consumer**,
-> reached two standard ways: **native PKCS#11** for apps that have it, and the
-> **OpenSSL 3 `pkcs11-provider`** (keys exposed as `pkcs11:` URIs) for the
-> OpenSSL-family apps — instead of the OpenSSL tpm2 provider. This is **not yet a
-> locked decision**; it is captured here for a decision.
+> to make **`tpm2-pkcs11` the single TPM backend for every X.509/TLS consumer**.
+> This is **not yet a locked decision**; it is captured here with the research
+> needed to make it.
+>
+> **First, the crucial distinction — legacy vs. modern paths (rule out the
+> legacy ones).** Both OpenVPN and OpenSSL have an *old* key-backend API and a
+> *new* one, and the "cautionary notes" you may hear about PKCS#11 almost always
+> target the **old** path:
+>
+> | Stack | Legacy — **avoid** | Modern — **designed-for** |
+> |---|---|---|
+> | OpenVPN | `--pkcs11-provider` → **pkcs11-helper** (OpenVPN-native, under-maintained) | `--provider` → OpenSSL **provider** mechanism (OpenVPN 2.6+) |
+> | OpenSSL | **ENGINE** API: `engine_pkcs11`/libp11 (PKCS#11), `tpm2-tss-engine` (TPM) — deprecated in 3.0, **not FIPS-compatible** | **Provider** API: `pkcs11-provider` (PKCS#11), `tpm2-provider`/tpm2-openssl (TPM) |
+>
+> The current igOS OpenVPN path already uses the **modern** route
+> (`providers default tpm2` in `server.conf.j2` → the **tpm2-provider**), i.e. it
+> is already maintainer-aligned. Convergence must **not** reintroduce
+> `pkcs11-helper` or the OpenSSL ENGINE: it rides the same **`--provider` /
+> provider** mechanism, simply swapping **tpm2-provider → pkcs11-provider**.
+>
+> **So the real choice is between two OpenSSL *providers*, same provider
+> mechanism:**
+>
+> - **`tpm2-provider` (tpm2-openssl)** — *direct*, one layer (provider → TPM),
+>   already in use, keeps the `TSS2 PRIVATE KEY` PEM format igOS already
+>   generates; TPM-only.
+> - **`pkcs11-provider` + `tpm2-pkcs11`** — *uniform*, two layers (provider →
+>   PKCS#11 token → TPM), newer, but the **same backend strongSwan must use** and
+>   HSM-portable.
 >
 > **Feasibility per consumer (assessed 2026-11-09):**
 >
-> | Consumer | PKCS#11 route | Notes |
+> | Consumer | Direct (tpm2-provider) | PKCS#11 (pkcs11-provider/native) |
 > |---|---|---|
-> | strongSwan | native charon `pkcs11` plugin | the §3.10 decision |
-> | OpenVPN | native `--pkcs11-provider` (pkcs11-helper) | straight to the token |
-> | serial / stunnel | OpenSSL `pkcs11-provider` + `pkcs11:` URI | OpenSSL 3 |
-> | HTTPS / nginx | OpenSSL `pkcs11-provider` | swap `ssl_certificate_key <file>` (today `/run/nginx/certs/…`) for a `pkcs11:` URI |
-> | DevID | own PKCS#11 token | already PKCS#11 (§3.11) |
+> | strongSwan | **not possible** (charon doesn't use OpenSSL STORE for keys) | **required** — charon `pkcs11` plugin |
+> | OpenVPN | yes (today) | `--provider pkcs11` + `pkcs11:` key URI |
+> | serial / stunnel | yes (OpenSSL 3) | OpenSSL `pkcs11-provider` + `pkcs11:` URI |
+> | HTTPS / nginx | yes | swap `ssl_certificate_key <file>` for a `pkcs11:` URI |
+> | DevID | n/a | own PKCS#11 token (§3.11) |
 >
-> The enabler is the OpenSSL 3 **`pkcs11-provider`**: it exposes the token's keys
-> to any OpenSSL-3 app via `pkcs11:` URIs, so stunnel/serial and nginx need no
-> per-app TPM code — just provider config + a URI.
+> **strongSwan is the *only* consumer that genuinely requires PKCS#11.** Every
+> OpenSSL-family consumer can reach the TPM via the direct tpm2-provider. So
+> "converge on PKCS#11" means moving the whole OpenSSL world off the direct
+> 1-layer path onto the newer 2-layer stack purely to match strongSwan.
 >
-> **Genuine exceptions (stay non-PKCS#11):**
-> - **sshd host keys** — OpenSSH has no native PKCS#11 host-key support. It
->   *could* be forced via a stock `ssh-agent` with the pkcs11 module loaded
->   (`ssh-add -s libtpm2_pkcs11.so`) pointed at by sshd `HostKeyAgent`, but the
->   pragmatic choice is to keep **`ssh-tpm-agent`** (TPM-direct; already in use,
->   `src/conf_mode/service_ssh.py`). The one residual special case in the PKI
->   space.
+> **Genuine exceptions (stay non-PKCS#11 regardless):**
+> - **sshd host keys** — OpenSSH has no native PKCS#11 host-key support. Keep
+>   **`ssh-tpm-agent`** (TPM-direct; already in use, `src/conf_mode/service_ssh.py`).
 > - **WireGuard** — cannot: the kernel WG module needs the raw X25519 scalar;
->   there is no token offload. TPM here only wraps-the-key-at-rest (already a
->   separate follow-up, §5).
-> - **Disk/config encryption** — stays TPM-direct `tpm2_unseal` in early boot;
->   out of PKI scope (PKCS#11 in initramfs would be pointless).
+>   TPM only wraps-the-key-at-rest (separate follow-up, §5).
+> - **Disk/config encryption** — stays TPM-direct `tpm2_unseal` in early boot
+>   (PKCS#11 in initramfs would be pointless).
 >
-> **FIPS nuance.** With PKCS#11 the private-key operation runs **inside the
-> TPM/token, outside the OpenSSL FIPS module boundary**. It coexists fine
-> (pkcs11-provider and the FIPS provider are separate providers), but a FIPS
-> *claim* must treat the TPM/token as its own validated module or otherwise
-> account for that key-op being outside the OpenSSL module. See
-> `igos-fips-140-3-design.md`.
+> **Industry direction (researched 2026-11-09):**
+> - **OpenSSL** is moving everything from ENGINEs to **providers**; the ENGINE
+>   API is deprecated as of 3.0. Notably **`pkcs11-provider` now lives under the
+>   `openssl-projects` GitHub org** (moved from `latchset/`), i.e. it is becoming
+>   the de-facto official OpenSSL PKCS#11 connector (targets PKCS#11 3.2,
+>   back-compatible to 2.40). **`tpm2-openssl`** is the provider successor to
+>   `tpm2-tss-engine` (strictly provider-only, OpenSSL 3.x/4.x, **unchanged TSS2
+>   key-file format**).
+> - **Red Hat / Fedora / CentOS** are **deprecating OpenSSL ENGINE support**
+>   (Fedora "Deprecate OpenSSL engine support"; CentOS 10 leads). Their rationale
+>   is directly relevant to us: **"Engines are not FIPS compatible"** and
+>   "PKCS#11, TPM already covered by providers." Red Hat employs the
+>   `pkcs11-provider` author and backs it as the `engine_pkcs11` replacement.
+> - **Takeaway:** the modern *provider* path is the industry direction for
+>   **both** PKCS#11 and TPM; **engine-based** access (`engine_pkcs11`,
+>   `tpm2-tss-engine`, OpenVPN `pkcs11-helper`) is the thing to avoid — and, per
+>   Red Hat, it is **disqualified under FIPS** anyway. Both of our candidates
+>   (tpm2-provider, pkcs11-provider) are on the correct side of that line.
 >
-> **Trade-off.** Pro: one backend, one object namespace (`CKA_LABEL` = pki node
-> name), one completion, concentrated FIPS reasoning, no per-app tpm2-provider
-> wiring. Con: a broader first change, an extra moving part
-> (`pkcs11-provider`) in the OpenSSL path for every TLS app, and the FIPS-boundary
-> question above. **Baseline if undecided:** per-family (strongSwan via PKCS#11;
-> OpenSSL-family via the tpm2 provider), with full convergence as the candidate
-> simplification.
+> **FIPS nuance.** With either provider the private-key operation runs **inside
+> the TPM, outside the OpenSSL FIPS module boundary**; a FIPS *claim* must treat
+> the TPM as its own validated module or otherwise account for the key-op being
+> outside the OpenSSL module. Separately, the **ENGINE** paths are explicitly
+> *not* FIPS-compatible (above), so they are ruled out for igOS FIPS regardless.
+> See `igos-fips-140-3-design.md`.
+>
+> **Trade-off & baseline.** Pro (converge): one backend, one object namespace
+> (`CKA_LABEL` = pki node name), one completion, HSM-portable, concentrated FIPS
+> reasoning. Con: the whole OpenSSL world moves off the direct, already-working
+> tpm2-provider onto the newer 2-layer `pkcs11-provider` stack to match one
+> consumer. **Baseline if undecided:** per-family — strongSwan (+ DevID) via
+> `tpm2-pkcs11`; OpenSSL-family via the direct **tpm2-provider** — each consumer
+> on its most-native, best-supported *provider* path; full convergence remains
+> the candidate simplification.
+>
+> **Caveats to verify before locking:** (a) `pkcs11-provider` maturity + FIPS
+> behavior on this platform; (b) that OpenVPN (`--provider`/STORE) and nginx/
+> stunnel load a *private key by `pkcs11:` URI* cleanly in practice — the
+> tpm2-provider path works today via the TSS2-PEM file.
 
 ### 3.11 Device identity (DevID) — independent of operator PKI
 
@@ -524,11 +569,14 @@ isolation and plugging the GUI cert into the existing `pki certificate` +
   TSS2 deps, enable the charon `pkcs11` plugin, and confirm it is FIPS-compatible
   alongside `fips_plugins.conf.j2` (key-op token, not a crypto provider).
 - **PKCS#11 convergence decision (open discussion)** — whether to route *all*
-  X.509/TLS consumers through `tpm2-pkcs11` (native PKCS#11 + OpenSSL
-  `pkcs11-provider`) as one backend, or keep OpenSSL-family consumers on the tpm2
-  provider. Feasibility per consumer, the sshd/WireGuard/disk exceptions, the
-  FIPS-boundary nuance, and the trade-off are written up as a discussion point in
-  §3.10 — **not yet decided.**
+  X.509/TLS consumers through `tpm2-pkcs11` via the OpenSSL `pkcs11-provider`, or
+  keep the OpenSSL-family on the direct `tpm2-provider` (strongSwan + DevID need
+  PKCS#11 regardless). §3.10 holds the full write-up: the legacy-vs-provider
+  distinction (rule out OpenVPN `pkcs11-helper` and OpenSSL ENGINE paths), the
+  tpm2-provider-vs-pkcs11-provider trade, the sshd/WireGuard/disk exceptions, the
+  researched OpenSSL/Red Hat direction (both moving engines→providers; engines
+  are not FIPS-compatible), and the maturity/`pkcs11:`-URI caveats. **Not yet
+  decided.**
 - **`verify()` error ergonomics** — precise messages for: `storage tpm` with a
   stray `private key`; `password-protected` under TPM; and missing sealed key on
   restore/different hardware.
