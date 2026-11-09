@@ -394,6 +394,50 @@ lifecycle and EK-bound sealing.
 - **Renewal/rotation** — whether DevID certs are long-lived or renewable (EST
   with the TPM-backed key if re-enrollment is ever needed).
 
+### 3.12 Management-GUI TLS — share the CA, not the DevID key
+
+A tempting shortcut is to reuse the DevID keypair as the management GUI's HTTPS
+server certificate (hand customers the public side so their browsers trust the
+unit). **Do not reuse the DevID key for this.** The benefit you actually want —
+browsers trusting every unit's GUI without warnings — comes from distributing
+the **CA** (one trusted root), not from sharing the identity key. Reusing the
+DevID key is wrong on four counts:
+
+- **Role mixing (EKU).** DevID is a **client**-auth identity (unit→cloud,
+  `clientAuth`); the GUI cert is a **server**-auth identity (browser→unit,
+  `serverAuth`). Forcing one key/cert to do both broadens its purpose and some
+  stacks reject multi-EKU certs; 802.1AR scopes a DevID to device auth.
+- **SAN/hostname mismatch.** Browsers validate the server cert SAN against the
+  address the operator typed; a DevID subject is a device identifier
+  (serial/EK), not the unit's management hostname/IP — so browsers error. The
+  GUI cert needs SANs for how operators reach *that* box, which vary per
+  deployment and are not known at factory time.
+- **Exposure defeats the isolation.** §3.11 keeps the identity key in an
+  isolated, EK-bound store the operator/web stack cannot touch. If the
+  public-facing web server signs TLS handshakes with the DevID key, a web-stack
+  compromise can request signatures with the device identity key.
+- **Lifetime coupling.** DevIDs are long-lived (device lifetime); server certs
+  should rotate. Reusing forces one policy on both.
+
+**Recommended pattern (optional feature): issue a separate GUI server cert from
+the same CA.**
+
+- Issue a dedicated **TLS server certificate** from the same CA — `serverAuth`
+  EKU, SANs matching the management addresses — stored as a normal `pki
+  certificate` (optionally `storage tpm` in the **operator** token) and
+  referenced by `service https certificates certificate` (the GUI already
+  consumes a `pki certificate`; see `src/conf_mode/service_https.py`).
+- Use the **DevID only to obtain it**: at first boot the unit authenticates to
+  the cloud CA with its DevID (EST) and enrolls the GUI server cert with the
+  correct SANs; the DevID authenticates but never serves traffic. (Or pre-issue
+  at factory if the management SANs are fixed.)
+- Customers install the **CA** as a trusted root → clean HTTPS on every unit.
+
+Net: the **trust anchor** (your CA) is shared across the cloud channel and the
+browser GUI, while **keys/certs stay separate per role** — preserving DevID
+isolation and plugging the GUI cert into the existing `pki certificate` +
+`storage tpm` plumbing.
+
 ---
 
 ## 4. Locked decisions (2026-11-09)
@@ -416,6 +460,10 @@ lifecycle and EK-bound sealing.
 7. **Device identity (DevID) is separate** — factory-provisioned, EK-bound,
    isolated token/slot, cloud-channel-only, outside the operator `pki` tree; see
    §3.11.
+8. **GUI TLS shares the CA, not the DevID key** — the management-GUI HTTPS cert
+   is a *separate* `serverAuth` cert issued from the same CA (optionally enrolled
+   via the DevID), referenced as a normal `pki certificate`; the DevID key is
+   never reused to serve traffic. Optional feature; see §3.12.
 
 ---
 
