@@ -324,11 +324,13 @@ the OP-TEE fTPM / TSS2 stack. Implications:
    object exists. `generate_pki_*_files` must skip `wrap_private_key` for TPM
    keys and emit the PKCS#11 reference.
 
-> **Discussion point — route *all* consumers through PKCS#11?**
-> Since PKCS#11 is required for strongSwan anyway, a tempting simplification is
-> to make **`tpm2-pkcs11` the single TPM backend for every X.509/TLS consumer**.
-> This is **not yet a locked decision**; it is captured here with the research
-> needed to make it.
+> **Decision (2026-11-09) — converge: `tpm2-pkcs11` as the single TPM backend for
+> every X.509/TLS consumer**, reached through the OpenSSL **`pkcs11-provider`**
+> (and native `pkcs11` for strongSwan), because the provider path is the clear
+> industry direction (below) and it yields one uniform, auditable key-op
+> boundary. The decision is **subject to the verification gates** at the end of
+> this section; if a gate fails, the per-family fallback (tpm2-provider for the
+> OpenSSL family) stands. Rationale and research follow.
 >
 > **First, the crucial distinction — legacy vs. modern paths (rule out the
 > legacy ones).** Both OpenVPN and OpenSSL have an *old* key-backend API and a
@@ -405,14 +407,35 @@ the OP-TEE fTPM / TSS2 stack. Implications:
 > *not* FIPS-compatible (above), so they are ruled out for igOS FIPS regardless.
 > See `igos-fips-140-3-design.md`.
 >
-> **Trade-off & baseline.** Pro (converge): one backend, one object namespace
-> (`CKA_LABEL` = pki node name), one completion, HSM-portable, concentrated FIPS
-> reasoning. Con: the whole OpenSSL world moves off the direct, already-working
-> tpm2-provider onto the newer 2-layer `pkcs11-provider` stack to match one
-> consumer. **Baseline if undecided:** per-family — strongSwan (+ DevID) via
-> `tpm2-pkcs11`; OpenSSL-family via the direct **tpm2-provider** — each consumer
-> on its most-native, best-supported *provider* path; full convergence remains
-> the candidate simplification.
+> **Does convergence make "every key-op approved"?** Only if the TPM itself is a
+> FIPS 140-3 **validated** module operated in approved mode. The approval comes
+> from **the TPM's validation, not from PKCS#11**: both `pkcs11-provider` and
+> `tpm2-provider` perform the private-key op *inside the same TPM*, so neither is
+> "more approved." If the TPM is validated, then the private-key ops (in the TPM)
+> + all session/bulk crypto (in the OpenSSL FIPS provider) are each performed by a
+> validated module in approved mode — no approved function runs outside a
+> boundary, which is the compliant target. Convergence's FIPS value is therefore
+> **uniformity/auditability** (one key-op boundary for every consumer), not
+> approval per se.
+>
+> **Gating prerequisite — is *this* TPM validatable?** The platform uses an
+> **OP-TEE firmware TPM (fTPM)**, not a discrete TPM chip. A discrete TPM usually
+> ships with its own CMVP certificate; an fTPM needs its **own** FIPS validation
+> (of the fTPM + the secure-world crypto it uses) or must inherit a validated SoC
+> crypto module. This is a **substantial, possibly blocking** open question and is
+> the real determinant of whether TPM-backed key-ops can be claimed under FIPS —
+> independent of PKCS#11 vs tpm2-provider. Additional conditions: operate the TPM
+> in approved mode (approved algs/key sizes, RNG/keygen), and confirm
+> `tpm2-pkcs11` delegates **all** crypto to the TPM rather than doing any in
+> software.
+>
+> **Trade-off.** Pro (converge, chosen): one backend, one object namespace
+> (`CKA_LABEL` = pki node name), one completion, HSM-portable, one uniform FIPS
+> key-op boundary, and alignment with the OpenSSL/Red Hat provider direction. Con:
+> the OpenSSL family moves off the direct, already-working tpm2-provider onto the
+> newer 2-layer `pkcs11-provider` stack. **Fallback if a verification gate
+> fails:** per-family — OpenSSL-family on the direct **tpm2-provider**, strongSwan
+> (+ DevID) on `tpm2-pkcs11`.
 >
 > **Caveats to verify before locking:** (a) `pkcs11-provider` maturity + FIPS
 > behavior on this platform; (b) that OpenVPN (`--provider`/STORE) and nginx/
@@ -552,6 +575,13 @@ isolation and plugging the GUI cert into the existing `pki certificate` +
    is a *separate* `serverAuth` cert issued from the same CA (optionally enrolled
    via the DevID), referenced as a normal `pki certificate`; the DevID key is
    never reused to serve traffic. Optional feature; see §3.12.
+9. **Converge on PKCS#11 (target architecture)** — all X.509/TLS consumers reach
+   the TPM through `tpm2-pkcs11` (OpenSSL `pkcs11-provider`; native `pkcs11` for
+   strongSwan), per §3.10. Chosen for a single uniform/auditable key-op boundary
+   and alignment with the OpenSSL/Red Hat engine→provider direction. **Subject to
+   the §3.10 verification gates**; per-family (tpm2-provider for the OpenSSL
+   family) is the fallback. Engine paths (`engine_pkcs11`, `tpm2-tss-engine`,
+   OpenVPN `pkcs11-helper`) are ruled out.
 
 ---
 
@@ -568,15 +598,15 @@ isolation and plugging the GUI cert into the existing `pki certificate` +
 - **`tpm2-pkcs11` packaging (vyos-build)** — build/package `tpm2-pkcs11` and its
   TSS2 deps, enable the charon `pkcs11` plugin, and confirm it is FIPS-compatible
   alongside `fips_plugins.conf.j2` (key-op token, not a crypto provider).
-- **PKCS#11 convergence decision (open discussion)** — whether to route *all*
-  X.509/TLS consumers through `tpm2-pkcs11` via the OpenSSL `pkcs11-provider`, or
-  keep the OpenSSL-family on the direct `tpm2-provider` (strongSwan + DevID need
-  PKCS#11 regardless). §3.10 holds the full write-up: the legacy-vs-provider
-  distinction (rule out OpenVPN `pkcs11-helper` and OpenSSL ENGINE paths), the
-  tpm2-provider-vs-pkcs11-provider trade, the sshd/WireGuard/disk exceptions, the
-  researched OpenSSL/Red Hat direction (both moving engines→providers; engines
-  are not FIPS-compatible), and the maturity/`pkcs11:`-URI caveats. **Not yet
-  decided.**
+- **PKCS#11 convergence — decided (§3.10, decision #9); remaining gates.** The
+  direction is set (converge via `pkcs11-provider`/`tpm2-pkcs11`). Before it can
+  be relied on, close these gates: (a) **fTPM FIPS validatability** — whether the
+  OP-TEE firmware TPM can be CMVP-validated / operated in approved mode (the real
+  blocker for any FIPS claim on TPM key-ops); (b) `pkcs11-provider` maturity +
+  FIPS behavior on this platform; (c) that OpenVPN (`--provider`/STORE), nginx,
+  and stunnel load a private key by `pkcs11:` URI cleanly; (d) that `tpm2-pkcs11`
+  delegates all crypto to the TPM (no software crypto). If a gate fails, fall
+  back to per-family (tpm2-provider for the OpenSSL family).
 - **`verify()` error ergonomics** — precise messages for: `storage tpm` with a
   stray `private key`; `password-protected` under TPM; and missing sealed key on
   restore/different hardware.
