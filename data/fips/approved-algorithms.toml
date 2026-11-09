@@ -376,6 +376,17 @@ default = ["TLSv1.2"]
 approved = ["DTLSv1.2"]
 default = ["DTLSv1.2"]
 
+# TLS 1.2 cipher list for every OpenSSL app using DEFAULT (TLS 1.3 suites are
+# governed separately and already AES-GCM-only under the FIPS provider). The FIPS
+# provider does NOT strip static-RSA key transport (PKCS#1 v1.5 -- disallowed by
+# SP 800-131A Rev2 after 2023, and no forward secrecy), HMAC-SHA1 CBC suites,
+# DSS, anonymous (aNULL) or CCM8 suites -- verified on target that OpenSSL
+# DEFAULT (and so rsyslog x509 modes) offered static-RSA/SHA1 suites. Keep only
+# forward-secret (EC)DHE with AES-GCM/CCM/CBC-SHA2 (mirrors RHEL FIPS policy).
+[leaf."system openssl tls cipher-string"]
+approved = ["@SECLEVEL=2:kECDHE:kDHE:!aNULL:!eNULL:!kRSA:!aDSS:!SHA1:!AESCCM8:!CAMELLIA:!ARIA:!SEED"]
+default = ["@SECLEVEL=2:kECDHE:kDHE:!aNULL:!eNULL:!kRSA:!aDSS:!SHA1:!AESCCM8:!CAMELLIA:!ARIA:!SEED"]
+
 # ---------------------------------------------------------------------------
 # Serial console-server TLS -- Perle IOLAN daemons (iol_direct/iol_rawd/...).
 # These dynamically link the system OpenSSL 3.x and do NOT override providers,

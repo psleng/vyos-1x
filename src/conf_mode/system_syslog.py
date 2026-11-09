@@ -36,6 +36,7 @@ from vyos.template import is_ipv4
 from vyos.template import is_ipv6
 from vyos import ConfigError
 from vyos import airbag
+from vyos import fips
 airbag.enable()
 
 cert_dir = '/etc/rsyslog.d/certs'
@@ -59,6 +60,25 @@ def _verify_tls_remote_options(remote, remote_options, syslog):
     auth_mode = dict_search('tls.auth_mode', remote_options)
     certificate = dict_search('tls.certificate', remote_options)
     ca_certificate = dict_search('tls.ca_certificate', remote_options)
+
+    # FIPS 140-3: in 'anon' mode (also the grammar default) rsyslog's OpenSSL
+    # driver replaces the cipher list with anonymous ADH/AECDH and DSS suites --
+    # no peer authentication. The x509 modes use the system (FIPS-restricted)
+    # cipher list. Fingerprint matching must use SHA-256, not SHA-1.
+    if 'fips' in syslog:
+        if auth_mode == 'anon':
+            fips.reject_feature(
+                f'system syslog remote {remote} tls auth-mode anon',
+                remedy='Anonymous TLS has no peer authentication (anon is the '
+                       'default). Set auth-mode certvalid, name or fingerprint '
+                       'together with ca-certificate.')
+        if auth_mode == 'fingerprint':
+            for peer in dict_search('tls.permitted_peer', remote_options) or []:
+                if not peer.strip().upper().startswith('SHA256:'):
+                    raise ConfigError(
+                        f'FIPS 140-3: permitted-peer "{peer}" for remote "{remote}" '
+                        f'must be a SHA-256 fingerprint (SHA256:XX:XX:...); SHA-1 '
+                        f'fingerprints are not approved.')
 
     if auth_mode != "anon" and not ca_certificate:
         raise ConfigError(
@@ -151,6 +171,9 @@ def get_config(config=None):
     for remote in syslog.get('remote', {}):
         if syslog.from_defaults(['remote', remote, 'tls']):
             del syslog['remote'][remote]['tls']
+
+    if fips.fips_enabled(conf):
+        syslog['fips'] = {}
 
     return syslog
 

@@ -107,7 +107,7 @@
                       <help>Allowed peer certificate fingerprint or subject name</help>
                       <valueHelp>
                         <format>txt</format>
-                        <description>Peer fingerprint - SHA1:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX:XX or subject name - logs.example.com</description>
+                        <description>Peer fingerprint - SHA256:XX:XX:...:XX (SHA1:XX:... also accepted outside FIPS mode) or subject name - logs.example.com</description>
                       </valueHelp>
                       <multi/>
                     </properties>

@@ -388,6 +388,7 @@ def generate(options):
             'groups': ':'.join(fips.default('system openssl tls groups')),
             'tls_min_protocol': fips.default('system openssl tls min-protocol')[0],
             'dtls_min_protocol': fips.default('system openssl dtls min-protocol')[0],
+            'cipher_string': fips.default('system openssl tls cipher-string')[0],
         }
 
     render(openssl_config, 'openssl/openssl.cnf.j2', options)

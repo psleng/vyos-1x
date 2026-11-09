@@ -86,6 +86,7 @@ system_default = system_default_sect
 Groups = {{ fips_tls.groups }}
 TLS.MinProtocol = {{ fips_tls.tls_min_protocol }}
 DTLS.MinProtocol = {{ fips_tls.dtls_min_protocol }}
+CipherString = {{ fips_tls.cipher_string }}
 {% endif %}
 
 # If no providers are activated explicitly, the default one is activated implicitly.
