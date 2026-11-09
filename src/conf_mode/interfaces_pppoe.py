@@ -82,18 +82,15 @@ def verify(pppoe):
         # bail out early
         return None
 
+    # FIPS 140-3: PPP authentication (PAP cleartext / CHAP MD5 / MS-CHAP MD4+DES)
+    # has no approved form, and real PPPoE access concentrators require it, so an
+    # auth-less client would only configure into a link that never comes up.
+    # Whole-feature reject, like the PPP servers / WireGuard / PPTP.
+    if pppoe.get('_fips'):
+        fips.reject_feature('PPPoE client (no FIPS-approved PPP authentication)')
+
     verify_source_interface(pppoe)
     verify_authentication(pppoe)
-
-    # FIPS 140-3: PPP authentication (PAP cleartext / CHAP MD5 / MS-CHAP MD4+DES)
-    # has no approved form. A PPPoE client may connect without it, so -- unlike
-    # the PPP servers (whole-feature rejected) -- only the authentication is
-    # rejected, leaving the interface usable auth-less.
-    if pppoe.get('_fips') and 'authentication' in pppoe:
-        fips.reject_feature(
-            'interfaces pppoe authentication',
-            remedy="PAP/CHAP are not FIPS-approved; remove 'authentication' to "
-                   "connect without PPP authentication.")
     verify_vrf(pppoe)
     verify_mtu_ipv6(pppoe)
     verify_mirror_redirect(pppoe)

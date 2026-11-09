@@ -142,7 +142,8 @@ class TestFipsPolicy(TestCase):
 
     def test_remove_nodes(self):
         self.assertEqual(
-            fips.remove_nodes(), ['interfaces wireguard', 'vpn pptp'])
+            fips.remove_nodes(),
+            ['interfaces wireguard', 'vpn pptp', 'interfaces pppoe', 'interfaces sstpc'])
 
     def test_reject_unapproved_flags_bad_values(self):
         config = {

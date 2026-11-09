@@ -66,17 +66,15 @@ def verify(sstpc):
     if 'deleted' in sstpc:
         return None
 
+    # FIPS 140-3: SSTP's outer TLS is provider-governed, but the inner PPP
+    # authentication (PAP / CHAP MD5 / MS-CHAP MD4+DES) runs non-approved crypto
+    # on-box, and SSTP servers require it -- an auth-less client would never
+    # connect. Whole-feature reject, like the SSTP server / WireGuard / PPTP.
+    if sstpc.get('_fips'):
+        fips.reject_feature('SSTP client (no FIPS-approved PPP authentication)')
+
     verify_authentication(sstpc)
     verify_vrf(sstpc)
-
-    # FIPS 140-3: SSTP's outer TLS is provider-governed/approved, but the inner
-    # PPP authentication (PAP / CHAP MD5 / MS-CHAP MD4+DES) runs non-approved
-    # crypto on-box. A client may connect without it, so only the authentication
-    # is rejected (the PPP servers are whole-feature rejected).
-    if sstpc.get('_fips') and 'authentication' in sstpc:
-        fips.reject_feature(
-            'interfaces sstpc authentication',
-            remedy="PAP/CHAP/MS-CHAP are not FIPS-approved; remove 'authentication'.")
 
     if not dict_search('server', sstpc):
         raise ConfigError('Remote SSTP server must be specified!')

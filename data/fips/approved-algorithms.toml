@@ -36,11 +36,13 @@
 # subsystem. Keep tokens in sync with the grammar's <completionHelp> lists.
 
 # Whole-feature removals under FIPS (no approvable configuration). Consumed by
-# the WireGuard/PPTP fail-closed verify() rejects. Declared first so it is a
-# top-level key, not absorbed into a [leaf.*] table.
+# the WireGuard/PPTP/PPPoE-client/SSTP-client fail-closed verify() rejects.
+# Declared first so it is a top-level key, not absorbed into a [leaf.*] table.
 remove_node = [
     "interfaces wireguard",
     "vpn pptp",
+    "interfaces pppoe",
+    "interfaces sstpc",
 ]
 
 # Features/config paths with NO approvable form under FIPS. Enabling FIPS is
@@ -87,6 +89,17 @@ path = ["vpn", "l2tp", "remote-access"]
 [[reject_under_fips]]
 label = "SSTP (no FIPS-approved PPP authentication)"
 path = ["vpn", "sstp"]
+
+[[reject_under_fips]]
+# PPP clients: same non-approved PPP auth as the servers, and real access
+# concentrators / SSTP servers require it, so an auth-less client would never
+# come up. Removed entirely rather than configurable into a failing state.
+label = "PPPoE client (no FIPS-approved PPP authentication)"
+path = ["interfaces", "pppoe"]
+
+[[reject_under_fips]]
+label = "SSTP client (no FIPS-approved PPP authentication)"
+path = ["interfaces", "sstpc"]
 
 [[reject_under_fips]]
 label = "RADIUS (OpenConnect)"
