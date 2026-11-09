@@ -5,6 +5,7 @@ import sys
 
 from vyos.config import Config
 from vyos import ConfigError
+from vyos import fips
 
 CONFIG_DIR = '/run/msmtp'
 CONFIG_FILE = f'{CONFIG_DIR}/msmtprc'
@@ -28,6 +29,7 @@ def get_config(config=None):
         return None
 
     data = {
+        '_fips': fips.fips_enabled(config),
         'active_profile': config.return_value(
             base + ['active-profile']
         ),
@@ -151,6 +153,12 @@ def verify(cfg):
 
     if not cfg:
         return
+
+    # FIPS 140-3: msmtp is built against GnuTLS, not the validated OpenSSL FIPS
+    # module, so SMTP TLS/authentication cannot be performed in an approved
+    # manner. Whole-feature reject, like WireGuard/PPTP.
+    if cfg.get('_fips'):
+        fips.reject_feature('System email (msmtp uses GnuTLS, outside the FIPS module)')
 
     active = cfg['active_profile']
 

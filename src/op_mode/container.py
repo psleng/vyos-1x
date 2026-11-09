@@ -72,16 +72,37 @@ def _get_raw_data(command: str) -> list:
     data = json.loads(json_data)
     return data
 
+def _fips_enabled():
+    from vyos.fips import fips_enabled
+    return fips_enabled()
+
+
+# podman transports that read an image from local storage/files -- no registry
+# and no network TLS. The only image sources permitted under FIPS.
+_LOCAL_IMAGE_TRANSPORTS = ('docker-archive:', 'oci-archive:', 'oci:', 'dir:',
+                           'containers-storage:')
+
+_FIPS_REGISTRY_MSG = (
+    "FIPS 140-3: pulling container images from a registry is not available "
+    "(registry TLS runs in podman's Go TLS stack, outside the validated module). "
+    "Load a local image archive instead, e.g. "
+    "'add container image docker-archive:/config/images/<image>.tar' or "
+    "'add container image oci-archive:/config/images/<image>.tar'.")
+
+
 def add_image(name: str):
     """ Pull image from container registry. If registry authentication
     is defined within VyOS CLI, credentials are used to login before pull """
     from vyos.configquery import ConfigTreeQuery
 
+    if _fips_enabled() and not name.startswith(_LOCAL_IMAGE_TRANSPORTS):
+        raise vyos.opmode.UnsupportedOperation(_FIPS_REGISTRY_MSG)
+
     conf = ConfigTreeQuery()
     container = conf.get_config_dict(['container', 'registry'])
 
     do_logout = False
-    if 'registry' in container:
+    if 'registry' in container and not name.startswith(_LOCAL_IMAGE_TRANSPORTS):
         for registry, registry_config in container['registry'].items():
             if 'disable' in registry_config:
                 continue
@@ -100,6 +121,22 @@ def add_image(name: str):
 
     if do_logout:
         rc_cmd('podman logout --all')
+
+def update_image(name: str):
+    """ Re-pull the image used by an existing container from its registry """
+    from vyos.configquery import ConfigTreeQuery
+
+    conf = ConfigTreeQuery()
+    if not conf.exists(['container', 'name', name]):
+        raise vyos.opmode.IncorrectValue(f'Container "{name}" does not exist')
+
+    if _fips_enabled():
+        raise vyos.opmode.UnsupportedOperation(_FIPS_REGISTRY_MSG)
+
+    image = conf.value(['container', 'name', name, 'image'])
+    rc, output = rc_cmd(f'podman pull {image}', buffered=False)
+    if rc != 0:
+        raise vyos.opmode.InternalError(output)
 
 def delete_image(name: str, force: typing.Optional[bool] = False):
     from vyos.utils.process import rc_cmd

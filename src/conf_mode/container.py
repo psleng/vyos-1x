@@ -49,6 +49,7 @@ from vyos.template import render
 from vyos.xml_ref import default_value
 from vyos import ConfigError
 from vyos import airbag
+from vyos import fips
 
 airbag.enable()
 
@@ -108,6 +109,12 @@ def get_config(config=None):
 
     tmp = node_changed(conf, base + ['name'])
     if tmp: container.update({'container_remove': tmp})
+
+    # FIPS 140-3: registry pulls use podman's Go TLS stack, outside the validated
+    # module. Containers still run; images come from local archives only, and
+    # containers.conf pins pull_policy=never so nothing can fetch implicitly.
+    if conf.exists(base) and fips.fips_enabled(conf):
+        container['fips'] = {}
 
     return container
 

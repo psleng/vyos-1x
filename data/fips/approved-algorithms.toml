@@ -36,13 +36,14 @@
 # subsystem. Keep tokens in sync with the grammar's <completionHelp> lists.
 
 # Whole-feature removals under FIPS (no approvable configuration). Consumed by
-# the WireGuard/PPTP/PPPoE-client/SSTP-client fail-closed verify() rejects.
-# Declared first so it is a top-level key, not absorbed into a [leaf.*] table.
+# the WireGuard/PPTP/PPPoE-client/SSTP-client/system-email fail-closed verify()
+# rejects. Declared first so it is a top-level key, not absorbed into a [leaf.*] table.
 remove_node = [
     "interfaces wireguard",
     "vpn pptp",
     "interfaces pppoe",
     "interfaces sstpc",
+    "system email",
 ]
 
 # Features/config paths with NO approvable form under FIPS. Enabling FIPS is
@@ -100,6 +101,12 @@ path = ["interfaces", "pppoe"]
 [[reject_under_fips]]
 label = "SSTP client (no FIPS-approved PPP authentication)"
 path = ["interfaces", "sstpc"]
+
+[[reject_under_fips]]
+# msmtp is built against GnuTLS (verified with ldd on target), not the
+# validated OpenSSL FIPS module, so SMTP TLS/auth is out of boundary.
+label = "System email (msmtp uses GnuTLS, outside the FIPS module)"
+path = ["system", "email"]
 
 [[reject_under_fips]]
 label = "RADIUS (OpenConnect)"
