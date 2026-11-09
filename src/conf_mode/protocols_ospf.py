@@ -64,6 +64,15 @@ def verify(config_dict):
             'OSPF MD5/plaintext authentication',
             'No FIPS-approved (HMAC-SHA) OSPF authentication is available. '
             'Remove it, or disable FIPS.')
+        # 'area <x> authentication md5|plaintext-password' is a leaf whose
+        # *value* names the auth type (no md5/password key), so the key scan
+        # above cannot see it -- it enables MD5/plaintext auth for the area.
+        for area, area_config in ospf.get('area', {}).items():
+            if 'authentication' in area_config:
+                fips.reject_feature(
+                    f"OSPF area {area} authentication {area_config['authentication']}",
+                    'No FIPS-approved (HMAC-SHA) OSPF authentication is available. '
+                    'Remove it, or disable FIPS.')
 
     verify_common_route_maps(ospf)
 
