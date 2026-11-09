@@ -189,11 +189,13 @@ key:
 
 - **OpenVPN / serial / stunnel** — via the OpenSSL tpm2 provider path.
 - **sshd** — via `ssh-tpm-agent` with the sealed host key.
+- **strongSwan / IPsec** — via a **PKCS#11** token (tpm2-pkcs11), **not** a PEM
+  file; see §3.10 (charon has its own credential subsystem).
 
 `src/completion/list_pki_with_tpm.py` collapses into the normal `pki` completion:
 a TPM key is just a `pki` key. Touch points to rework:
 `src/conf_mode/interfaces_openvpn.py`, `src/conf_mode/service_ssh.py`,
-`src/conf_mode/serial.py`.
+`src/conf_mode/serial.py`, `src/conf_mode/vpn_ipsec.py`.
 
 ### 3.6 Remove enable/disable
 
@@ -268,6 +270,62 @@ other role on this board (it appears not to) and whether it can be **retired or
 repurposed** once the flag is gone. `/var/lib/tee` and the config-encryption
 sealing path are unaffected.
 
+### 3.10 Per-consumer key binding — and why strongSwan needs PKCS#11
+
+`storage` is the single **config-level** source of truth, but the **mechanism
+that hands a sealed key to a service differs per consumer**. The consumers fall
+into two families:
+
+- **OpenSSL-family consumers** — OpenVPN, serial/stunnel, and (via an agent)
+  sshd. These resolve keys through OpenSSL or an agent, so a `storage tpm` key is
+  handed over as a provider/engine key reference (OpenSSL tpm2 provider) or an
+  `ssh-tpm-agent` key. No change to their credential *model*; just a different
+  key handle instead of a PEM.
+
+- **strongSwan / IPsec (charon)** — the odd one out. charon has its **own
+  credential subsystem**: `vpn_ipsec.py` extracts the private-key PEM from the
+  pki config and writes it to `/etc/swanctl/private/x509_<name>.pem`
+  (`wrap_private_key(...)`, lines ~792–811), and charon loads `/etc/swanctl/*`
+  into its in-memory credential set. For a `storage tpm` key there is **no
+  exportable PEM**, so this path cannot work as-is — strongSwan needs a reference
+  into its own credential store that points at the sealed key.
+
+**Decision: strongSwan binds TPM keys via PKCS#11 (tpm2-pkcs11).** Rather than
+the native strongSwan `tpm` plugin (which references raw TPM persistent
+handles), igOS uses the **`pkcs11` charon plugin** against a **TPM-backed
+PKCS#11 token** provided by **`tpm2-pkcs11`** (`libtpm2_pkcs11.so`) layered on
+the OP-TEE fTPM / TSS2 stack. Implications:
+
+1. **Build dependency.** `tpm2-pkcs11` (and its TSS2 deps) must be built/packaged
+   in `vyos-build`, and the charon `pkcs11` plugin must be present and `load`ed.
+   Under FIPS note that `data/templates/ipsec/fips_plugins.conf.j2` disables the
+   native crypto plugins and forces IKE primitives through the **openssl**
+   plugin; `pkcs11` provides **key storage/operations** (the private-key op runs
+   in the TPM), not general crypto, so it must remain loaded and be confirmed as
+   not reintroducing non-approved algorithms.
+2. **swanctl wiring, not a PEM.** For a `storage tpm` cert/key-pair, `vpn_ipsec.py`
+   **skips** the `/etc/swanctl/private/` PEM write and instead registers a
+   `pkcs11` module (in `strongswan.conf` `charon.plugins.pkcs11.modules`) and
+   references the key by **PKCS#11 URI / object** (token + `CKA_LABEL`/`CKA_ID`)
+   from the swanctl connection. The public certificate is still written normally.
+3. **Name-as-alias fits.** The pki node name maps to the PKCS#11 object
+   **`CKA_LABEL`** on the TPM-backed token. tpm2-pkcs11 manages the underlying TPM
+   persistent handles itself, so going through PKCS#11 **avoids** exposing a raw
+   persistent handle — which keeps the name-as-alias decision (§3.3, locked #2)
+   viable even for strongSwan.
+4. **verify()/generate relaxations.** `verify_pki_x509` / `verify_pki_rsa`
+   (lines ~259, ~271) currently hard-require `private.key` in the config; they
+   must accept its **absence** when `storage tpm` and instead confirm the PKCS#11
+   object exists. `generate_pki_*_files` must skip `wrap_private_key` for TPM
+   keys and emit the PKCS#11 reference.
+
+**Convergence opportunity (optional).** Since PKCS#11 is required for strongSwan
+anyway, the OpenSSL-family consumers *could* also reach the TPM via PKCS#11 (the
+OpenSSL `pkcs11-provider`) instead of the tpm2 provider — giving **one** TPM
+backend (`tpm2-pkcs11`) for every consumer. This is attractive for a single
+auditable mechanism but is a larger decision; the per-family approach above is
+the baseline, with full PKCS#11 convergence as a candidate simplification.
+
 ---
 
 ## 4. Locked decisions (2026-11-09)
@@ -284,6 +342,9 @@ sealing path are unaffected.
 5. **WireGuard is a follow-up** — mirror the same `…private-key storage tpm`
    model under `interfaces wireguard` after the `pki` core lands (different
    subtree; keeps the first change focused).
+6. **strongSwan binds TPM keys via PKCS#11** — use the charon `pkcs11` plugin
+   against a `tpm2-pkcs11` token (not native strongSwan `tpm` handles, not a PEM
+   in `/etc/swanctl/private/`); see §3.10.
 
 ---
 
@@ -294,8 +355,15 @@ sealing path are unaffected.
   `src/conf_mode/interfaces_wireguard.py` `read_tpm_key_file`). Apply the same
   per-key `storage` model there as a separate change.
 - **Provider plumbing specifics** — exact OpenSSL tpm2-provider / `ssh-tpm-agent`
-  wiring per consumer (OpenVPN, serial/stunnel, sshd) to be detailed when code
-  work starts.
+  wiring per consumer (OpenVPN, serial/stunnel, sshd), and the strongSwan
+  `pkcs11`/`tpm2-pkcs11` token wiring (swanctl PKCS#11 URIs, `strongswan.conf`
+  module registration), to be detailed when code work starts.
+- **`tpm2-pkcs11` packaging (vyos-build)** — build/package `tpm2-pkcs11` and its
+  TSS2 deps, enable the charon `pkcs11` plugin, and confirm it is FIPS-compatible
+  alongside `fips_plugins.conf.j2` (key-op token, not a crypto provider).
+- **PKCS#11 convergence decision** — whether to route *all* consumers through
+  `tpm2-pkcs11` (one backend) or keep OpenSSL-family consumers on the tpm2
+  provider (§3.10).
 - **`verify()` error ergonomics** — precise messages for: `storage tpm` with a
   stray `private key`; `password-protected` under TPM; and missing sealed key on
   restore/different hardware.
