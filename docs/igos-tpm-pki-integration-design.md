@@ -324,12 +324,55 @@ the OP-TEE fTPM / TSS2 stack. Implications:
    object exists. `generate_pki_*_files` must skip `wrap_private_key` for TPM
    keys and emit the PKCS#11 reference.
 
-**Convergence opportunity (optional).** Since PKCS#11 is required for strongSwan
-anyway, the OpenSSL-family consumers *could* also reach the TPM via PKCS#11 (the
-OpenSSL `pkcs11-provider`) instead of the tpm2 provider — giving **one** TPM
-backend (`tpm2-pkcs11`) for every consumer. This is attractive for a single
-auditable mechanism but is a larger decision; the per-family approach above is
-the baseline, with full PKCS#11 convergence as a candidate simplification.
+> **Discussion point — route *all* consumers through PKCS#11?**
+> Since PKCS#11 is required for strongSwan anyway, a tempting simplification is
+> to make **`tpm2-pkcs11` the single TPM backend for every X.509/TLS consumer**,
+> reached two standard ways: **native PKCS#11** for apps that have it, and the
+> **OpenSSL 3 `pkcs11-provider`** (keys exposed as `pkcs11:` URIs) for the
+> OpenSSL-family apps — instead of the OpenSSL tpm2 provider. This is **not yet a
+> locked decision**; it is captured here for a decision.
+>
+> **Feasibility per consumer (assessed 2026-11-09):**
+>
+> | Consumer | PKCS#11 route | Notes |
+> |---|---|---|
+> | strongSwan | native charon `pkcs11` plugin | the §3.10 decision |
+> | OpenVPN | native `--pkcs11-provider` (pkcs11-helper) | straight to the token |
+> | serial / stunnel | OpenSSL `pkcs11-provider` + `pkcs11:` URI | OpenSSL 3 |
+> | HTTPS / nginx | OpenSSL `pkcs11-provider` | swap `ssl_certificate_key <file>` (today `/run/nginx/certs/…`) for a `pkcs11:` URI |
+> | DevID | own PKCS#11 token | already PKCS#11 (§3.11) |
+>
+> The enabler is the OpenSSL 3 **`pkcs11-provider`**: it exposes the token's keys
+> to any OpenSSL-3 app via `pkcs11:` URIs, so stunnel/serial and nginx need no
+> per-app TPM code — just provider config + a URI.
+>
+> **Genuine exceptions (stay non-PKCS#11):**
+> - **sshd host keys** — OpenSSH has no native PKCS#11 host-key support. It
+>   *could* be forced via a stock `ssh-agent` with the pkcs11 module loaded
+>   (`ssh-add -s libtpm2_pkcs11.so`) pointed at by sshd `HostKeyAgent`, but the
+>   pragmatic choice is to keep **`ssh-tpm-agent`** (TPM-direct; already in use,
+>   `src/conf_mode/service_ssh.py`). The one residual special case in the PKI
+>   space.
+> - **WireGuard** — cannot: the kernel WG module needs the raw X25519 scalar;
+>   there is no token offload. TPM here only wraps-the-key-at-rest (already a
+>   separate follow-up, §5).
+> - **Disk/config encryption** — stays TPM-direct `tpm2_unseal` in early boot;
+>   out of PKI scope (PKCS#11 in initramfs would be pointless).
+>
+> **FIPS nuance.** With PKCS#11 the private-key operation runs **inside the
+> TPM/token, outside the OpenSSL FIPS module boundary**. It coexists fine
+> (pkcs11-provider and the FIPS provider are separate providers), but a FIPS
+> *claim* must treat the TPM/token as its own validated module or otherwise
+> account for that key-op being outside the OpenSSL module. See
+> `igos-fips-140-3-design.md`.
+>
+> **Trade-off.** Pro: one backend, one object namespace (`CKA_LABEL` = pki node
+> name), one completion, concentrated FIPS reasoning, no per-app tpm2-provider
+> wiring. Con: a broader first change, an extra moving part
+> (`pkcs11-provider`) in the OpenSSL path for every TLS app, and the FIPS-boundary
+> question above. **Baseline if undecided:** per-family (strongSwan via PKCS#11;
+> OpenSSL-family via the tpm2 provider), with full convergence as the candidate
+> simplification.
 
 ### 3.11 Device identity (DevID) — independent of operator PKI
 
@@ -480,9 +523,12 @@ isolation and plugging the GUI cert into the existing `pki certificate` +
 - **`tpm2-pkcs11` packaging (vyos-build)** — build/package `tpm2-pkcs11` and its
   TSS2 deps, enable the charon `pkcs11` plugin, and confirm it is FIPS-compatible
   alongside `fips_plugins.conf.j2` (key-op token, not a crypto provider).
-- **PKCS#11 convergence decision** — whether to route *all* consumers through
-  `tpm2-pkcs11` (one backend) or keep OpenSSL-family consumers on the tpm2
-  provider (§3.10).
+- **PKCS#11 convergence decision (open discussion)** — whether to route *all*
+  X.509/TLS consumers through `tpm2-pkcs11` (native PKCS#11 + OpenSSL
+  `pkcs11-provider`) as one backend, or keep OpenSSL-family consumers on the tpm2
+  provider. Feasibility per consumer, the sshd/WireGuard/disk exceptions, the
+  FIPS-boundary nuance, and the trade-off are written up as a discussion point in
+  §3.10 — **not yet decided.**
 - **`verify()` error ergonomics** — precise messages for: `storage tpm` with a
   stray `private key`; `password-protected` under TPM; and missing sealed key on
   restore/different hardware.
