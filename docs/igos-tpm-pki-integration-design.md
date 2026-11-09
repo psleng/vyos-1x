@@ -691,6 +691,22 @@ Design consequences:
 - `libsqlite3` is already present; newer `tpm2-pkcs11` also offers a **FAPI**
   backend as an alternative to the sqlite store.
 
+**The store is provisioning state, NOT a build artifact.** The build ships only
+the *software + wiring* (the `libtpm2_pkcs11.so` module, `tpm2_ptool`,
+`pkcs11-provider`, p11-kit registration, and the `TPM2_PKCS11_STORE` path — plus,
+optionally, creating the empty store directory). The `tpm2_pkcs11.sqlite3`
+database itself is created **on the unit at provisioning/first boot** and holds
+keys **wrapped by that unit's TPM primary**. It must never be baked into the
+image because: (a) the blobs are sealed to one TPM and are useless on any other
+unit; (b) the rootfs squashfs is read-only (dm-verity) so the store cannot live
+there and must sit on a writable persistent partition; (c) identity is per-unit,
+not cloned from a golden image. **Build pitfall to avoid:** ensure no package
+`postinst` or image-assembly step runs `tpm2_ptool`/`tpm2-pkcs11` and bakes a
+default store (`~/.tpm2_pkcs11` or a compiled-in `/etc/...` path) into the
+squashfs; explicitly set `TPM2_PKCS11_STORE` to the writable persistent path
+(§3.13) and keep store *creation* out of the build (override any compiled-in
+default store location).
+
 **To start the work:** (1) add `libtpm2-pkcs11-1` + `libtpm2-pkcs11-tools`
 (bookworm) or build recent upstream; (2) add/build `pkcs11-provider`; (3) wire
 the TCTI as `device:/dev/tpmrm0`, init the token with `tpm2_ptool`, and register
