@@ -1,13 +1,16 @@
 # igOS FIPS 140-3 — Design Sketch
 
-Status: **vyos-1x enforcement complete; on-target validated (2026-11-08)**
+Status: **vyos-1x enforcement landed + on-target validated (2026-11-08); audit round 3 landed (2026-11-09) — open items remain, see the 2026-11-09 checkpoint**
 (Phases 0, 1, the vyos-1x half of Phase 4, and the Phase 4 **kernel
-`CONFIG_CRYPTO_FIPS` defconfig** landed; enforcement complete — helper/policy +
+`CONFIG_CRYPTO_FIPS` defconfig** landed; enforcement landed — helper/policy +
 SSH + IPsec + HTTPS + NTP/NTS + WireGuard/PPTP + RADIUS/TACACS+ + OpenVPN-TPM +
 Wireless + SNMPv3 + haproxy + password-hash KDF + PKI openssl migration + serial
 TLS + DHCP TSIG + PPP + TLS-version floor + routing-protocol auth + VRRP auth +
-TPM-PKI; the `show system fips` "incomplete" note has been dropped. Remaining is
-**not vyos-1x code**: live-peer IKE SA + reboot-toggle soak (deployment-grade
+TPM-PKI; 2026-11-09: PPP clients + stunnel + **system-wide TLS groups/CipherString** +
+syslog TLS + container registry pulls + system email + OSPF area auth + OpenFabric;
+the `show system fips` "incomplete" note has been dropped. **Remaining (2026-11-09):**
+igOS cloud-proxy (deferred), ocserv decision, SNMPv3/serial defaults on-target
+verification, and the live-peer IKE SA + reboot-toggle soak (deployment-grade
 validation). The kernel **integrity chain needs no initramfs work** — it is
 satisfied by the existing signed boot chain (Secure Boot → grub GPG → dm-verity →
 OpenSSL self-test), see §6/"Code-integrity via the signed boot chain" — so the
@@ -27,6 +30,52 @@ system-wide, enforceable FIPS mode. It spans `vyos-1x`, `vyos-build`, and the
 kernel.
 
 ---
+
+## Implementation status (checkpoint: 2026-11-09 — audit round 3: on-target failure list worked through)
+
+**Checkpoint 2026-11-09 (session summary):** an on-target audit run (operator test
+list) reported failures; each was traced on the FIPS unit (10.10.50.165, live
+throwaway-instance tests where possible) and fixed or recorded below.
+
+**Systemic finding:** the FIPS provider (3.1.2) rejects non-approved *primitives*,
+**not non-approved TLS negotiation choices**. It still performs **X25519/X448** key
+exchange and permits **static-RSA (PKCS#1 v1.5) key transport**, HMAC-SHA1 CBC,
+DSS, anonymous (aNULL) and CCM8 suites. The earlier "OpenSSL-backed ⇒ the provider
+auto-enforces" assumption was therefore **wrong for TLS**; it is now closed
+system-wide via `openssl.cnf` `system_default` (`Groups` + `CipherString` +
+`TLS/DTLS.MinProtocol`). Apps that hard-code their own groups/ciphers bypass
+`system_default` and must be fixed individually (stunnel was one) — **check every
+new TLS consumer for its own overrides**.
+
+**Landed (all T8529, committed):**
+
+| Item | Fix | Commit | Verified |
+|---|---|---|---|
+| PPP clients | ppp-tty: allow only `none`; PPPoE + SSTP clients: whole-feature reject | `966aecef9`, `18f5a8d8a` | unit-tested |
+| stunnel | approved curves / TLS 1.3 suites / `sslVersionMin` per service + `fips = yes` | `9ced7eb2b` | on target |
+| System-wide TLS groups | `Groups` P-curves+FFDHE, `TLS/DTLS.MinProtocol` | `54f3448ad` | on target (nginx X25519→P-256) |
+| Containers / email | registry pulls removed (local archives only, `pull_policy=never`); `system email` whole-feature reject (GnuTLS) | `1c2c8208d` | unit-tested |
+| Syslog TLS + system-wide TLS 1.2 ciphers | `CipherString` (FS (EC)DHE + AES only); reject `auth-mode anon`; SHA-256 fingerprints | `82422689b` | on target |
+| OSPF / OpenFabric | reject `area … authentication`; OpenFabric `domain-password`/`password` | `46b2bb511` | real `verify()` tested |
+| TLS-consumer re-audit | classified by TLS stack (`ldd` on target) | `54f3448ad`, `1c2c8208d` | on target |
+
+**Open:**
+- **igOS cloud-proxy** — vendored pyca `cryptography` with **embedded OpenSSL
+  4.0.3** bypasses FIPS for GUI session-JWT signing. Fix identified (use system
+  `python3-cryptography`), **deferred** — see the cloud-proxy row.
+- **ocserv (OpenConnect)** — GnuTLS, outside the validated module; gated only by the
+  TLS-version floor. Decide: whole-feature reject vs. rebuild against OpenSSL.
+- **SNMPv3 user auth/priv defaults & serial TLS cipher-options defaults** ("defaults
+  not checked"). Code analysis shows the unset path is handled (SNMP:
+  `merge_defaults` → FIPS override to sha256/aes **before** key localization;
+  serial: `_fips_apply_tls_template_defaults` pins an approved cipher-options
+  entry), but it is **not yet verified end-to-end on target** and has no functional
+  test.
+- **Fresh FIPS image + re-validation** of all 2026-11-09 changes, plus the existing
+  live-peer IKE SA and reboot-toggle soak.
+- **Test-unit state:** `/etc/ssl/openssl.cnf` on 10.10.50.165 is hand-patched with
+  the new `system_default` section (backup `/tmp/openssl.cnf.pre-groups`); it
+  reverts on the next `system option` commit until a new image is installed.
 
 ## Implementation status (checkpoint: 2026-11-05 — enforcement wave 2 (Wireless/SNMPv3/haproxy) + password-hash KDF + DSA removal landed; audit rows traced)
 
@@ -106,7 +155,8 @@ kernel.
     — v2 posted 2026-11-04**, not merged, not in 6.18. Re-enable `sa2ul` once the
     series lands in a kernel we can rebase/backport. Lore:
     `lore.kernel.org/all/?q=sa2ul+cleanup`.
-- **Remaining vyos-1x code:** **COMPLETE (2026-11-08).** The enforcement wave
+- **Remaining vyos-1x code:** **COMPLETE (2026-11-08).** *(Superseded 2026-11-09 —
+  the on-target audit found further gaps; see the 2026-11-09 checkpoint.)* The enforcement wave
   landed (2026-11-07) — TPM operator rejects (`ssh-tpm-agent` generation-override
   + TPM-PKI op-mode/serial reject, §6.1), VRRP auth reject, and routing-protocol
   auth reject (OSPF/IS-IS/RIP/BGP). The backend-dependent TLS consumers are
@@ -414,7 +464,9 @@ crypto tokens was cross-checked against the rows above. Also-ran results:
   (`protocols segment-routing` — SHA-256, approved; verify no MD5 option);
   webproxy **LDAP-over-SSL** and **ddclient/RFC2136 TSIG** (the TSIG algorithm is
   carried in the key *file*, not a CLI leaf) — both OpenSSL-backed, so the
-  provider auto-enforces.
+  provider rejects non-approved primitives *(2026-11-09: TLS key exchange and
+  cipher-suite choice are **not** restricted by the provider alone — now covered by
+  the system-wide `Groups`/`CipherString`, see the 2026-11-09 checkpoint)*.
 - **Reference-only:** serial `tls-port` / `modbus-gateway` just reference the
   global serial TLS *template* (already covered by the serial-TLS row).
 - **False positives (no crypto):** `nat-rule` / `qos` (protocol names),
