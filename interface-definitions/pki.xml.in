@@ -21,8 +21,15 @@
               <help>CA private key in PEM format</help>
             </properties>
             <children>
-              #include <include/pki/cli-private-key-base64.xml.i>
               #include <include/pki/password-protected.xml.i>
+              <leafNode name="key">
+                <properties>
+                  <help>Private key in PEM format or filename in /config/auth for tpm sealed key</help>
+                  <completionHelp>
+                    <list>PEM filename</list>
+                  </completionHelp>
+                </properties>
+              </leafNode>
             </children>
           </node>
           <leafNode name="crl">
@@ -113,8 +120,15 @@
               <help>Certificate private key</help>
             </properties>
             <children>
-              #include <include/pki/cli-private-key-base64.xml.i>
               #include <include/pki/password-protected.xml.i>
+              <leafNode name="key">
+                <properties>
+                  <help>Private key in PEM format or filename in /config/auth for tpm sealed key</help>
+                  <completionHelp>
+                    <list>PEM filename</list>
+                  </completionHelp>
+                </properties>
+              </leafNode>
             </children>
           </node>
           #include <include/pki/cli-revoke.xml.i>
@@ -157,8 +171,15 @@
               <help>Private key</help>
             </properties>
             <children>
-              #include <include/pki/cli-private-key-base64.xml.i>
               #include <include/pki/password-protected.xml.i>
+              <leafNode name="key">
+                <properties>
+                  <help>Private key in PEM format or tpm-sealed key</help>
+                  <completionHelp>
+                    <list>PEM_format_key TPM_file_key</list>
+                  </completionHelp>
+                </properties>
+              </leafNode>
             </children>
           </node>
         </children>
