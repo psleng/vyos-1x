@@ -549,6 +549,101 @@ browser GUI, while **keys/certs stay separate per role** — preserving DevID
 isolation and plugging the GUI cert into the existing `pki certificate` +
 `storage tpm` plumbing.
 
+### 3.13 Provisioning, key persistence & disaster recovery
+
+**Key generation & "no key escrow."** Private keys are **generated inside the
+TPM** and are non-exportable; they only ever leave as TPM-wrapped blobs. The
+CA/cloud **never holds a unit private key.** At provisioning the TPM mints the
+keypair, only the **public key (as a CSR)** goes to the CA, and the CA returns a
+**certificate** (public). The cloud stores only: its own CA signing key, a roster
+of unit **EK _public_** keys (optionally your own EK certs), and records of issued
+certs — all public except the CA's own key. A cloud breach exposes public
+material + the ability to issue (so protect the CA key hard, ideally
+offline/HSM), never a unit secret. (Anti-pattern avoided: generating keys
+centrally and `TPM2_Import`-ing them would expose the private key outside the
+TPM.)
+
+**How a key gets "into" the TPM (no per-key fuses).** One hardware root (the SoC
+HUK) protects the TPM's storage hierarchy; any number of generated keys are
+**wrapped** under it. The DevID is an ordinary TPM-generated key wrapped under
+that hierarchy — not fused, not imported.
+
+**Trust bootstrap (how the cloud knows a unit is valid).** Anchored at the
+**factory**, where you control ground truth:
+- Record the unit's **EK public** in the cloud's trusted-unit roster. The fTPM
+  ships **no vendor EK cert**, so **you are the EK authority.**
+- Field enrollment/recovery uses **TPM credential activation**
+  (`TPM2_MakeCredential`/`ActivateCredential`): the cloud encrypts a challenge to
+  the rostered EK public such that only that TPM — with the named DevID key
+  loaded — can release it. Success proves (a) a genuine TPM holding the rostered
+  EK and (b) the DevID resides in the same TPM. The CA then issues the DevID
+  cert. No "trust from nothing."
+
+**Persistence & image migration.** TPM keys are **wrapped-blob files**; validity
+depends on the unit's TPM seed staying stable. `add system image` **snapshots**
+`/config` (the key-blob store / `tpm2-pkcs11` token store) and `/var/lib/tee`
+(fTPM secure storage) into the new image, so each image carries a copy and the
+blobs stay loadable. Under convergence the `tpm2-pkcs11` store must be in the
+carried set (under `/config`, or added like the REE-FS copy).
+
+**Disaster recovery — survive full image loss.** Two strategies:
+- **Strategy 1 (durable storage, simplest, recommended primary):** keep the
+  DevID + fTPM secure storage in a location that survives reflash/reset (RPMB or
+  a dedicated persistent partition), so identity persists with no cloud
+  round-trip. Needed because `ms-tpm-20-ref` stores **random** seeds in REE-FS
+  (`/var/lib/tee`) rather than re-deriving them from the HUK — a raw reflash
+  would otherwise lose them.
+- **Strategy 2 (EK re-enrollment, catastrophic backstop):** after total
+  secure-storage loss, re-derive the EK from the HUK and re-enroll via credential
+  activation. **Requires** the endorsement seed to be HUK-derived (stock
+  `ms-tpm-20-ref` does **not** guarantee this → needs fTPM/OP-TEE work); the
+  cloud must retain the EK/EK-cert to verify.
+
+### 3.14 Hardware root-of-trust — AM64x fTPM findings (2026-11-09)
+
+Probed the running igOS dev unit:
+
+| Item | Finding |
+|---|---|
+| SoC | **TI AM64X SR2.0**, Perle AM6412 IGOS; TIFS (ti-sci) rev 9.2.8 running |
+| **Device security type** | **HS-FS** (High Security – *Field Securable*) — **not HS-SE** |
+| TPM | **Microsoft `ms-tpm-20-ref` fTPM** in OP-TEE (`ftpm-tee` driver, DT `microsoft,ftpm`, manufacturer `MSFT`, fw 2017-06-19) |
+| OP-TEE | rev 4.5, healthy; `/dev/tee0`; fTPM functional |
+| Secure storage | **REE-FS** at `/var/lib/tee` (HUK-encrypted normal-world files) |
+| SA2UL | `CONFIG_CRYPTO_DEV_SA2UL` **disabled** — Linux crypto *driver* only (for FIPS POST); **orthogonal** to the secure-world RoT (fTPM healthy with it off) |
+
+**Headline — the units are HS-FS, so the hardware root is not yet
+customer-owned.** On HS-FS the security subsystem is active but **Perle's keys
+are not fused**; the device runs on **TI default/placeholder keys**. So the HUK /
+secure-storage root is **not customer-unique or production-secure yet**, and a
+sealed blob is likely **portable across HS-FS units** (not unit-bound). ROM-level
+secure boot is not locked to Perle's key on HS-FS (the UEFI/grub layer *is*
+VyOS-signed, but sits on a ROM chain that only enforces Perle's key at HS-SE).
+
+**Hard prerequisite — HS-SE fusing.** Everything in §3.11–§3.13 that relies on a
+unit-unique hardware root (DevID binding, non-cloneable sealed keys,
+survive-wipe-via-EK, any FIPS claim on TPM key-ops) **requires converting
+production units to HS-SE** — Perle programs the MPK hash + MEK into eFuses on
+the line. This is **irreversible** and reorders the factory flow:
+
+> **Fuse HS-SE → _then_ provision the DevID + record the EK.** The EK/HUK only
+> becomes unit-unique after fusing; provisioning identity on an HS-FS unit would
+> bind it to a non-unique root.
+
+**Remaining gates (post-fusing):**
+- **fTPM FIPS validation** — `ms-tpm-20-ref` is not CMVP-validated; the hardest
+  gate for any FIPS claim on TPM key-ops.
+- **Seed durability** — REE-FS seeds → apply Strategy 1 (§3.13).
+- **HUK realness confirmation** — after HS-SE, confirm via the portability test
+  and the OP-TEE secure-console HUK status.
+
+**Discrete-TPM trade.** A discrete, CMVP-validated TPM carries its **own**
+hardware root (independent of the SoC HS state), its own RNG/NV, and a **vendor
+EK certificate** — collapsing the HS-SE-dependency, fTPM-validation, and
+EK-provenance gates at once, and giving a real per-unit root **even on HS-FS
+SoCs**. Weigh against owning the HS-SE-fusing + fTPM-validation path, especially
+given SA2UL already had to be disabled for FIPS POST.
+
 ---
 
 ## 4. Locked decisions (2026-11-09)
@@ -582,11 +677,30 @@ isolation and plugging the GUI cert into the existing `pki certificate` +
    the §3.10 verification gates**; per-family (tpm2-provider for the OpenSSL
    family) is the fallback. Engine paths (`engine_pkcs11`, `tpm2-tss-engine`,
    OpenVPN `pkcs11-helper`) are ruled out.
+10. **No key escrow** — private keys are TPM-generated and never leave the TPM;
+   the cloud/CA stores only public material (EK publics, issued certs) plus its
+   own CA signing key. See §3.13.
+11. **HS-SE fusing is a production prerequisite** — the unit-unique hardware root
+   (DevID binding, non-cloneable keys, EK-based recovery, any TPM-FIPS claim)
+   exists only once units are fused to **HS-SE**; dev units are **HS-FS**.
+   Factory order: **fuse → provision DevID → record EK.** See §3.14.
 
 ---
 
 ## 5. Open items / follow-ups
 
+- **Hardware root-of-trust gates (§3.14) — production-blocking.** Decide and
+  implement: (a) the **HS-SE fusing** flow (MPK hash + MEK eFuses, irreversible,
+  on the manufacturing line); (b) **fTPM CMVP validation** vs. switching to a
+  **discrete validated TPM** (the latter collapses the HS-SE-dependency,
+  validation, and EK-provenance gates); (c) **seed durability** — place the DevID
+  + fTPM secure storage in a reflash-durable location (RPMB / dedicated
+  partition), i.e. Strategy 1; (d) post-fuse **HUK confirmation** via the
+  portability test and the OP-TEE secure-console HUK status.
+- **Factory provisioning tooling (§3.11, §3.13)** — fuse HS-SE, generate the
+  DevID in-TPM, CSR → CA sign → inject cert, and **capture the EK into the cloud
+  roster**; choose the on-unit home for the DevID + CA anchor (durable, outside
+  image overlays — not `/config`).
 - **WireGuard** (`interfaces wireguard … private-key`) carries its own
   file-wrapped TPM key today (`src/op_mode/pki.py` `write_tpm_key_file` ↔
   `src/conf_mode/interfaces_wireguard.py` `read_tpm_key_file`). Apply the same
