@@ -381,6 +381,15 @@ def generate(options):
         if os.path.exists(openssl_fipsmodule_config):
             os.remove(openssl_fipsmodule_config)
 
+    # FIPS: system-wide approved TLS groups / protocol floor (openssl.cnf
+    # system_default), so OpenSSL apps don't negotiate X25519/X448 by default.
+    if 'fips' in options:
+        options['fips_tls'] = {
+            'groups': ':'.join(fips.default('system openssl tls groups')),
+            'tls_min_protocol': fips.default('system openssl tls min-protocol')[0],
+            'dtls_min_protocol': fips.default('system openssl dtls min-protocol')[0],
+        }
+
     render(openssl_config, 'openssl/openssl.cnf.j2', options)
 
     render(curlrc_config, 'system/curlrc.j2', options)

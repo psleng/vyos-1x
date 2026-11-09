@@ -347,6 +347,29 @@ approved = ["TLSv1.2", "TLSv1.3"]
 default = ["TLSv1.2"]
 
 # ---------------------------------------------------------------------------
+# System-wide OpenSSL TLS defaults (openssl.cnf ssl_conf -> system_default),
+# rendered by system_option.py under FIPS. EMIT-ONLY (no CLI leaf). Applies to
+# every OpenSSL application that does not set its own groups/versions (nginx,
+# syslog-TLS, email, OpenVPN TLS, serial IOLAN daemons, ...). The FIPS provider
+# still implements X25519/X448 (not approved for key establishment), and
+# OpenSSL's default group list leads with X25519 -- verified on target that
+# nginx negotiated X25519 before this. Mirrors RHEL's FIPS crypto-policy:
+# NIST P-curves + RFC 7919 FFDHE (SP 800-56A safe-prime groups).
+# ---------------------------------------------------------------------------
+[leaf."system openssl tls groups"]
+approved = ["P-256", "P-384", "P-521", "ffdhe2048", "ffdhe3072", "ffdhe4096",
+            "ffdhe6144", "ffdhe8192"]
+default = ["P-256", "P-384", "P-521", "ffdhe2048", "ffdhe3072", "ffdhe4096"]
+
+[leaf."system openssl tls min-protocol"]
+approved = ["TLSv1.2", "TLSv1.3"]
+default = ["TLSv1.2"]
+
+[leaf."system openssl dtls min-protocol"]
+approved = ["DTLSv1.2"]
+default = ["DTLSv1.2"]
+
+# ---------------------------------------------------------------------------
 # Serial console-server TLS -- Perle IOLAN daemons (iol_direct/iol_rawd/...).
 # These dynamically link the system OpenSSL 3.x and do NOT override providers,
 # so under FIPS they route through the validated FIPS provider (verified on

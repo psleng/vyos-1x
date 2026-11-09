@@ -57,6 +57,7 @@ tsa_policy3 = 1.2.3.4.5.7
 providers = provider_sect
 {% if fips is vyos_defined %}
 alg_section = algorithm_sect
+ssl_conf = ssl_sect
 {% endif %}
 
 # List of providers to load
@@ -73,6 +74,18 @@ activate = 1
 
 [algorithm_sect]
 default_properties = fips=yes
+
+# FIPS 140-3: system-wide TLS defaults for every OpenSSL application that does
+# not override them. The FIPS provider still implements X25519/X448, which are
+# not approved for key establishment, and OpenSSL's default group list puts
+# X25519 first -- so without this, services (e.g. nginx) negotiate X25519.
+[ssl_sect]
+system_default = system_default_sect
+
+[system_default_sect]
+Groups = {{ fips_tls.groups }}
+TLS.MinProtocol = {{ fips_tls.tls_min_protocol }}
+DTLS.MinProtocol = {{ fips_tls.dtls_min_protocol }}
 {% endif %}
 
 # If no providers are activated explicitly, the default one is activated implicitly.
