@@ -325,6 +325,28 @@ default = [
 ]
 
 # ---------------------------------------------------------------------------
+# stunnel (OpenSSL-backed, auto-detects fips=yes so TLS 1.2 `ciphers` = FIPS).
+# EMIT-ONLY: these have no CLI leaf; get_config() emits `default` per service
+# under FIPS. stunnel hard-codes its own `curves` (X25519:P-256:X448:...) and
+# TLS 1.3 `ciphersuites` (incl. CHACHA20), overriding OpenSSL's defaults.
+# Verified on target: the FIPS provider drops CHACHA20, but X25519/X448 key
+# exchange is still offered (client) and accepted (server) -- not approved for
+# key establishment (SP 800-56A: NIST P-curves only). TLS 1.2 `ciphers` is left
+# at stunnel's FIPS default so PSK services keep working.
+# ---------------------------------------------------------------------------
+[leaf."service stunnel curves"]
+approved = ["P-256", "P-384", "P-521"]
+default = ["P-256", "P-384", "P-521"]
+
+[leaf."service stunnel ciphersuites"]
+approved = ["TLS_AES_256_GCM_SHA384", "TLS_AES_128_GCM_SHA256"]
+default = ["TLS_AES_256_GCM_SHA384", "TLS_AES_128_GCM_SHA256"]
+
+[leaf."service stunnel ssl-version-min"]
+approved = ["TLSv1.2", "TLSv1.3"]
+default = ["TLSv1.2"]
+
+# ---------------------------------------------------------------------------
 # Serial console-server TLS -- Perle IOLAN daemons (iol_direct/iol_rawd/...).
 # These dynamically link the system OpenSSL 3.x and do NOT override providers,
 # so under FIPS they route through the validated FIPS provider (verified on
