@@ -10,6 +10,11 @@ parallel key store and becomes a per-key **storage attribute**
 is no enable/disable. This is a **greenfield** redesign for igOS — there is no
 deployed TPM-PKI configuration to preserve, so **no migration** is required.
 
+A related but deliberately **separate** concern — the per-unit, factory-
+provisioned **device identity (DevID)** used to authenticate to the igOS cloud —
+is covered in §3.11; it is intentionally kept independent of the operator `pki`
+tree.
+
 This is the counterpart to `docs/igos-fips-140-3-design.md`: FIPS already set the
 precedent that a security capability belongs in the **configuration** (`set
 system option fips`), applied by commit, visible in `show configuration`, and
@@ -326,6 +331,69 @@ backend (`tpm2-pkcs11`) for every consumer. This is attractive for a single
 auditable mechanism but is a larger decision; the per-family approach above is
 the baseline, with full PKCS#11 convergence as a candidate simplification.
 
+### 3.11 Device identity (DevID) — independent of operator PKI
+
+A **separate** per-unit identity used only to authenticate the unit to the igOS
+cloud (mutual-TLS client identity). It follows the 802.1AR **IDevID** pattern: a
+unique TPM-sealed private key with a certificate signed by **our own CA**. It is
+**not** a `pki … storage tpm` object and does **not** live in the operator `pki`
+tree or operator config — it has a different lifecycle, a different sealing
+policy, and must be isolated from operator key management.
+
+**Why independent (the core reasons):**
+
+- **Lifecycle/provenance.** Provisioned once and permanent; must survive config
+  reset, image reinstall, and factory-default. Operator PKI keys come and go with
+  the configuration.
+- **Not in `config.boot`.** If it were a `pki certificate … storage tpm` node an
+  operator could delete it, a reset would wipe its reference, and it would ride
+  **config backups restored onto other units** — breaking the one-identity-per-
+  unit invariant.
+- **Upgrade-stable sealing.** It must survive firmware/image upgrades, so it is
+  **EK-bound, not sealed to volatile boot-state PCRs** (contrast the service-key
+  path, which may bind PCRs 0/2/4/7). A PCR-bound DevID would lose the cloud
+  identity on every upgrade.
+
+**Locked decisions (2026-11-09):**
+
+1. **Factory-provisioned.** The DevID keypair is created in the unit's TPM on the
+   manufacturing line; the public key is certified by the cloud CA (offline /
+   cloud-side) and the resulting DevID certificate + CA trust-anchor are placed
+   on the unit. **Not** operator-configurable and **not** created at runtime.
+2. **EK-bound.** The DevID key is bound to the TPM **Endorsement Key**, not to
+   boot PCRs — giving upgrade/reset/reinstall survivability. EK binding also
+   enables **credential-activation** at provisioning, so the CA can verify the
+   DevID key resides in *that unit's* genuine TPM before signing.
+3. **Isolated store.** Lives in its **own PKCS#11 token** *or* its **own
+   dedicated TPM slot/persistent handle**, separate from the operator-key token,
+   so operator `generate`/`delete`/commit can never read, overwrite, or remove
+   it. Operator-inaccessible.
+4. **Cloud channel only.** Used solely by the cloud management/telemetry channel.
+   It is **not** referenced from operator config or any service config; the cloud
+   agent wires it implicitly. Operators cannot repurpose it for
+   OpenVPN/IPsec/SSH/etc.
+
+**On-unit material:** the DevID keypair (TPM-sealed, non-exportable), the DevID
+certificate (CA-signed), and the CA certificate (trust anchor). The **CA private
+key is cloud-side/offline and never on a unit.**
+
+**Relationship to the rest of the design:** §3.1–§3.10 govern operator-configured
+service keys via `storage tpm`; the DevID is a parallel, protected,
+factory-provisioned identity. It may share the TPM hardware and the
+`tpm2-pkcs11` mechanism, but sits in an isolated token/slot with its own
+lifecycle and EK-bound sealing.
+
+**Open / implementation notes:**
+
+- **Factory tooling** — create the DevID in-TPM, generate a CSR, sign with the
+  cloud CA, and inject the cert; decide the on-unit home for the DevID cert + CA
+  anchor (a protected, upgrade-surviving location such as the TEE secure storage
+  `/var/lib/tee` or a dedicated provisioning area — **not** `/config`).
+- **EK provenance** — whether units ship with an **EK certificate** to anchor
+  credential-activation at the CA.
+- **Renewal/rotation** — whether DevID certs are long-lived or renewable (EST
+  with the TPM-backed key if re-enrollment is ever needed).
+
 ---
 
 ## 4. Locked decisions (2026-11-09)
@@ -345,6 +413,9 @@ the baseline, with full PKCS#11 convergence as a candidate simplification.
 6. **strongSwan binds TPM keys via PKCS#11** — use the charon `pkcs11` plugin
    against a `tpm2-pkcs11` token (not native strongSwan `tpm` handles, not a PEM
    in `/etc/swanctl/private/`); see §3.10.
+7. **Device identity (DevID) is separate** — factory-provisioned, EK-bound,
+   isolated token/slot, cloud-channel-only, outside the operator `pki` tree; see
+   §3.11.
 
 ---
 
