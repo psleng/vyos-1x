@@ -517,3 +517,87 @@ independent of the session-visibility broker (§5) and can ship first.
   > accounting. Central change/command accounting means **TACACS+**; for
   > RADIUS/SAML deployments the central record for config changes is
   > **syslog/SIEM** (the §10.4 diff-to-syslog feed).
+
+---
+
+## 11. Broader pattern: device concerns in the GUI plane (cross-cutting)
+
+The accounting gap this document addresses is **not isolated**. It is one
+surfacing of a single architectural decision: the GUI was built as a **parallel
+identity + control plane** (§1, §3) rather than as a thin frontend that drives
+vyos-1x's existing planes. The same root cause produces a recurring class of
+defects **every time a device-level concern is implemented in the GUI plane**
+instead of in the shared core that all access paths use. User accounting is the
+instance analysed here in depth; it is worth recording the others so this is
+tracked as **one** architectural decision, not a series of unrelated surprises.
+
+### 11.1 Instances of the same flaw
+
+| Concern | How it lives in the GUI plane | Failure mode (same shape each time) | Tracked where |
+|---|---|---|---|
+| **First-boot onboarding** (force off the default admin credential, apply the password policy, set timezone) | `perle_igos_onboarding_query.py` / `_mutation.py` shipped by the **`vyos-custom-queries`** package (built from `flask-react-dev/perle-graphql`), enforced only by the React `OnboardingGuard`; "required" inferred from the `system time-zone`-unset **heuristic**, not a real completion flag; the scripts' `--cli` path is **not wired** into any console/SSH login | A no-GUI (headless/CLI) or cloud image has no onboarding at all → the box can run indefinitely on the default `igos/igos` credential with no password policy — directly at odds with the `IGOS_SECURE=1`/FIPS posture | **undocumented** |
+| **Session presence + accounting** (this doc) | GUI authenticates in-process, issues a `web_sessions` row + cookie; never runs a PAM session, no TTY, often non-Unix users, containerized | GUI users invisible to `who`/`last`/utmp, journald, logind, and central AAA accounting | §1–§7 (this doc) |
+| **Config-change attribution** (§0.4, §10) | Commits flow through the HTTP API's OS user | `show system commit` shows `by igos via vyos-http-api`, never the real GUI user | §10.4 (this doc) |
+| **GUI identity itself** | Private `User` table (email + bcrypt) with no corresponding Unix account | Unaccountable local admin principals an AAA server has never heard of; the "exclusivity" work calls this *"the same two-planes concern"* (§6.1) | §6.1 / §7 Phase 3 |
+
+### 11.2 The invariant that decides where a concern belongs
+
+Generalising §2.1: responsibilities split cleanly by **who can be the system of
+record**.
+
+- **Delegable off-box** — *authentication* and *identity provenance*: the IdP
+  (SAML), the AAA server (TACACS+/RADIUS), or cloud-init at first boot can own
+  "who authenticated" / "what the credential is." A frontend (or an external
+  system) legitimately covers these.
+- **Device-only, non-delegable** — *forced first-boot hardening*, *on-device
+  presence*, and *change attribution*: only the box can produce or enforce these.
+  **A frontend can never be the device's system of record for them.** Putting
+  such a concern in the GUI plane is therefore categorically the wrong layer —
+  the same reason a web session cannot self-account (§3) is the reason onboarding
+  enforcement cannot live in the wizard.
+
+### 11.3 Deployment-form corollary
+
+Because these concerns live in the GUI / `vyos-custom-queries` plane, they are
+**silently absent whenever the GUI stack is not deployed** — headless/CLI images,
+and cloud images that rely on cloud-init. Onboarding is the sharpest example: a
+security control (force the operator off `igos/igos`, apply the password policy)
+that **disappears when the GUI is absent is in the wrong layer**. Cloud is a
+partial exception only because credential provisioning can be delegated to
+cloud-init (§11.2) — but that is a *different*, un-unified enforcement path, so
+the control is inconsistent across the three deployment forms (GUI / cloud-init /
+headless-nothing).
+
+### 11.4 The shared remedy
+
+The fix is the **same shape** everywhere, and is exactly what this document
+already prescribes for accounting (§4 "do not institutionalize the split", the
+host-side broker in §5, `COMMIT_USER` attribution in §10.4, identity convergence
+in §6.1 / §7 Phase 3):
+
+1. **Push the requirement + enforcement down** into a layer present in *every*
+   deployment — a vyos-1x activation-script / first-boot service / op-mode
+   command, or an always-installed base package — never the GUI product.
+2. **Demote GUI / CLI wizard / cloud-init to interchangeable frontends** that
+   *satisfy* the same core gate, rather than each reimplementing it.
+3. **Use a real signal, not a heuristic** — a dedicated "onboarding complete"
+   flag (parallel to the real session/attribution records the broker produces),
+   not "`system time-zone` is unset."
+4. **Converge GUI identity onto the box's real sources** and retire the shadow
+   `User` table (§6.1), so there is no second identity plane to account for in
+   the first place.
+
+For accounting, items (1)–(2) are the broker (§5) and (4) is Phase 3. For
+onboarding, the identical move is: relocate the detect+apply logic out of the
+GUI-only package into an always-present first-boot mechanism, add a console/SSH
+enforcement hook, and add a completion flag — then the GUI wizard, a CLI wizard,
+and cloud-init all drive the same enforced gate.
+
+### 11.5 Recommendation
+
+Track **"device concerns in the GUI plane"** as a single cross-cutting
+architectural decision with a shared remedy, rather than fixing each symptom in
+isolation. Accounting/attribution (this doc) is the furthest-developed instance;
+**onboarding is an equally real instance that is currently captured in no design
+doc at all** and should be written up (or folded in here) so the pattern is fully
+acknowledged, not half-addressed.
