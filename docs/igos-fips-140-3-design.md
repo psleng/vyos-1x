@@ -268,13 +268,15 @@ configd-inspect/test clean):**
     sshd keeps non-approved host keys under the active provider (the lockout)
     until the next boot. Added a `config-mode-dependencies` `fips` case
     ([vyos-1x.json](../data/config-mode-dependencies/vyos-1x.json): `system_option`
-    -> `fips`: `["service_ssh", "vpn_ipsec"]`, plus `fips_openvpn`:
+    -> `fips`: `["service_ssh", "vpn_ipsec", "service_https"]`, plus `fips_openvpn`:
     `["interfaces_openvpn"]`) and `set_dependents()` in
     [`system_option.py`](../src/conf_mode/system_option.py) `get_config()` when the
     fips node changed; `apply()`'s `call_dependents()` runs them. OpenVPN is a
     per-interface tagNode script, so each instance is registered with its tagnode
     (a bare dependent runs with an empty ifname and fails). Result: enabling FIPS
     reconfigures SSH/OpenVPN **at commit, no reboot, no lockout window**.
+    (`service_https` was added to this list later, for the GUI cipher re-emit —
+    see the **HTTP-API boot race** note below, which that addition exposed.)
   - **p3-ipsec (verify half)** — [`vpn_ipsec.py`](../src/conf_mode/vpn_ipsec.py)
     `verify()` fails closed on explicitly-set non-approved IKE/ESP
     encryption/hash/dh-group and ESP `pfs`.
@@ -351,12 +353,43 @@ configd-inspect/test clean):**
     leaves need the next image build to be settable on-target; the FIPS
     auto-default + hardened-default paths are build-independent and were
     validated.)
+  - **HTTP-API boot race (regression from the toggle fan-out)** — a side effect
+    of adding `service_https` to the `fips` dependency above: with FIPS enabled,
+    every boot re-applies `service_https` (the fips node reads as *added* vs the
+    empty boot baseline, so `is_node_changed` fires `set_dependents('fips')`), so
+    [`service_https.py`](../src/conf_mode/service_https.py) `apply()` ran a second
+    time ~13 s into boot. The old `apply()` **unconditionally**
+    `reload-or-restart`ed `vyos-http-api`; that `SIGHUP` landed mid-startup (the
+    server takes ~15-20 s to initialise), the process exited cleanly, and the
+    unit's `Restart=on-failure` does **not** recover a clean exit -> the API was
+    stranded dead. Downstream: nginx returns 502 on `/graphql` -> the GUI shows
+    **"Configuration service unavailable"** and the iGOS onboarding wizard never
+    appears (its required-check can't read status). nginx was also restarted
+    redundantly on that second apply, just harmlessly. **Note this is not a
+    certificate or cipher problem** — the ciphers are emit-only and already
+    rendered by the *first* apply before nginx is started (nginx is `disabled`,
+    started only by `service_https`), and `vyos-http-api` speaks plain HTTP over a
+    unix socket (no TLS). It recurs on **every** boot, not just first-enable.
+    **Fix:** content-change guards in `apply()` — only reload the API / restart
+    nginx when their rendered config actually changed or the service is not
+    running (`api_config_changed` from the `/run/http-api-state` compare,
+    `nginx_config_changed` from a before/after snapshot of the site config +
+    systemd override + cert files) — plus `Restart=always` in
+    [vyos-http-api.service.j2](../data/templates/https/vyos-http-api.service.j2)
+    as a safety net (an explicit `systemctl stop`, used when the API leaf is
+    removed, is not subject to `Restart=`). On-target validated on 10.10.50.165:
+    API-only change reloads the API but leaves nginx untouched; nginx-only change
+    restarts nginx but leaves the API untouched; killing the API auto-recovers
+    (`NRestarts=1`); `systemctl stop` stays stopped; GUI serves 200 and the
+    onboarding GraphQL query returns `required: true`.
 
 **WORKING-TREE STATE (for resuming):** the main enforcement batch is **committed**
 (`99acd2dda` on branch `vyos-1x-jf`, "FIPS 140-3 Phases 2-3 …", 24 files). On top
-of it, the **HTTPS GUI cipher-suite feature is uncommitted** (6 files:
+of it, the **HTTPS GUI cipher-suite feature is uncommitted** (7 files:
 `interface-definitions/service_https.xml.in`, `src/conf_mode/service_https.py`,
-`data/templates/https/nginx.default.j2`, `data/fips/approved-algorithms.toml`,
+`data/templates/https/nginx.default.j2`,
+`data/templates/https/vyos-http-api.service.j2`,
+`data/fips/approved-algorithms.toml`,
 `data/config-mode-dependencies/vyos-1x.json`, `src/tests/test_fips_policy.py`, plus
 this doc). On-target copies on 10.10.50.165 are **ephemeral test deploys** (reverted
 to a clean config after each test); durable delivery = commit + rebuild. The new

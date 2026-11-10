@@ -189,6 +189,30 @@ def verify(https):
     return None
 
 
+def _nginx_render_snapshot():
+    """Capture the content of every file nginx's behaviour depends on.
+
+    Covers the rendered site config, the systemd override and the on-disk
+    certificate material. Comparing a before/after snapshot lets apply() tell
+    whether nginx actually needs to be bounced, so a redundant re-run (e.g. the
+    system_option/fips or pki dependency re-applying service_https on boot, when
+    the config diff flags every node as changed) does not pointlessly restart a
+    correctly-running nginx and slow the boot.
+    """
+    files = [config_file, systemd_override]
+    if os.path.isdir(cert_dir):
+        files += [os.path.join(cert_dir, f) for f in os.listdir(cert_dir)]
+
+    snapshot = {}
+    for file in files:
+        try:
+            with open(file, 'rb') as f:
+                snapshot[file] = f.read()
+        except OSError:
+            snapshot[file] = None
+    return snapshot
+
+
 def generate(https):
     if https is None:
         for file in [systemd_service_api, config_file, systemd_override]:
@@ -196,8 +220,23 @@ def generate(https):
                 os.unlink(file)
         return None
 
+    nginx_state_before = _nginx_render_snapshot()
+
     if 'api' in https:
         render(systemd_service_api, 'https/vyos-http-api.service.j2', https)
+        # Detect whether the API configuration actually changed. This lets
+        # apply() avoid an unnecessary reload that could race the server's
+        # (slow) startup and strand it - e.g. when service_https is re-run as a
+        # dependency of an unrelated change (pki, system_option/fips) that does
+        # not touch the API at all.
+        old_api_state = None
+        if os.path.exists(api_config_state):
+            try:
+                with open(api_config_state) as f:
+                    old_api_state = json.load(f)
+            except (OSError, ValueError):
+                old_api_state = None
+        https['api_config_changed'] = old_api_state != https['api']
         with open(api_config_state, 'w') as f:
             json.dump(https['api'], f, indent=2)
     else:
@@ -250,6 +289,10 @@ def generate(https):
 
     render(config_file, 'https/nginx.default.j2', https)
     render(systemd_override, 'https/override.conf.j2', https)
+
+    # Record whether any nginx-affecting file actually changed so apply() can
+    # skip a needless restart when nothing did.
+    https['nginx_config_changed'] = _nginx_render_snapshot() != nginx_state_before
     return None
 
 
@@ -266,16 +309,33 @@ def apply(https):
         return
 
     if 'api' in https:
-        call(f'systemctl reload-or-restart {http_api_service_name}')
-        # Let uvicorn settle before (possibly) restarting nginx
-        sleep(1)
+        # Only (re)start the API when it is not already running or when its
+        # configuration actually changed. Reloading a server that is still in
+        # its startup window (e.g. during boot, when service_https is applied a
+        # second time as a dependency of system_option/fips) makes it exit and
+        # - combined with the race - can leave it stranded. Skipping the
+        # needless reload eliminates that race at its source.
+        if (not is_systemd_service_active(http_api_service_name)
+                or https.get('api_config_changed', True)):
+            call(f'systemctl reload-or-restart {http_api_service_name}')
+            # Let uvicorn settle before (possibly) restarting nginx
+            sleep(1)
     elif is_systemd_service_active(http_api_service_name):
         call(f'systemctl stop {http_api_service_name}')
 
-    if https['nginx_restart_required']:
-        call(f'systemctl restart {https_service_name}')
-    else:
-        call(f'systemctl reload-or-restart {https_service_name}')
+    # Only (re)start nginx when it is not already running or when its rendered
+    # configuration actually changed. On boot the config diff flags every node
+    # as changed (empty baseline), so without this content check a redundant
+    # dependency re-run would pointlessly restart a correctly-running nginx and
+    # slow the boot. A real change (ciphers on a FIPS toggle, cert renewal, ...)
+    # still triggers the appropriate restart/reload.
+    if not is_systemd_service_active(https_service_name) or https.get(
+        'nginx_config_changed', True
+    ):
+        if https['nginx_restart_required']:
+            call(f'systemctl restart {https_service_name}')
+        else:
+            call(f'systemctl reload-or-restart {https_service_name}')
 
 
 if __name__ == '__main__':
