@@ -364,10 +364,11 @@ Depends:
 # For "serial"
   psl-iolan-monitor,
 # End "serial"
-# For web interface
-  flask-react-web,
-# flask-react-web's postinst builds a Python venv (/opt/flask/venv), which
-# needs ensurepip/pip from python3-venv + python3-pip present in the image.
+# Python venv tooling for the flask-react-web GUI, which is now a Recommends
+# (and is pulled onto the igOS images by explicit listing in the vyos-build
+# flavor fragments). Its postinst builds a venv (/opt/flask/venv) needing
+# ensurepip/pip from python3-venv + python3-pip, so keep these in the image so
+# the GUI postinst works wherever the GUI is installed.
   python3-pip,
   python3-venv,
 # End web interface
@@ -465,6 +466,16 @@ Recommends:
 # are unaffected.
   gpsd,
   python3-gps,
+# iGOS web GUI (flask-react-web) and its CLI first-boot onboarding wizard
+# (igos-cli-onboarding). Perle product packages, not core VyOS, so they are
+# soft deps -- generic/cloud/VM images are unaffected -- and are pulled onto the
+# igOS hardware images by explicit listing in the vyos-build flavor fragments
+# (like the modem tools above) rather than a hard Depends. flask-react-web is
+# the React/Flask management UI; igos-cli-onboarding installs the
+# /etc/profile.d login check + /config/scripts first-boot setup wizard and
+# Depends on vyos-custom-queries.
+  flask-react-web,
+  igos-cli-onboarding,
 Description: VyOS configuration scripts and data
  VyOS configuration scripts, interface definitions, and everything
 
