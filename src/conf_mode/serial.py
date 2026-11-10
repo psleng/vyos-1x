@@ -204,6 +204,26 @@ def get_config(config=None):
         result = get_serial_config(conf)
     result['_invoke_context'] = invoke_context
     # result.update(service_flags)
+
+    # Check whether an SNMP trap target is configured; used to decide if the
+    # serial-ssh-snmp PAM hook should be enabled (see apply()). Trap targets can
+    # be defined under either the community (v2c) or the v3 tree.
+    result['snmp_trap_target'] = (
+        conf.exists(['service', 'snmp', 'trap-target'])
+        or conf.exists(['service', 'snmp', 'v3', 'trap-target'])
+    )
+
+    # Whether any serial port has an SSH server configured (profile-merged);
+    # computed here because generate() later flattens 'ssh.server' away.
+    # Disabled devices are excluded - a disabled port has no running SSH server.
+    result['serial_ssh_server'] = any(
+        'disable' not in device_conf and 'server' in device_conf.get('ssh', {})
+        for device_conf in result.get('device', {}).values()
+    )
+
+    # Serial SSH server relies on the system SSH service (service ssh) being
+    # configured; record its presence so verify() can enforce the dependency.
+    result['system_ssh_configured'] = conf.exists(['service', 'ssh'])
     return result
 
 
@@ -654,6 +674,9 @@ def verify(config):
             )
 
         validate_ppp_interface_auth(config, fips=config.get('_fips'))
+
+    if run_serial_validation and config.get('serial_ssh_server') and not config.get('system_ssh_configured'):
+        raise ConfigError('Serial SSH server requires service SSH to be configured, please configure "service ssh"!')
 
     if run_serial_validation and 'missing_profile' in config:
         for device, profile_name in config['missing_profile'].items():
@@ -1633,6 +1656,15 @@ def apply(config):
 
     if config.get('_invoke_context') == 'interface':
         return None
+
+    # Enable the serial-ssh-snmp PAM hook only when an SNMP trap target
+    # is configured AND at least one serial port has an SSH server configured.
+    snmp_trap_target = config.get('snmp_trap_target')
+    serial_ssh_server = config.get('serial_ssh_server')
+    if snmp_trap_target and serial_ssh_server:
+        cmd('pam-auth-update --enable serial-ssh-snmp')
+    else:
+        cmd('pam-auth-update --disable serial-ssh-snmp')
 
     def stop_all_serial_ports(devices=None):
         if devices is None:
