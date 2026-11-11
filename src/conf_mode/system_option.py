@@ -218,7 +218,14 @@ def get_config(config=None):
     # would not run until the next boot, leaving sshd offering non-approved host
     # keys under the active FIPS provider (the SSH lockout) and OpenVPN loading
     # the non-FIPS default provider. call_dependents() in apply() invokes them.
-    if is_node_changed(conf, ['system', 'option', 'fips']):
+    #
+    # Only for post-boot (runtime) toggles: during boot config replay
+    # is_node_changed() is always true (the effective tree starts empty), and
+    # these consumers already run under the booted FIPS state as part of the
+    # normal boot commit. Re-running them a second time there is pure redundant
+    # work -- a full sshd reload + strongSwan restart + nginx/HTTP-API restart +
+    # OpenVPN rebuild -- that added ~20s to every boot for no behavioural gain.
+    if is_node_changed(conf, ['system', 'option', 'fips']) and boot_configuration_complete():
         set_dependents('fips', conf)
         # OpenVPN is a per-interface (tagNode) script, so it must be registered
         # with each interface's tagnode -- a bare dependent would run with an
