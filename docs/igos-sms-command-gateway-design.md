@@ -568,29 +568,38 @@ Rules:
 
 ---
 
-## 8. Open decisions
+## 8. Decisions (locked for v1)
 
-- **UX:** require the operator to type the verb (`show …`, explicit) vs. force
-  `show` and treat the whole body as a path (implicit; strictly safer for a
-  read-only-only deployment). Recommendation: explicit if privileged verbs may
-  ever be enabled; implicit if the product is read-only forever.
-- **Config placement:** per-`wwanN` `sms-command` (recommended) vs global
-  `service sms-command`.
-- **Privileged tier in v1?** Default recommendation: ship **read-only only**
-  first; add the privileged tier behind the confirm/audit design once the
-  read-only path is proven on-target.
-- **`show` subtree restriction:** whether to allow operators to limit which
-  `show` subtrees are reachable (e.g. forbid `show configuration`) for privacy.
-- **Token storage:** **decided** — stored hashed (salted modular-crypt), policy-
-  enforced, FIPS-aware KDF, verified by re-hash in the gateway (§4a). Remaining
-  nit: whether to also allow a directly-set `encrypted-password` (operator
-  supplies their own hash) as login does, or plaintext-only entry.
-- **Verb catalog location/scope:** `data/wwan/sms-command-verbs.json` (chosen).
-  Open: whether the catalog is global or could be overridden per-flavor; and
-  whether `tier`/`confirm` are the only policy keys or we also add e.g.
-  `max_output_segments` per verb.
-- **Delivery confirmation / retries:** whether to confirm each reply segment was
-  accepted by ModemManager before sending the next, and retry policy on failure.
+All previously-open items are resolved below so implementation is unblocked.
+Anything not listed is out of scope for v1 (see §11.7).
+
+- **Auth model:** sender **allowlist + token**, token in **every** message, no
+  sessions (§2a). **Locked.**
+- **UX:** **explicit verb** — `<token> <verb> <path…>`. (Forced-show is not used,
+  because v1 ships action verbs too.) **Locked.**
+- **Config placement:** **per-`wwanN`** under `interfaces wwan wwanN sms-command`.
+  **Locked.**
+- **Tiers in v1:** ship **both** — read-only `show` (runs immediately) **and**
+  the privileged/action tier (two-step confirm). All verbs are **disabled by
+  default**; configuring `sms-command` with an allowlist enables `show`, and each
+  action verb is individually opt-in via `privileged verb <x>`. **Locked.**
+- **Confirm:** derived from tier — `show` immediate, every action verb requires a
+  single-use nonce, TTL **120 s**, reply `<token> CONFIRM <nonce>` (§2a/§3).
+  **Locked.**
+- **Token storage:** stored **hashed** (salted modular-crypt), policy-enforced,
+  FIPS-aware KDF (§4a). Accept **both** `plaintext-password` (hashed on commit)
+  and a directly-set `encrypted-password` (validated, FIPS `$5$/$6$` gate),
+  mirroring `system login`. **Locked.**
+- **Verb catalog:** single global file `data/wwan/sms-command-verbs.json`; keys
+  `wrapper_verb`, `tier`, optional `confirm` override. No per-verb output caps in
+  v1 (global cap applies). **Locked.**
+- **`show` subtree restriction:** **not in v1** — all `show` subtrees reachable;
+  operators needing confidentiality should not enable the gateway. Revisit later.
+- **Reply delivery:** **best-effort** — send segments in order; log any
+  ModemManager send failure; **no per-segment ack, no retry** in v1.
+- **Defaults/limits:** `rate-limit` 5 msgs/min/sender; command `timeout` 20 s;
+  `max-reply-segments` 4; segment size ~150 chars; allowlist match on last 10
+  digits. All overridable via config except the confirm TTL (constant in v1).
 
 ---
 
@@ -610,10 +619,9 @@ Rules:
 
 ### 10a. Lock these first (shape the code)
 
-- Auth model: **allowlist + token** (chosen).
-- v1 scope: **read-only `show` only** (recommended) — defer privileged tier.
-- UX: explicit `show …` vs forced `show` (decide per §8).
-- Config placement: per-`wwanN` (recommended).
+All shaping decisions are **locked** in §8. In short: allowlist + token (every
+message), explicit verb, per-`wwanN` config, both tiers (show immediate / action
+confirm), token hashed like a login password.
 
 ### 10b. Ordered build steps
 
