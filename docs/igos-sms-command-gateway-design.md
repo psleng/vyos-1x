@@ -1,6 +1,8 @@
 # igOS SMS Command Gateway — Design Sketch
 
-Status: **Design draft — no implementation yet (2026-11-11)**
+Status: **Design complete — decisions locked, ready for implementation handoff
+(2026-11-11).** See §8 (locked decisions) and §11 (implementation checklist).
+No code written yet.
 
 Scope: let an authorized operator send a **CLI operational command in an SMS**
 (e.g. `show interfaces wwan wwan0`) to the device's cellular number and receive
@@ -655,3 +657,116 @@ confirm), token hashed like a login password.
   **not** execute; only a newly-sent live message runs. Restart the manager
   after a command → the handled message must **not** re-execute (consumed).
 - Confirm the FSM loop keeps servicing modem monitoring during a slow command.
+
+---
+
+## 11. Implementation handoff checklist
+
+Self-contained "what to build" for the coding owner. Section references point at
+the rationale; this is the authoritative task list.
+
+### 11.1 Files to create
+
+| Path | Purpose |
+|------|---------|
+| `python/vyos/utils/wwan/sms_command.py` | The gateway: parse, authorize, catalog lookup, confirm flow, bounded dispatch, chunk, reply. §5/§3a. |
+| `data/wwan/sms-command-verbs.json` | Verb catalog (§3a). Shipped to `/usr/share/vyos/wwan/` via existing `debian/rules` `cp -r data/*`. |
+| `interface-definitions/include/interfaces/sms-command.xml.i` | CLI subtree for `sms-command` (§11.3). |
+| `smoketest/scripts/cli/test_interfaces_wwan.py` (extend) or new case | Config-mode validation of the `sms-command` subtree + token hashing. |
+
+### 11.2 Files to modify
+
+| Path | Change |
+|------|--------|
+| `python/vyos/utils/wwan/interfaces_wwan_state_machine.py` | (a) one-line, config-gated hook in `_handle_incoming_sms` (§7.1/§1a); (b) tag `_drain_existing_sms()` imports `drained: true`; (c) arm live dispatch only after drain completes; (d) mark records `command_consumed` on process (§5d); (e) `import` the gateway. |
+| `src/conf_mode/interfaces_wwan.py` | `verify()` token policy + FIPS KDF gate (§4a); `generate()` hash plaintext → `encrypted-password` swap (§4a); `build_fsm_config()` emits `sms_command` dict (§11.4). `privileged verb` allowed values sourced from the catalog. |
+| `interface-definitions/interfaces_wwan.xml.in` | `#include` the new `sms-command.xml.i`. |
+| `python/vyos/utils/auth.py` | Add shared `password_policy_check()` + `PASSWORD_POLICY_DEFAULT_*` and a FIPS-aware `hash_password()`; keep `system_login.py` importing from here (§7.5). |
+| `src/conf_mode/system_login.py` | Replace its local `password_policy_check`/`hash_password` with the shared imports (no behavior change). |
+
+### 11.3 Config tree (final)
+
+```
+interfaces wwan <wwanN> sms-command
+    # (node present + non-empty allow-from ⇒ enabled; show runs immediately)
+    token
+        plaintext-password <secret>     # hashed on commit -> encrypted-password
+        encrypted-password  <hash>      # $5$/$6$ ; the persisted form
+    allow-from <E.164>                   # multi; read-only tier allowlist
+    rate-limit <n>                       # default 5 (msgs/min/sender)
+    max-reply-segments <n>               # default 4
+    timeout <seconds>                    # default 20 (op-mode command)
+    privileged
+        verb <catalogued-action-verb>    # multi; each action verb opt-in
+        allow-from <E.164>               # multi; optional tighter allowlist; falls back to read-only allow-from
+```
+
+Enablement/validation rules: empty `allow-from` ⇒ feature **off** (§1a). A
+`privileged verb` requires `token` to be set (commit error otherwise). Token
+plaintext must be whitespace-free and pass the enhanced policy (§4a/§5a).
+
+### 11.4 `sms_command` dict handed to the FSM (`build_fsm_config()`)
+
+```python
+'sms_command': {
+    'enabled': bool,                    # allow_from non-empty
+    'token_hash': str | None,           # encrypted-password
+    'allow_from': [str, ...],           # normalized last-10-digit forms
+    'rate_limit': int,                  # per minute per sender
+    'max_reply_segments': int,
+    'timeout': int,
+    'privileged': {
+        'verbs': [str, ...],            # enabled action verbs
+        'allow_from': [str, ...],       # optional; else inherit allow_from
+    },
+}
+```
+
+### 11.5 `sms_command.py` contract
+
+```python
+# module-level, lazy + cached
+def load_verb_catalog() -> dict: ...          # /usr/share/vyos/wwan/... + in-tree fallback; lru_cache
+
+async def handle_sms_command(fsm, number: str, text: str) -> None:
+    """Entry point from the FSM hook. Must never raise into the FSM loop.
+    Steps: parse (shlex) -> token verify (constant-time re-hash) -> allowlist
+    -> verb in catalog & enabled -> tier: read-only? run now : action? confirm
+    -> run_in_executor(cmd, [wrapper, wrapper_verb, *path], timeout) -> chunk
+    -> for seg: await fsm.sms_send(number, seg). Silent-drop on auth failure;
+    forward VyOS error text on bad-but-authorized command."""
+```
+
+Behavioral invariants to assert in review:
+
+- No shell: dispatch is an **argv list** to `/opt/vyatta/bin/vyatta-op-cmd-wrapper`.
+- Unauthorized (bad/missing token, non-allowlisted, disabled verb) ⇒ **no reply**.
+- Action verbs never execute without a matching live `CONFIRM <nonce>` within TTL.
+- Drained/stale messages never dispatch (§5d); handled messages are consumed.
+- Catalog + config are the only sources of "what can run"; no hardcoded verbs.
+- A slow/hung command cannot block the FSM loop (executor + `wait_for`).
+
+### 11.6 Acceptance criteria (on `igos@10.10.50.165`)
+
+1. `<token> show interfaces wwan wwan0` from an allowlisted number → segmented
+   op-mode output returned; `(i/n)` prefixes; `max-reply-segments` honored.
+2. Wrong/missing token, non-allowlisted sender → **no reply**; logged as denied.
+3. `<token> reboot now` → device replies with a nonce; nothing happens until
+   `<token> CONFIRM <nonce>` arrives within TTL; wrong/expired nonce → no action.
+4. `<token> reset …` (an action verb) likewise confirms before running.
+5. Oversized output (`show tech-support`) → capped at `max-reply-segments`,
+   truncation marked.
+6. Rate-limit: messages beyond the configured rate are dropped.
+7. Replay/flush: SMS placed while powered off → **not** executed after boot;
+   handled message does **not** re-run after a manager restart.
+8. Unconfigured device: no catalog load, no task, no process footprint (§1a);
+   inbound SMS still recorded as today.
+9. FSM keeps servicing modem monitoring while a command runs.
+10. `set … token plaintext-password <weak>` → rejected by policy; a committed
+    config shows only `encrypted-password` (`$5$/$6$`), never the plaintext.
+
+### 11.7 Out of scope for v1
+
+`show`-subtree restriction; per-segment delivery acks/retries; per-verb output
+caps; global `service sms-command` placement; configurable confirm TTL;
+multi-SIM allowlist differences beyond the per-SIM store already in the FSM.
