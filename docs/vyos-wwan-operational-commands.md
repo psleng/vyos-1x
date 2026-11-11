@@ -957,9 +957,10 @@ inside the release archive for the TFL preparation step on the router.
 On a provisioned signing host, run `./docker-build.sh` in that repository. It
 fetches private `igos-firmware-keys`, runs tests/build/signing in Docker, and
 writes the catalog and archives under `dist/`. Public certificates, CRL, and an
-encrypted leaf key come from the keys repository; the passphrase is supplied
-separately in the ignored `.signing-secrets/leaf.passphrase` or through
-`FIRMWARE_SIGNING_PASSWORD_FILE`. Root private keys are not part of daily builds.
+encrypted leaf key and its `igos-firmware-leaf.passphrase` come from that
+private repository. The wrapper mounts them read-only and removes the temporary
+checkout afterward. `FIRMWARE_SIGNING_PASSWORD_FILE` optionally overrides the
+passphrase source. Root private keys and root passphrases are not part of daily builds.
 
 Generated archive directories/names use `telit_version`, for example:
 
