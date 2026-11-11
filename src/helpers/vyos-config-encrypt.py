@@ -212,13 +212,33 @@ def decrypt_config(key):
 
         cmd(f'umount {d}')
 
-    # Close encrypted volume
-    cmd('cryptsetup -q close vyos_config')
-
-    # Remove encrypted volume image file and key
+    # Detach and remove the encrypted volume. The config has already been
+    # migrated back to the rootfs above, so from here the disable is logically
+    # complete and MUST be made durable regardless of what cryptsetup does next.
+    #
+    # The early-boot unlock hook keys on the presence of the LUKS image file, so
+    # a leftover (now-empty) container would be auto-mounted on the next boot and
+    # shadow the just-migrated config -- booting the default config. A lazy
+    # unmount above can leave the dm device momentarily busy, so a plain `close`
+    # may return non-zero; that must NOT abort the disable or strand the image
+    # file (the previous behaviour: a raising close skipped the unlink below and
+    # left exactly such an orphan container).
+    #
+    # Unlink the backing file FIRST: on Linux the inode is kept alive while the
+    # dm-crypt mapping holds it open, so removing the directory entry here is
+    # safe and guarantees the boot hook can no longer find the container even if
+    # the mapping is only torn down later (deferred close / next reboot).
     if key_file:
         os.unlink(key_file)
-    os.unlink(image_path)
+    if os.path.exists(image_path):
+        os.unlink(image_path)
+
+    # Tear down the mapping. Non-fatal: the backing file is already gone. If the
+    # device is briefly busy, request a deferred close so the kernel removes the
+    # mapping automatically once it is no longer in use.
+    if is_opened():
+        if run('cryptsetup -q close vyos_config') != 0:
+            run('cryptsetup -q close --deferred vyos_config')
 
     try:
         if ask_yes_no('Do you want to clear the TPM? This will cause issues if other system images use the key'):
