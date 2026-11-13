@@ -42,6 +42,11 @@ from vyos.utils.auth import get_local_passwd_entries
 from vyos.utils.auth import get_local_users
 from vyos.utils.auth import get_user_home_dir
 from vyos.utils.auth import MIN_USER_UID
+from vyos.utils.auth import PASSWORD_POLICY_DEFAULT_MINIMUM_LENGTH
+from vyos.utils.auth import PASSWORD_POLICY_DEFAULT_MINIMUM_DIGIT
+from vyos.utils.auth import PASSWORD_POLICY_DEFAULT_MINIMUM_UPPERCASE
+from vyos.utils.auth import PASSWORD_POLICY_DEFAULT_MINIMUM_SPECIAL
+from vyos.utils.auth import password_policy_check
 from vyos.utils.auth import SYSTEM_USER_SKIP_LIST
 from vyos.utils.configfs import delete_cli_node
 from vyos.utils.configfs import add_cli_node
@@ -86,12 +91,6 @@ MAX_TACACS_COUNT: int = 8
 # Minimum USER id for TACACS users
 MIN_TACACS_UID = 900
 
-# PERLE: Default minimum requirements for the enhanced password policy.
-PASSWORD_POLICY_DEFAULT_MINIMUM_LENGTH = 9
-PASSWORD_POLICY_DEFAULT_MINIMUM_DIGIT = 1
-PASSWORD_POLICY_DEFAULT_MINIMUM_UPPERCASE = 1
-PASSWORD_POLICY_DEFAULT_MINIMUM_SPECIAL = 1
-
 # PERLE: Default admin account and the "password unchanged" sentinel.
 # While the account's encrypted-password is still this sentinel, the per-device
 # NVMEM "sticker" password (or the normal default password when no valid
@@ -108,54 +107,6 @@ SSH_DSA_DEPRECATION_WARNING: str = (
     f'{SSH_DSA_DEPRECATION_WARNING} '
     'The following users are using SSH-DSS keys for authentication.'
 )
-
-
-def password_policy_check(
-    password: str,
-    minlen: int = PASSWORD_POLICY_DEFAULT_MINIMUM_LENGTH,
-    ucredit: int = -PASSWORD_POLICY_DEFAULT_MINIMUM_UPPERCASE,
-    dcredit: int = -PASSWORD_POLICY_DEFAULT_MINIMUM_DIGIT,
-    ocredit: int = -PASSWORD_POLICY_DEFAULT_MINIMUM_SPECIAL,
-) -> str | None:
-    """
-        PERLE: Validate a password against enhanced policy requirements.
-    """
-
-    errors = []
-    uppercase_count = sum(1 for character in password if character.isupper())
-    digit_count = sum(1 for character in password if character.isdigit())
-    other_count = sum(1 for character in password if not character.isalnum())
-
-    if ucredit < 0 and uppercase_count < abs(ucredit):
-        errors.append(
-            f'Password must contain at least {abs(ucredit)} uppercase letter(s).'
-        )
-
-    if dcredit < 0 and digit_count < abs(dcredit):
-        errors.append(
-            f'Password must contain at least {abs(dcredit)} digit(s).'
-        )
-
-    if ocredit < 0 and other_count < abs(ocredit):
-        errors.append(
-            f'Password must contain at least {abs(ocredit)} special character(s).'
-        )
-
-    credited_length = len(password)
-    if ucredit > 0:
-        credited_length += min(uppercase_count, ucredit)
-    if dcredit > 0:
-        credited_length += min(digit_count, dcredit)
-    if ocredit > 0:
-        credited_length += min(other_count, ocredit)
-
-    if credited_length < minlen:
-        errors.append(
-            f'Password length score is {credited_length}; '
-            f'it must be at least {minlen}.'
-        )
-
-    return '\n'.join(errors) if errors else None
 
 
 def get_shadow_password(username):

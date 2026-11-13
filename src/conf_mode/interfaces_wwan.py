@@ -572,6 +572,19 @@ def get_config(config=None):
         wwan.setdefault('ip_passthrough', {})['_user_eth_addresses'] = \
             _passthrough_user_eth_addresses(conf, pt_iface)
 
+    # Recursive XML defaults do not activate an optional gateway.
+    if not conf.exists(iface_base + ['sms-command']):
+        wwan.pop('sms_command', None)
+    if 'sms_command' in wwan:
+        policy_path = ['system', 'login', 'enhanced-policy', 'password']
+        wwan['_sms_password_policy'] = (
+            conf.get_config_dict(
+                policy_path, key_mangling=('-', '_'), get_first_key=True,
+                with_defaults=True,
+            )
+            if conf.exists(policy_path) else None
+        )
+
     return wwan
 
 
@@ -1005,6 +1018,11 @@ def build_fsm_config(wwan):
         'dhcpv6_pd_enabled': bool(wwan['_user_set'].get('dhcpv6_pd')),
     }
 
+    sms = wwan.get('sms_command')
+    if sms and sms.get('allow_from'):
+        from vyos.utils.wwan.sms_command import runtime_config
+        config['sms_command'] = runtime_config(sms)
+
     return config
 
 
@@ -1015,6 +1033,13 @@ def build_fsm_config(wwan):
 def verify(wwan):
     if 'deleted' in wwan:
         return None
+
+    if 'sms_command' in wwan:
+        from vyos.utils.wwan.sms_command import verify_config
+        try:
+            verify_config(wwan['sms_command'], wwan.get('_sms_password_policy'))
+        except (ValueError, OSError, KeyError, TypeError) as exc:
+            raise ConfigError(f'SMS command configuration: {exc}') from None
 
     verify_vrf(wwan)
     verify_mtu_ipv6(wwan)
@@ -1247,10 +1272,24 @@ def verify(wwan):
 
 
 # ---------------------------------------------------------------------------
-# generate  — nothing to render
+# generate  — hash password and replace its plaintext CLI leaf
 # ---------------------------------------------------------------------------
 
 def generate(wwan):
+    if 'deleted' in wwan:
+        return None
+    sms = wwan.get('sms_command', {})
+    if 'password' in sms:
+        from vyos.utils.auth import hash_password, validate_password_hash
+        from vyos.utils.configfs import add_cli_node, delete_cli_node
+
+        hashed = hash_password(sms['password'])
+        validate_password_hash(hashed)
+        base = ['interfaces', 'wwan', wwan['ifname'], 'sms-command']
+        add_cli_node(base + ['password-hash'], value=hashed)
+        delete_cli_node(base + ['password'])
+        sms['password_hash'] = hashed
+        del sms['password']
     return None
 
 

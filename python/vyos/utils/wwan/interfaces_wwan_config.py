@@ -603,7 +603,7 @@ class InterfaceConfig(ServiceInterface):
                                'connection_mode': mode})
 
             # Apply the configuration
-            await self.set_configuration(dbus_config)
+            await self._set_configuration(dbus_config)
 
             logger.info("Restored configuration applied successfully",
                        extra={'interface_number': self.interface_number})
@@ -656,6 +656,14 @@ class InterfaceConfig(ServiceInterface):
 
     @method()
     async def set_configuration(self, config: 'a{sv}') -> 's':  # type: ignore[name-defined]  # noqa: F821, F722
+        return await self._set_configuration(config)
+
+    async def _set_configuration(self, config):
+        """Apply configuration through a coroutine usable by local and D-Bus callers.
+
+        dbus-next's @method wrapper is an exported entry point, not an awaitable
+        Python API. Startup restoration must call this implementation directly.
+        """
         try:
             logger.info("Setting configuration",
                        extra={'interface_number': self.interface_number,
@@ -697,6 +705,11 @@ class InterfaceConfig(ServiceInterface):
                         cfg[key] = self._extract_variant_value(new_value)
                     else:
                         cfg[key] = current_cfg.get(key, self.DEFAULT_CONFIG[key])
+
+            if 'sms_command' in config:
+                from vyos.utils.wwan.sms_command import runtime_config
+                cfg['sms_command'] = runtime_config(
+                    self._extract_variant_value(config['sms_command']))
 
             # Validate the built configuration with Python values
             self._validate_configuration(cfg)

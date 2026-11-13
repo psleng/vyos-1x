@@ -63,6 +63,12 @@ CRACKLIB_ERROR_MSG: str = (
 )
 
 
+PASSWORD_POLICY_DEFAULT_MINIMUM_LENGTH = 9
+PASSWORD_POLICY_DEFAULT_MINIMUM_DIGIT = 1
+PASSWORD_POLICY_DEFAULT_MINIMUM_UPPERCASE = 1
+PASSWORD_POLICY_DEFAULT_MINIMUM_SPECIAL = 1
+
+
 class EPasswdStrength(StrEnum):
     WEAK = 'Weak'
     DECENT = 'Decent'
@@ -122,6 +128,90 @@ def evaluate_strength(passwd: str) -> dict[str, str]:
                 result.update(strength=EPasswdStrength.STRONG)
 
     return result
+
+
+# Shared enhanced password policy for login and SMS configuration.
+def password_policy_check(
+    password: str,
+    minlen: int = PASSWORD_POLICY_DEFAULT_MINIMUM_LENGTH,
+    ucredit: int = -PASSWORD_POLICY_DEFAULT_MINIMUM_UPPERCASE,
+    dcredit: int = -PASSWORD_POLICY_DEFAULT_MINIMUM_DIGIT,
+    ocredit: int = -PASSWORD_POLICY_DEFAULT_MINIMUM_SPECIAL,
+) -> str | None:
+    """
+    PERLE: Validate a password against enhanced policy requirements.
+    """
+
+    errors = []
+    uppercase_count = sum(1 for character in password if character.isupper())
+    digit_count = sum(1 for character in password if character.isdigit())
+    other_count = sum(1 for character in password if not character.isalnum())
+
+    if ucredit < 0 and uppercase_count < abs(ucredit):
+        errors.append(
+            f'Password must contain at least {abs(ucredit)} uppercase letter(s).'
+        )
+
+    if dcredit < 0 and digit_count < abs(dcredit):
+        errors.append(f'Password must contain at least {abs(dcredit)} digit(s).')
+
+    if ocredit < 0 and other_count < abs(ocredit):
+        errors.append(
+            f'Password must contain at least {abs(ocredit)} special character(s).'
+        )
+
+    credited_length = len(password)
+    if ucredit > 0:
+        credited_length += min(uppercase_count, ucredit)
+    if dcredit > 0:
+        credited_length += min(digit_count, dcredit)
+    if ocredit > 0:
+        credited_length += min(other_count, ocredit)
+
+    if credited_length < minlen:
+        errors.append(
+            f'Password length score is {credited_length}; it must be at least {minlen}.'
+        )
+
+    return '\n'.join(errors) if errors else None
+
+
+def hash_password(password):
+    """Hash an SMS password using the same Linux context as system login."""
+    from passlib.hosts import linux_context
+
+    return linux_context.hash(password)
+
+
+def validate_password_hash(value):
+    """Validate a complete supported modular-crypt hash.
+
+    SMS accepts SHA-256/SHA-512 crypt.
+    Locked accounts and legacy DES/MD5 hashes are rejected.
+    """
+    from passlib.context import CryptContext
+
+    context = CryptContext(schemes=['sha256_crypt', 'sha512_crypt'])
+    if not isinstance(value, str):
+        raise ValueError('Invalid SMS password hash')
+    scheme = context.identify(value)
+    if not scheme:
+        raise ValueError('Unsupported SMS password hash algorithm')
+    parsed = context.handler(scheme).from_string(value)
+    if not parsed.checksum:
+        raise ValueError('Incomplete SMS password hash')
+    # Reject noncanonical/truncated encodings before accepting a saved config.
+    if parsed.to_string() != value:
+        raise ValueError('Invalid SMS password hash encoding')
+    return context
+
+
+def verify_password(password, stored_hash):
+    """Use the password library's constant-time checksum verification."""
+    try:
+        return validate_password_hash(stored_hash).verify(password, stored_hash)
+    except (ValueError, TypeError):
+        return False
 
 
 def make_password_hash(password):
