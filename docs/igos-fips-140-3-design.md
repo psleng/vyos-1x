@@ -842,7 +842,7 @@ Each consumer needs a decision: *route through the OpenSSL FIPS provider*,
 | **HTTP API / Python** | OpenSSL via `hashlib`/`ssl` | Non-approved digests (MD5) raise unless `usedforsecurity=False`; audit call sites. |
 | **FRR, SNMP, NTP/chrony, etc.** | approved algorithms / OpenSSL | SNMPv3 auth/priv limited to approved (no MD5/DES); audit each. |
 | **Password hashing / local auth** | approved KDF | `yescrypt` (recent VyOS default) is **not** FIPS-approved; FIPS mode may need SHA-2-crypt or an approved PBKDF. Decision in §8. |
-| **Disk/secrets at rest (if any)** | approved | Only relevant if igOS encrypts storage/config secrets. |
+| **Disk/secrets at rest (if any)** | approved — **config encryption is ALLOWED under FIPS** | igOS ships config-file encryption ([vyos-config-encrypt.py](../src/helpers/vyos-config-encrypt.py)). It is **local data-at-rest only**, not a network crypto service, so it is **permitted/retained** in FIPS mode. Bulk crypto is **kernel dm-crypt AES-XTS** (approved-mode under `fips=1`, §8.3); the TPM is used **storage-only** to seal the volume key (no TPM certification required — §6.1 storage rule), and the recovery-key path uses no TPM at all. One enforcement item: under FIPS the LUKS keyslot KDF must be **PBKDF2** (LUKS2's default **argon2id is not FIPS-approved**) with an AES-XTS cipher — see §6.1. |
 
 ### 4.1 Authentication backends (RADIUS / TACACS+ / SAML)
 
@@ -1252,7 +1252,9 @@ checks — but the kernel module remains **unvalidated**, so these operations ar
   algorithms and self-tests, but the data-confidentiality operation is not in a
   *validated* module.
 - **LUKS config-encryption** — kernel dm-crypt (§6.1): approved-mode under
-  `fips=1`, module unvalidated.
+  `fips=1`, module unvalidated. **This feature is allowed/retained under FIPS**
+  (local at-rest; TPM storage-only) — see §6.1 for the decision and the required
+  PBKDF2 keyslot KDF.
 - **Kernel RNG** — approved DRBG under `fips=1`, module unvalidated.
 
 So the **validated-module** claim is OpenSSL-only; kernel FIPS mode is layered on
@@ -1313,12 +1315,16 @@ touches the TPM uses it as an **operator**, and the only *storage-only* case
 | **PKI** ([tpm_pki.py](../python/vyos/tpm_pki.py)) | **Operation** — TPM-resident key ops | **Out** — disable TPM-backed PKI |
 | **WireGuard** | **Storage only** — key sealed | **Moot** — feature removed in FIPS (§5.1) |
 | **IPsec** | none (seal-only proposal was rejected; no implementation) | **Nothing to do** |
-| **Config encryption** ([vyos-config-encrypt.py](../src/helpers/vyos-config-encrypt.py)) | **Storage** — TPM seals the LUKS key; bulk crypto is **kernel dm-crypt** | Governed by the **kernel-FIPS decision (§6/§8.3)**, *not* the OpenSSL provider |
+| **Config encryption** ([vyos-config-encrypt.py](../src/helpers/vyos-config-encrypt.py)) | **Storage** — TPM seals the LUKS key; bulk crypto is **kernel dm-crypt** | **ALLOWED under FIPS** — storage-only TPM use needs no TPM cert; AES-XTS runs approved-mode in the kernel (§8.3). KDF caveat below. |
 
 **Net for the current implementation + an uncertified am64x firmware TPM (fTPM):
-the TPM effectively goes unused in FIPS mode.** There is no approved storage-only
-use left to preserve (WireGuard is removed; the IPsec seal-only path was never
-implemented), and all operator uses fall outside an uncertified module.
+in FIPS mode the TPM is used only as sealed *storage* for config encryption, and
+nothing else.** All *operator* uses (OpenVPN/SSH/PKI) fall outside an uncertified
+module and are disabled; the only *storage-only* use that remains is **config
+encryption**, which is **allowed** precisely because sealing a key needs no TPM
+certification (the approved AES-XTS runs in the kernel). WireGuard's seal-only
+case is removed with the feature, and the IPsec seal-only path was never
+implemented.
 
 **Enforcement that falls out of this:**
 
@@ -1337,8 +1343,22 @@ implemented), and all operator uses fall outside an uncertified module.
   re-expose non-approved algorithms. It now renders **`providers fips base`** in
   FIPS mode **(landed)**. The same "is `default` loaded?" audit applies anywhere
   the tree selects OpenSSL providers.
-- **Config encryption** rides the kernel-FIPS scope call (§6/§8.3), separately
-  from the "disable TPM operators" rule.
+- **Config encryption is ALLOWED and retained under FIPS.** It is local
+  data-at-rest encryption, not a network crypto service, and the `§6.1 "disable
+  TPM operators"` rule does **not** apply: here the TPM is used **storage-only**
+  (it seals the LUKS volume key), which per the storage-vs-operation rule needs
+  **no TPM certification** even on the uncertified fTPM — and the recovery-key
+  path uses no TPM at all. The data-confidentiality operation is **kernel
+  dm-crypt AES-XTS**, which runs approved-mode under `fips=1` (§8.3). The volume
+  key comes from an approved RNG (`os.urandom` via `Fernet.generate_key()`, used
+  only as a LUKS passphrase — not for Fernet encryption).
+  - **One enforcement item (FIPS KDF).** LUKS2's default keyslot KDF is
+    **argon2id**, which is **not FIPS-approved**. Under FIPS, `luksFormat` /
+    `luksAddKey` in [vyos-config-encrypt.py](../src/helpers/vyos-config-encrypt.py)
+    must pass **`--pbkdf pbkdf2`** (and keep an approved **`--cipher
+    aes-xts-plain64`** with `--hash sha256`). The high-entropy random key makes
+    the KDF's role minimal, but PBKDF2 is required for a clean approved-mode
+    claim. Non-FIPS behavior is unchanged.
 
 **Escape hatch / decision.** The enforcement should key off **platform TPM
 certification**, not hard-code "TPM off." A FIPS SKU shipping a **discrete,

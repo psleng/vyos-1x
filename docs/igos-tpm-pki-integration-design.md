@@ -1,6 +1,7 @@
 # igOS TPM-PKI Integration — Design Sketch
 
-Status: **Design — no code yet (2026-11-09)**
+Status: **Design — no code yet (2026-11-09; TPM key-backend decision reversed
+2026-11-11 — minimal PKCS#11, see §3.10).**
 
 Scope: fold TPM-backed private keys into the normal `pki` configuration tree so
 operators do **all** PKI work in **one place**, whether a key is held in software
@@ -279,7 +280,7 @@ sealing path are unaffected.
 
 `storage` is the single **config-level** source of truth, but the **mechanism
 that hands a sealed key to a service differs per consumer**. The consumers fall
-into two families:
+into three families:
 
 - **OpenSSL-family consumers** — OpenVPN, serial/stunnel, and (via an agent)
   sshd. These resolve keys through OpenSSL or an agent, so a `storage tpm` key is
@@ -294,6 +295,31 @@ into two families:
   into its in-memory credential set. For a `storage tpm` key there is **no
   exportable PEM**, so this path cannot work as-is — strongSwan needs a reference
   into its own credential store that points at the sealed key.
+
+- **SAML SP (`saml-sso`) — a PEM-required consumer that cannot take `storage tpm`
+  as-is (verified 2026-11-11 against the on-unit package *and* the `~/saml-sso`
+  source, HEAD `0c3c25a`).** SAML SSO is configured under `system login saml`;
+  [system_login.py](../src/conf_mode/system_login.py) (~lines 809–819) does
+  `wrap_private_key(pki_cert['private']['key'])` and **writes a plaintext PEM** to
+  `/etc/saml-sp/certs/<cert>_key.pem`. The Python SP then reads that PEM as a
+  **string** (`config.sp_key = key_path.read_text()`) and signs assertions with
+  **`onelogin.saml2` (python3-saml) + xmlsec**, passing the key as an in-memory
+  `"privateKey"` PEM. So SAML is a **software-key** consumer today — it does
+  **not** use the TPM (no `tpm`/`pkcs11`/`provider`/`engine` anywhere in the SP,
+  and it uses a *bundled* `cryptography`, so even the system `tpm2-provider`
+  would not apply). It is incompatible with `storage tpm` on **two** levels:
+  (1) `wrap_private_key()` needs an exportable key the TPM does not have; and
+  (2) even past that, python-saml/xmlsec signs from a **PEM string**, with no
+  key-URI / PKCS#11 / provider hook — so TPM-backing SAML is a **saml-sso change**
+  (route signing through a PKCS#11 token key, e.g. xmlsec1 + `tpm2-pkcs11`), not
+  something the pki-tree redesign delivers. Until then, the redesign's `verify()`
+  must **reject `storage tpm`** for a cert referenced by `system login saml`
+  (clear error directing the operator to a `storage software` cert), the same way
+  strongSwan's PEM path is handled. The `# PERLE - support for TPM - add tss
+  group` line elsewhere in `system_login.py` is TPM *device-group* access,
+  unrelated to SAML signing; and the GUI's TPM-backable TLS is **nginx's** cert,
+  not the SAML SP signing key.
+
 
 **Decision: strongSwan binds TPM keys via PKCS#11 (tpm2-pkcs11).** Rather than
 the native strongSwan `tpm` plugin (which references raw TPM persistent
@@ -324,13 +350,25 @@ the OP-TEE fTPM / TSS2 stack. Implications:
    object exists. `generate_pki_*_files` must skip `wrap_private_key` for TPM
    keys and emit the PKCS#11 reference.
 
-> **Decision (2026-11-09) — converge: `tpm2-pkcs11` as the single TPM backend for
-> every X.509/TLS consumer**, reached through the OpenSSL **`pkcs11-provider`**
-> (and native `pkcs11` for strongSwan), because the provider path is the clear
-> industry direction (below) and it yields one uniform, auditable key-op
-> boundary. The decision is **subject to the verification gates** at the end of
-> this section; if a gate fails, the per-family fallback (tpm2-provider for the
-> OpenSSL family) stands. Rationale and research follow.
+> **Decision (2026-11-11) — minimal PKCS#11: use it only where it is actually
+> required (strongSwan/charon). The OpenSSL-family consumers stay on the direct
+> `tpm2-provider`, and sshd stays on `ssh-tpm-agent`.** This **supersedes** the
+> earlier (2026-11-09) "converge on `tpm2-pkcs11` for every X.509/TLS consumer"
+> decision. Rationale: convergence's only real benefit was *uniformity* (one
+> backend + a shared key store), but that is already unattainable — sshd host keys
+> cannot use an OpenSSL provider and stay on `ssh-tpm-agent` regardless — so a
+> single backend was never actually on the table. Given a second path exists
+> either way, the simplest correct mechanism per family wins: the OpenSSL-family
+> on the **1-layer** `tpm2-provider` (already working today) rather than the
+> **2-layer** `pkcs11-provider → tpm2-pkcs11` stack with its PKCS#11 PIN/token-DB
+> and provider-allowlist overhead. It is also **moot under FIPS**: on the
+> uncertified OP-TEE fTPM every TPM key-op (OpenVPN/SSH/serial/PKI *and* an in-TPM
+> IPsec key) is out-of-boundary and disabled, so this is a **non-FIPS feature-UX**
+> decision where uniformity buys the least. strongSwan still needs PKCS#11 because
+> charon has no OpenSSL-STORE/provider key path (above). The industry research
+> below still applies — it rules out the *engine* paths; both surviving options
+> (`tpm2-provider`, `pkcs11-provider`) are providers, so the choice is about
+> simplicity, not modernity. Research follows.
 >
 > **First, the crucial distinction — legacy vs. modern paths (rule out the
 > legacy ones).** Both OpenVPN and OpenSSL have an *old* key-backend API and a
@@ -344,9 +382,10 @@ the OP-TEE fTPM / TSS2 stack. Implications:
 >
 > The current igOS OpenVPN path already uses the **modern** route
 > (`providers default tpm2` in `server.conf.j2` → the **tpm2-provider**), i.e. it
-> is already maintainer-aligned. Convergence must **not** reintroduce
-> `pkcs11-helper` or the OpenSSL ENGINE: it rides the same **`--provider` /
-> provider** mechanism, simply swapping **tpm2-provider → pkcs11-provider**.
+> is already maintainer-aligned. The TPM-key path must **not** reintroduce
+> `pkcs11-helper` or the OpenSSL ENGINE: whichever provider is used it rides the
+> same **`--provider` / provider** mechanism (`tpm2-provider` for the
+> OpenSSL-family here; `pkcs11-provider` only if a consumer ever needs the token).
 >
 > **So the real choice is between two OpenSSL *providers*, same provider
 > mechanism:**
@@ -373,9 +412,13 @@ the OP-TEE fTPM / TSS2 stack. Implications:
 > "converge on PKCS#11" means moving the whole OpenSSL world off the direct
 > 1-layer path onto the newer 2-layer stack purely to match strongSwan.
 >
-> **Genuine exceptions (stay non-PKCS#11 regardless):**
-> - **sshd host keys** — OpenSSH has no native PKCS#11 host-key support. Keep
->   **`ssh-tpm-agent`** (TPM-direct; already in use, `src/conf_mode/service_ssh.py`).
+> **Non-PKCS#11 by design (consistent with the minimal decision):**
+> - **sshd host keys** — sshd has no *direct* PKCS#11 host-key directive; it could
+>   be bridged onto a PKCS#11 token via `HostKeyAgent` → `ssh-agent` +
+>   `ssh-add -s`, but igOS keeps **`ssh-tpm-agent`** (TPM-direct; already in use,
+>   `src/conf_mode/service_ssh.py`) — avoiding a PKCS#11 PIN, the `ssh-add -s`
+>   provider-allowlist hardening, and a second agent lifecycle, for a convergence
+>   benefit that is non-FIPS-only.
 > - **WireGuard** — cannot: the kernel WG module needs the raw X25519 scalar;
 >   TPM only wraps-the-key-at-rest (separate follow-up, §5).
 > - **Disk/config encryption** — stays TPM-direct `tpm2_unseal` in early boot
@@ -429,13 +472,17 @@ the OP-TEE fTPM / TSS2 stack. Implications:
 > `tpm2-pkcs11` delegates **all** crypto to the TPM rather than doing any in
 > software.
 >
-> **Trade-off.** Pro (converge, chosen): one backend, one object namespace
-> (`CKA_LABEL` = pki node name), one completion, HSM-portable, one uniform FIPS
-> key-op boundary, and alignment with the OpenSSL/Red Hat provider direction. Con:
-> the OpenSSL family moves off the direct, already-working tpm2-provider onto the
-> newer 2-layer `pkcs11-provider` stack. **Fallback if a verification gate
-> fails:** per-family — OpenSSL-family on the direct **tpm2-provider**, strongSwan
-> (+ DevID) on `tpm2-pkcs11`.
+> **Trade-off (decision reversed — minimal PKCS#11 chosen).** The per-family split
+> is now the **chosen** architecture, not the fallback: OpenSSL-family on the
+> direct, already-working **`tpm2-provider`** (1 layer, no PKCS#11 PIN/token),
+> strongSwan (+ DevID) on **`tpm2-pkcs11`** (required), sshd on
+> **`ssh-tpm-agent`**. What this gives up vs. convergence: a *single shared key
+> store* (one `CKA_LABEL` object usable by both IPsec and a TLS consumer) and
+> *one* TPM mechanism to support — judged not worth forcing the whole OpenSSL
+> world onto the 2-layer stack, especially as FIPS disables all of it on the
+> uncertified fTPM anyway. strongSwan and the OpenSSL-family therefore keep
+> **separate** key stores (tpm2-pkcs11 token objects vs TSS2-PEM provider keys); a
+> key needed in *both* would be provisioned in each — rare in practice.
 >
 > **Caveats to verify before locking:** (a) `pkcs11-provider` maturity + FIPS
 > behavior on this platform; (b) that OpenVPN (`--provider`/STORE) and nginx/
@@ -583,8 +630,9 @@ that hierarchy — not fused, not imported.
 depends on the unit's TPM seed staying stable. `add system image` **snapshots**
 `/config` (the key-blob store / `tpm2-pkcs11` token store) and `/var/lib/tee`
 (fTPM secure storage) into the new image, so each image carries a copy and the
-blobs stay loadable. Under convergence the `tpm2-pkcs11` store must be in the
-carried set (under `/config`, or added like the REE-FS copy).
+blobs stay loadable. Both key stores must be in the carried set: strongSwan's
+`tpm2-pkcs11` token store **and** the OpenSSL-family's TSS2-PEM provider keys
+(under `/config`, or added like the REE-FS copy).
 
 **Disaster recovery — survive full image loss.** Two strategies:
 - **Strategy 1 (durable storage, simplest, recommended primary):** keep the
@@ -739,13 +787,15 @@ plugin and the OpenSSL `pkcs11-provider`.
    is a *separate* `serverAuth` cert issued from the same CA (optionally enrolled
    via the DevID), referenced as a normal `pki certificate`; the DevID key is
    never reused to serve traffic. Optional feature; see §3.12.
-9. **Converge on PKCS#11 (target architecture)** — all X.509/TLS consumers reach
-   the TPM through `tpm2-pkcs11` (OpenSSL `pkcs11-provider`; native `pkcs11` for
-   strongSwan), per §3.10. Chosen for a single uniform/auditable key-op boundary
-   and alignment with the OpenSSL/Red Hat engine→provider direction. **Subject to
-   the §3.10 verification gates**; per-family (tpm2-provider for the OpenSSL
-   family) is the fallback. Engine paths (`engine_pkcs11`, `tpm2-tss-engine`,
-   OpenVPN `pkcs11-helper`) are ruled out.
+9. **Minimal PKCS#11 (target architecture; reversed 2026-11-11)** — PKCS#11
+   (`tpm2-pkcs11`) is used **only for strongSwan** (and the DevID token), because
+   charon has no OpenSSL provider/STORE key path. The **OpenSSL-family** consumers
+   (OpenVPN, serial/stunnel, HTTPS) use the direct **`tpm2-provider`**, and sshd
+   uses **`ssh-tpm-agent`**, per §3.10. This **supersedes** the earlier "converge
+   on PKCS#11 for every consumer" decision: a single backend was unattainable
+   anyway (sshd), and the choice is moot under FIPS (uncertified fTPM → all TPM
+   key-ops disabled), so the simplest per-family mechanism wins. Engine paths
+   (`engine_pkcs11`, `tpm2-tss-engine`, OpenVPN `pkcs11-helper`) remain ruled out.
 10. **No key escrow** — private keys are TPM-generated and never leave the TPM;
    the cloud/CA stores only public material (EK publics, issued certs) plus its
    own CA signing key. See §3.13.
@@ -774,6 +824,13 @@ plugin and the OpenSSL `pkcs11-provider`.
   file-wrapped TPM key today (`src/op_mode/pki.py` `write_tpm_key_file` ↔
   `src/conf_mode/interfaces_wireguard.py` `read_tpm_key_file`). Apply the same
   per-key `storage` model there as a separate change.
+- **SAML SP (`saml-sso`) — PEM-required, not TPM-capable today (§3.10).** Two
+  work items: (1) in the redesign, `verify()` must **reject `storage tpm`** for a
+  cert referenced by `system login saml` with a clear error (it currently calls
+  `wrap_private_key()`, which has no key to export); (2) *if* TPM-backed SAML is
+  ever wanted, it is a **saml-sso change** — python-saml/xmlsec signs from an
+  in-memory PEM string, so signing must be re-routed through a PKCS#11 token key
+  (e.g. xmlsec1 + `tpm2-pkcs11`), not solvable from the vyos-1x pki tree.
 - **Provider plumbing specifics** — exact OpenSSL tpm2-provider / `ssh-tpm-agent`
   wiring per consumer (OpenVPN, serial/stunnel, sshd), and the strongSwan
   `pkcs11`/`tpm2-pkcs11` token wiring (swanctl PKCS#11 URIs, `strongswan.conf`
@@ -781,15 +838,17 @@ plugin and the OpenSSL `pkcs11-provider`.
 - **`tpm2-pkcs11` packaging (vyos-build)** — build/package `tpm2-pkcs11` and its
   TSS2 deps, enable the charon `pkcs11` plugin, and confirm it is FIPS-compatible
   alongside `fips_plugins.conf.j2` (key-op token, not a crypto provider).
-- **PKCS#11 convergence — decided (§3.10, decision #9); remaining gates.** The
-  direction is set (converge via `pkcs11-provider`/`tpm2-pkcs11`). Before it can
-  be relied on, close these gates: (a) **fTPM FIPS validatability** — whether the
-  OP-TEE firmware TPM can be CMVP-validated / operated in approved mode (the real
-  blocker for any FIPS claim on TPM key-ops); (b) `pkcs11-provider` maturity +
-  FIPS behavior on this platform; (c) that OpenVPN (`--provider`/STORE), nginx,
-  and stunnel load a private key by `pkcs11:` URI cleanly; (d) that `tpm2-pkcs11`
-  delegates all crypto to the TPM (no software crypto). If a gate fails, fall
-  back to per-family (tpm2-provider for the OpenSSL family).
+- **TPM key backend — decided minimal PKCS#11 (§3.10, decision #9; reversed
+  2026-11-11).** PKCS#11 (`tpm2-pkcs11`) only for strongSwan/DevID; the
+  OpenSSL-family on `tpm2-provider`; sshd on `ssh-tpm-agent`. Remaining gates
+  before the TPM key-ops can be relied on: (a) **fTPM FIPS validatability** —
+  whether the OP-TEE firmware TPM can be CMVP-validated / operated in approved
+  mode (the real blocker for any FIPS claim on TPM key-ops); (b) confirm the
+  direct **`tpm2-provider`** loads cleanly per OpenSSL-family consumer (OpenVPN
+  `--provider`, nginx, stunnel) via the TSS2-PEM key — this path works today;
+  (c) the strongSwan **`pkcs11`/`tpm2-pkcs11`** token wiring (swanctl PKCS#11
+  URIs, `strongswan.conf` module registration, PIN handling); (d) that
+  `tpm2-pkcs11` delegates all crypto to the TPM (no software crypto).
 - **`verify()` error ergonomics** — precise messages for: `storage tpm` with a
   stray `private key`; `password-protected` under TPM; and missing sealed key on
   restore/different hardware.
