@@ -35,12 +35,6 @@
           <leafNode name="mtu">
             <defaultValue>1420</defaultValue>
           </leafNode>
-          <leafNode name="carrier-provided-mtu">
-            <properties>
-              <help>Use the carrier/modem-provided MTU instead of the configured interface MTU</help>
-              <valueless/>
-            </properties>
-          </leafNode>
           #include <include/interface/vrf.xml.i>
           #include <include/interface/mirror.xml.i>
           #include <include/interface/ipv4-options.xml.i>

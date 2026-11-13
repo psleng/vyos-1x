@@ -29,8 +29,7 @@ interfaces
   └── wwan <wwanN>
         ├── description <text>                            # max 255 characters
         ├── disable                                       # valueless — full teardown (delete-style, purges history); interface recreated when removed
-        ├── mtu <68-1500>                                # interface MTU — authoritative by default (default: 1420); carrier/per-SIM values can override (see carrier-provided-mtu)
-        ├── carrier-provided-mtu                          # valueless — honor the carrier/modem-provided MTU instead of the configured interface mtu (off by default)
+        ├── mtu <68-1500>                                # fallback MTU — used only when carrier provides none and no per-SIM mtu set (default: 1420)
         ├── vrf <name>                                    # VRF instance name
         ├── connection-mode <always-on|connect-on-demand|dial-on-demand>
         ├── dial-on-demand                                # traffic-trigger settings (used only with connection-mode dial-on-demand)
@@ -295,8 +294,7 @@ automatically using a 4-priority APN discovery chain:
 | **PDP type** | per-SIM only, default `ipv4v6` | Dual-stack bearer per slot unless overridden |
 | **Roaming** | per-SIM only, default `enabled` | Roaming is permitted by default so aggregator/MVNO SIMs (e.g. roaming-style Rogers-on-Bell) work out of the box. Use `disable-roaming` per slot to forbid visited networks. |
 | **Network mode** | `auto` | Modem selects best available RAT (5G→LTE→3G→2G) |
-| **MTU** | `1420` (interface MTU authoritative) | The configured interface `mtu` is applied by default; the carrier/modem-provided MTU is ignored unless `carrier-provided-mtu` is set (many modems report a bogus 1500 when the carrier signals no MTU, which black-holes large packets). A per-SIM `mtu` (if set) overrides and caps the effective MTU to the lesser of it and the carrier MTU |
-| **Carrier-provided MTU** | off | Valueless opt-in; when set the carrier/modem-provided bearer MTU is applied as-is (the pre-flag behavior). Leave off to keep the configured interface `mtu` authoritative |
+| **MTU** | `1420` (fallback) | Carrier-negotiated bearer MTU is used as-is when available; the interface `mtu` is a fallback used only when the carrier provides none and no per-SIM override is set — it is not a ceiling on the carrier value; a per-SIM `mtu` (if set) caps the effective MTU to the lesser of it and the carrier MTU |
 | **Per-SIM MTU** | `0` (use interface mtu) | Optional per-SIM override; when the SIM is active the effective MTU is the lesser of this value and the carrier MTU (or this value if the carrier provides none) |
 | **SIM PIN** | per-SIM only | If a PIN is configured, the FSM always sends it automatically when the SIM is locked |
 | **SIM failover** | per-SIM, `enabled` | Automatic switch to backup SIM on failure; use `disable` to turn off |
@@ -358,7 +356,7 @@ set interfaces wwan wwan0 sim slot 1 pin '1234'
 
 ### Interface Parameters
 
-> **If unconfigured:** Network-mode auto, interface MTU 1420 (authoritative; enable `carrier-provided-mtu` to use the carrier value instead).  APN, auth-type, PDP-type, roaming, username/password are all per-SIM only.
+> **If unconfigured:** Network-mode auto, MTU from carrier (fallback 1420 if carrier does not provide one).  APN, auth-type, PDP-type, roaming, username/password are all per-SIM only.
 
 ```
 # Interface description (friendly name, max 255 characters)
@@ -406,12 +404,8 @@ set interfaces wwan wwan0 network-mode 'auto'
 # Re-sync every hour (default); raise for less chatter, lower for tighter time:
 # set interfaces wwan wwan0 network-time update-interval 3600
 
-# MTU — the configured interface mtu is authoritative by default; a per-SIM mtu, if set, overrides and caps the effective MTU to the lesser of it and the carrier MTU
+# MTU — fallback only when the carrier provides none and no per-SIM mtu is set; a per-SIM mtu, if set, caps the effective MTU to the lesser of it and the carrier MTU
 set interfaces wwan wwan0 mtu 1420
-
-# Honor the carrier/modem-provided MTU instead of the configured interface mtu
-# (off by default; many modems report a bogus 1500 when the carrier signals none)
-set interfaces wwan wwan0 carrier-provided-mtu
 ```
 
 ### IPv4 Options

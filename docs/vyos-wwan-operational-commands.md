@@ -138,7 +138,7 @@ igos@igos:~$ show interfaces wwan wwan0 status
 | | IPv6 address | Bearer IPv6 address |
 | | IPv6 gateway | IPv6 default gateway |
 | | IPv6 DNS | IPv6 DNS server(s) |
-| | MTU | Effective MTU (interface mtu, per-SIM override, or carrier value when carrier-provided-mtu is enabled) |
+| | MTU | Effective MTU (carrier-negotiated or fallback) |
 | **Signal** | Quality | Signal quality as percentage |
 | | Strength | Signal strength in dBm |
 | | Serving band | Band the modem is currently camped on |
