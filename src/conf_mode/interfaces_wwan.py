@@ -711,6 +711,10 @@ def _build_ip_passthrough(wwan):
         # same-subnet router/netmask and suppress classless static route
         # option 121 for older clients that ignore RFC 3442.
         'legacy_dhcpv4_compat': _leaf_exists(ipt, 'legacy_dhcpv4_compat'),
+        # Opt-in: bounce the downstream LAN port on a carrier IP change so a
+        # link-event-driven downstream (e.g. ISC dhclient) re-acquires at once,
+        # letting the operator raise lease-time. OFF by default.
+        'reacquire_bounce': _leaf_exists(ipt, 'reacquire_bounce'),
         # Optional user-supplied DNS override (multi-value). When set,
         # these resolvers are advertised to the downstream device in
         # place of carrier-supplied DNS.

@@ -896,15 +896,15 @@
               </leafNode>
               <leafNode name="lease-time">
                 <properties>
-                  <help>DHCP lease time in seconds (short leases speed up IP-change recovery)</help>
+                  <help>DHCP lease time in seconds. Short leases speed up IP-change recovery for a link-event-driven downstream (e.g. ISC dhclient); enabling 'reacquire-bounce' makes recovery event-driven so a longer lease is safe.</help>
                   <valueHelp>
-                    <format>u32:30-600</format>
+                    <format>u32:30-86400</format>
                     <description>Lease duration in seconds</description>
                   </valueHelp>
                   <constraint>
-                    <validator name="numeric" argument="--range 30-600"/>
+                    <validator name="numeric" argument="--range 30-86400"/>
                   </constraint>
-                  <constraintErrorMessage>Lease time must be 30-600 seconds</constraintErrorMessage>
+                  <constraintErrorMessage>Lease time must be 30-86400 seconds</constraintErrorMessage>
                 </properties>
                 <defaultValue>60</defaultValue>
               </leafNode>
@@ -960,6 +960,12 @@
               <leafNode name="legacy-dhcpv4-compat">
                 <properties>
                   <help>Legacy DHCPv4 compatibility mode: use same-subnet router/netmask and suppress classless route option 121 for older clients that do not implement RFC 3442</help>
+                  <valueless/>
+                </properties>
+              </leafNode>
+              <leafNode name="reacquire-bounce">
+                <properties>
+                  <help>On a carrier IP change, briefly bounce the downstream LAN port so a link-event-driven downstream (e.g. ISC dhclient, which ignores DHCPFORCERENEW) re-acquires the new address immediately instead of waiting for its DHCP renewal timer. Lets 'lease-time' be raised. Briefly drops all downstream connectivity on the passthrough segment; requires the downstream to be directly attached (no intermediate switch holding carrier up).</help>
                   <valueless/>
                 </properties>
               </leafNode>
