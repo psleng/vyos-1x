@@ -960,15 +960,39 @@ if __name__ == '__main__':
                                 SYSLOG_IDENTIFIER=my_name,
                             )
                     else:
-                        print_debug(
-                            f'    [ TARGET_FAIL ] target checks fails for [{nhc.pretty_targets}] '
-                            f'(fail {hstate["fail"]}, success {hstate["success"]}/{nhc.success_count}), do nothing'
-                        )
-                        journal.send(
-                            f'Check fail for route {route} interface "{nhc.conf_iface}" target {nhc.pretty_targets} proto {nhc.proto} '
-                            f'{nhc.port_opt}',
-                            SYSLOG_IDENTIFIER=my_name,
-                        )
+                        if is_alive:
+                            # Probe passed but the route is not installed yet:
+                            # we are still accumulating success_count
+                            # consecutive successes before (re)installing it.
+                            # This is NOT a failure -- log it distinctly so it
+                            # is not misread as a dead target (e.g. during the
+                            # convergence that follows a daemon restart).
+                            print_debug(
+                                f'    [ TARGET_OK_PENDING ] target check passed '
+                                f'for [{nhc.pretty_targets}] on {nhc.conf_iface}; '
+                                f'awaiting success-count '
+                                f'({hstate["success"]}/{nhc.success_count}) '
+                                f'before (re)installing route'
+                            )
+                            journal.send(
+                                f'Check ok for route {route} interface '
+                                f'"{nhc.conf_iface}" target {nhc.pretty_targets} '
+                                f'proto {nhc.proto} {nhc.port_opt}-- awaiting '
+                                f'success-count '
+                                f'({hstate["success"]}/{nhc.success_count}) '
+                                f'before installing route',
+                                SYSLOG_IDENTIFIER=my_name,
+                            )
+                        else:
+                            print_debug(
+                                f'    [ TARGET_FAIL ] target checks fails for [{nhc.pretty_targets}] '
+                                f'(fail {hstate["fail"]}, success {hstate["success"]}/{nhc.success_count}), do nothing'
+                            )
+                            journal.send(
+                                f'Check fail for route {route} interface "{nhc.conf_iface}" target {nhc.pretty_targets} proto {nhc.proto} '
+                                f'{nhc.port_opt}',
+                                SYSLOG_IDENTIFIER=my_name,
+                            )
                 else:
                     # Route is installed; withdraw it only once the failure
                     # threshold is reached (failure_count consecutive failures).
