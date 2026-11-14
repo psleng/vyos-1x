@@ -573,6 +573,61 @@ def delete_route(ip_args):
     )
 
 
+def get_probe_route_args(target, nhc):
+    """ip-route args for a transient host route that lets the health probe
+    reach ``target`` through this next-hop's gateway, independent of whether
+    the next-hop's own failover route is currently installed.
+
+    This is the real failover route (get_ip_command_args) with the destination
+    narrowed from the configured prefix (0.0.0.0/0 or ::/0) to a single host
+    (target/32 or target/128) and the metric dropped. It reuses the next-hop's
+    via/dev/onlink/vrf verbatim, so it makes no assumption about the
+    interface's own lease prefix: an on-subnet gateway (no onlink), an
+    off-subnet /32 passthrough gateway (onlink, from config), or a link-local
+    IPv6 gateway are all handled exactly as the real route handles them. Marked
+    proto failover so a crash leaves it for flush_all_routes() to clean up."""
+    onlink = f'{nhc.onlink} ' if nhc.onlink else ''
+    return (f'{target} via {nhc.next_hop} dev {nhc.conf_iface} '
+            f'{onlink}{nhc.vrf_opt} proto failover')
+
+
+def add_probe_routes(nhc):
+    """Install transient per-target host routes so an off-link check target is
+    reached through the next-hop gateway even while this next-hop's failover
+    route is withdrawn.
+
+    Without this the probe is bound to the egress interface (ping -I <iface>),
+    the kernel treats the target as on-link, ARPs it directly and never gets a
+    reply -- so after the route is withdrawn (e.g. by a DHCP gateway
+    re-resolution) the check can never pass to bring it back: a self-latching
+    failure whose only escape is some other actor transiently re-installing a
+    usable route. The host route shares the next-hop's gateway, so it is a
+    no-op for routing when the failover route is already up (same path, more
+    specific prefix) and only matters during recovery.
+
+    Returns the list of ip-route args to remove once the probe completes.
+    No-op for a via-less (point-to-point) next-hop that needs no gateway
+    resolution, for ARP checks (which test the on-link neighbour itself), and
+    for targets carrying their own interface/vrf override or a null host."""
+    added = []
+    if not nhc.next_hop or nhc.proto not in ('icmp', 'tcp'):
+        return added
+    for t in nhc.targets:
+        if t.interface or t.vrf or t.target in ('0.0.0.0', '::'):
+            continue
+        pr_args = get_probe_route_args(t.target, nhc)
+        rc, _ = rc_cmd(f'ip route add {pr_args}')
+        if rc == 0:
+            added.append(pr_args)
+    return added
+
+
+def del_probe_routes(probe_routes):
+    """Remove the transient probe host routes added by add_probe_routes()."""
+    for pr_args in probe_routes:
+        rc_cmd(f'ip route del {pr_args}')
+
+
 def update_configuration(last_modification_times, all_routes, config_dir):
     """
     Updates configuration:
@@ -833,17 +888,27 @@ if __name__ == '__main__':
                 next_hop = nhc.next_hop
                 ip_args = get_ip_command_args(nhc)
 
-                is_alive = is_target_alive(
-                    nhc.targets,
-                    nhc.conf_iface,
-                    nhc.proto,
-                    nhc.port,
-                    nexthop_vrf=vrf,
-                    policy=nhc.policy,
-                    # Perle change start
-                    is_dhcp_interface=is_dhcp_iface,
-                    # Perle change end
-                )
+                # Break the probe<->route latch: install transient per-target
+                # host routes via this next-hop's gateway so the check can reach
+                # an off-link target even while the failover route is withdrawn,
+                # then remove them once the probe completes (no-op for via-less
+                # next-hops / ARP checks). Without this the probe can never pass
+                # to bring a withdrawn route back on its own.
+                probe_routes = add_probe_routes(nhc)
+                try:
+                    is_alive = is_target_alive(
+                        nhc.targets,
+                        nhc.conf_iface,
+                        nhc.proto,
+                        nhc.port,
+                        nexthop_vrf=vrf,
+                        policy=nhc.policy,
+                        # Perle change start
+                        is_dhcp_interface=is_dhcp_iface,
+                        # Perle change end
+                    )
+                finally:
+                    del_probe_routes(probe_routes)
 
                 # Update this next-hop's consecutive fail/success counters so a
                 # single dropped probe on a lossy link does not flip the route.
