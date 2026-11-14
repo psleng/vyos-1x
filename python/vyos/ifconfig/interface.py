@@ -1610,6 +1610,10 @@ class Interface(Control):
         config_base = directories['isc_dhclient_dir'] + '/dhclient'
         dhclient_config_file = f'{config_base}_{self.ifname}.conf'
         dhclient_lease_file = f'{config_base}_{self.ifname}.leases'
+        # Opt-in marker consumed by vyos-dhcp-carrier-reacquire.service: when
+        # present, that daemon restarts dhclient@<if> on a carrier-up event so
+        # the lease is re-acquired at once instead of at the renewal timer.
+        dhclient_reacquire_marker = f'{config_base}_{self.ifname}.reacquire'
         systemd_override_file = (
             f'/run/systemd/system/dhclient@{self.ifname}.service.d/10-override.conf'
         )
@@ -1634,6 +1638,12 @@ class Interface(Control):
 
             render(systemd_override_file, 'dhcp-client/override.conf.j2', self.config)
             render(dhclient_config_file, 'dhcp-client/ipv4.j2', self.config)
+
+            # Maintain the carrier-reacquire opt-in marker to match config.
+            if dict_search('dhcp_options.reacquire_on_carrier', self.config) is not None:
+                write_file(dhclient_reacquire_marker, '')
+            elif os.path.isfile(dhclient_reacquire_marker):
+                os.remove(dhclient_reacquire_marker)
 
             # Reload systemd unit definitions as some options are dynamically generated
             self._cmd('systemctl daemon-reload')
@@ -1672,6 +1682,7 @@ class Interface(Control):
                 dhclient_config_file,
                 systemd_override_file,
                 dhclient_lease_file,
+                dhclient_reacquire_marker,
             ]:
                 if os.path.isfile(file):
                     os.remove(file)

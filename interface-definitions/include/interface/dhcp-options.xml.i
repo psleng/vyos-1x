@@ -57,6 +57,7 @@
     </leafNode>
     #include <include/interface/no-default-route.xml.i>
     #include <include/interface/default-route-distance.xml.i>
+    #include <include/interface/reacquire-on-carrier.xml.i>
     <leafNode name="reject">
       <properties>
         <help>IP addresses or subnets from which to reject DHCP leases</help>
