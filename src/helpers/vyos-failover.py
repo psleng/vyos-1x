@@ -669,7 +669,13 @@ def update_configuration(last_modification_times, all_routes, config_dir):
     print_debug(f"All routes: {all_routes}")
 
 
-def process_dhcp_interface(nhc, nexthop_by_dhcp_nexthop):
+# Number of consecutive polls that may resolve no DHCP gateway (while one was
+# previously known) before a working dhcp-interface route is withdrawn. Keeps a
+# single transient lease-file read miss from instantly dropping a healthy route.
+dhcp_gw_absent_limit = 3
+
+
+def process_dhcp_interface(nhc, nexthop_by_dhcp_nexthop, gw_miss_state=None):
     """
     Processes NextHopNamedTuple with dhcp_interface != None
     Return NextHopNamedTuple with next_hop equal to DHCP gateway of nhc.
@@ -678,6 +684,10 @@ def process_dhcp_interface(nhc, nexthop_by_dhcp_nexthop):
     Args:
         nhc(NextHopNamedTuple): configuration with dhcp_interface
         nexthop_by_dhcp_nexthop(dict): dict with previous returned values
+        gw_miss_state(dict): per-nexthop count of consecutive polls that
+            resolved no DHCP gateway while one was previously known; used to
+            debounce a transient "gateway gone" reading. Optional; when omitted
+            the previous (delete-on-first-miss) behaviour is kept.
     """
     cur_dhcpgw = get_dhcp_router(nhc.dhcp_interface)
     if not cur_dhcpgw:
@@ -687,6 +697,28 @@ def process_dhcp_interface(nhc, nexthop_by_dhcp_nexthop):
         prev_dhcpgw = nexthop_by_dhcp_nexthop[nhc].next_hop
     else:
         prev_dhcpgw = False
+
+    # Debounce a transient "no gateway" reading. The lease env file is now
+    # written atomically (03-vyos-dhclient-hook), so a missing gateway should
+    # be a real signal -- but keeping a healthy route across a single unlucky
+    # read (lease-file rotation, a stat hiccup, or any future non-atomic
+    # writer) avoids instantly dropping it, and removes the asymmetry where one
+    # miss withdrew the route while recovery needed success_count good polls.
+    if gw_miss_state is not None:
+        if not cur_dhcpgw and prev_dhcpgw:
+            misses = gw_miss_state.get(nhc, 0) + 1
+            gw_miss_state[nhc] = misses
+            if misses < dhcp_gw_absent_limit:
+                print_debug(
+                    f"No DHCP gateway for interface {nhc.dhcp_interface} "
+                    f"(miss {misses}/{dhcp_gw_absent_limit}); keeping previous "
+                    f"gateway '{prev_dhcpgw}'"
+                )
+                return nexthop_by_dhcp_nexthop[nhc]
+        else:
+            # Any definitive reading (gateway present, or confirmed absent with
+            # no previous gateway) clears the miss counter.
+            gw_miss_state.pop(nhc, None)
 
     # Equal - do nothing, just return previous value
     if prev_dhcpgw == cur_dhcpgw:
@@ -761,6 +793,11 @@ if __name__ == '__main__':
     # link does not flap on a single dropped probe.
     nexthop_health_state = {}
 
+    # Per-dhcp-interface next-hop count of consecutive polls that resolved no
+    # DHCP gateway while one was previously known; debounces a transient lease
+    # read miss in process_dhcp_interface().
+    dhcp_gw_miss_state = {}
+
     had_sleeps = True
     while not kill_called:
         # Check in case daemon was launched without routes
@@ -788,7 +825,8 @@ if __name__ == '__main__':
                 # Perle change end
 
                 if nhc.dhcp_interface:
-                    nhc = process_dhcp_interface(nhc, nexthop_by_dhcp_nexthop)
+                    nhc = process_dhcp_interface(nhc, nexthop_by_dhcp_nexthop,
+                                                 dhcp_gw_miss_state)
                     if not nhc:
                         continue
 
