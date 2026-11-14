@@ -31,16 +31,30 @@ if [ "$RUN" = "yes" ]; then
         BASE_PATH=$(python3 -c "from vyos.defaults import directories; print(directories['isc_dhclient_dir'])")
         mkdir -p ${BASE_PATH}
         LOG=${BASE_PATH}/dhclient_"$interface"."$proto"lease
-        echo `date` > $LOG
 
-        for i in reason interface new_expiry new_dhcp_lease_time medium \
-                        alias_ip_address new_ip_address new_broadcast_address \
-                        new_subnet_mask new_domain_name new_network_number \
-                        new_domain_name_servers new_routers new_static_routes \
-			new_dhcp_server_identifier new_dhcp_message_type \
-                        old_ip_address old_subnet_mask old_domain_name \
-                        old_domain_name_servers old_routers \
-                        old_static_routes; do
-                echo $i=\'${!i}\' >> $LOG
-        done
+        # Write the lease environment atomically. This file is polled
+        # asynchronously by other processes (vyos-failover, frrender, op-mode
+        # "show dhcp client leases"). A plain truncate + line-by-line append
+        # leaves a window in which the file exists but is still missing fields
+        # such as new_routers; a reader hitting that window misreads it as "no
+        # DHCP gateway" and acts on it (e.g. vyos-failover withdraws the default
+        # route). Build the full contents in a PID-unique temp file in the same
+        # directory, then rename() it into place so readers only ever observe a
+        # complete file.
+        TMP=$(mktemp "${LOG}.XXXXXX")
+        {
+                echo `date`
+                for i in reason interface new_expiry new_dhcp_lease_time medium \
+                                alias_ip_address new_ip_address new_broadcast_address \
+                                new_subnet_mask new_domain_name new_network_number \
+                                new_domain_name_servers new_routers new_static_routes \
+				new_dhcp_server_identifier new_dhcp_message_type \
+                                old_ip_address old_subnet_mask old_domain_name \
+                                old_domain_name_servers old_routers \
+                                old_static_routes; do
+                        echo $i=\'${!i}\'
+                done
+        } > "$TMP"
+        chmod 644 "$TMP"
+        mv -f "$TMP" "$LOG"
 fi
