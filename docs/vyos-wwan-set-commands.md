@@ -94,13 +94,13 @@ interfaces
         ├── ip-passthrough                                # DOCSIS-modem-style: hand carrier IP to one downstream device
         │     ├── interface <name>                        # designated LAN port (required)
         │     ├── mac <xx:xx:xx:xx:xx:xx>                 # optional — pin to a specific downstream MAC (default: first-MAC-wins)
-        │     ├── lease-time <30-86400>                   # DHCP lease seconds (default: 60; raise above 600 only with reacquire-bounce)
+        │     ├── lease-time <30-86400>                   # DHCP lease seconds (default: 3600; long lease is safe because reacquire-bounce is on by default)
         │     ├── passthrough-management-address <ipv4/prefix>        # FSM-provisioned mgmt v4 (default: 192.168.200.1/32; Policy B: skipped if 'interfaces ethernet <if> address' is set)
         │     ├── passthrough-management-address-ipv6 <ipv6/prefix>   # FSM-provisioned mgmt v6 (default: fd00:6c61:6e30::1/128; same Policy B)
         │     ├── dns-server <ipv4|ipv6> (multi)          # override DNS advertised to downstream (precedence: user > carrier > 8.8.8.8/1.1.1.1)
         │     ├── disable-mss-clamp                       # valueless — turn off TCP MSS clamp-to-PMTU on WWAN egress (on by default)
         │     ├── legacy-dhcpv4-compat                    # valueless — legacy mode: same-subnet v4 router/netmask, disable DHCP option 121
-        │     ├── reacquire-bounce                        # valueless — on carrier IP change, bounce the LAN port so a link-driven downstream (ISC dhclient) re-acquires at once; lets lease-time be raised
+        │     ├── disable-reacquire-bounce                # valueless — opt OUT of the carrier-change LAN-port bounce (bounce is ON by default; it lets a link-driven downstream re-acquire at once so the long lease-time is safe). Disable for a downstream behind a switch, then lower lease-time.
         │     └── router-advert                           # RA tuning for the downstream device (dnsmasq)
         │           ├── interval <4-1800>                 # unsolicited RA cadence, s (default: 60)
         │           ├── router-lifetime <0-9000>          # default-router lifetime, s (default: 1800; 0 = not a default router)
@@ -802,11 +802,13 @@ set interfaces wwan wwan0 dhcpv6-options pd 0 interface eth0 sla-id '0'
 >    designated interface (`--bind-interfaces`, scoped PID file in
 >    `/run/wwan/passthru-<if>.pid`).
 > 2. **DHCPv4** offers exactly one lease — the carrier IPv4 — to the first
->    MAC seen (or to a pinned MAC).  Lease time defaults to 60 s so an IP
->    change propagates within one renewal window.  Enable `reacquire-bounce`
->    to make IP-change recovery event-driven (a LAN-port bounce forces the
->    downstream to re-acquire at once) and then raise `lease-time` up to
->    86400 s instead of relying on a short renewal interval.  The
+>    MAC seen (or to a pinned MAC).  Lease time defaults to **3600 s**: a
+>    long lease is safe because `reacquire-bounce` is **on by default**, so an
+>    IP change is pushed to the downstream immediately via a LAN-port bounce
+>    (event-driven) rather than waiting for a renewal.  Lower `lease-time`
+>    (and/or `disable-reacquire-bounce`) only when the downstream cannot be
+>    driven by the bounce (e.g. behind a switch), so IP changes are tracked
+>    via renewals instead.  The
 >    carrier-supplied DNS servers from the bearer's `Ip4Config` are
 >    advertised via DHCP
 >    option 6 (with `8.8.8.8/1.1.1.1` as a last-resort fallback if the
@@ -917,7 +919,9 @@ set interfaces wwan wwan0 dhcpv6-options pd 0 interface eth0 sla-id '0'
 > 6. **DHCPFORCERENEW** (RFC 3203) for v4 — sent via the `dhcp_release2`
 >    helper from `dnsmasq-utils`.  If the helper is missing, the FSM
 >    logs a one-time warning and the downstream device renews at T1
->    (`lease/2`, ≤30 s with the default 60 s lease).  DHCPv6 Reconfigure
+>    (`lease/2`).  (With the default 3600 s lease the bounce, not the
+>    renewal timer, drives IP-change recovery — see `reacquire-bounce`.)
+>    DHCPv6 Reconfigure
 >    (RFC 8415 §18.2.11) is handled implicitly by dnsmasq's SIGHUP.
 > 7. After downstream renewal is observed (or a 5 s grace window
 >    elapses), the `iptables` block is removed.
@@ -939,15 +943,16 @@ set interfaces wwan wwan0 dhcpv6-options pd 0 interface eth0 sla-id '0'
 >  - Legacy downstream products that ignore DHCP option 121 can use
 >    `ip-passthrough legacy-dhcpv4-compat`; keep it disabled for newer
 >    equipment so the default modern behavior is preserved.
->  - **`reacquire-bounce` makes IP-change recovery event-driven.**  On a
->    carrier IP change it briefly bounces the designated LAN port so a
->    link-event-driven downstream (e.g. ISC dhclient, which ignores
->    DHCPFORCERENEW) re-acquires immediately — letting `lease-time` be
->    raised well above the short default rather than relying on frequent
->    renewals.  It briefly drops all downstream connectivity on the segment
->    and only triggers the re-acquire when the downstream is directly
->    attached (an intermediate switch may hold its carrier up).  Off by
->    default.
+>  - **`reacquire-bounce` is ON by default and makes IP-change recovery
+>    event-driven.**  On a carrier IP change it briefly bounces the
+>    designated LAN port so a link-event-driven downstream (e.g. ISC
+>    dhclient, which ignores DHCPFORCERENEW) re-acquires immediately — which
+>    is what makes the long default `lease-time` (3600 s) safe rather than
+>    relying on frequent renewals.  It briefly drops downstream connectivity
+>    on the segment and only triggers the re-acquire when the downstream is
+>    directly attached (an intermediate switch may hold its carrier up).  Opt
+>    out with `ip-passthrough disable-reacquire-bounce` (and then lower
+>    `lease-time` so IP changes are tracked via renewals).
 >  - **`connection-mode dial-on-demand` is rejected at commit time** when
 >    passthrough is configured.  Passthrough leases the carrier IP straight
 >    through to a downstream device and assumes an always-up bearer;
@@ -969,11 +974,12 @@ set interfaces wwan wwan0 ip-passthrough interface 'eth1'
 # Optional: pin to a specific MAC (otherwise first-MAC-wins on lease)
 set interfaces wwan wwan0 ip-passthrough mac 'aa:bb:cc:dd:ee:ff'
 
-# Optional: tune lease (default 60 s, range 30–86400)
-#   Raise above the 600 s short-lease range only together with
-#   reacquire-bounce (below); otherwise keep it short so a carrier IP
-#   change propagates within one downstream renewal window.
-set interfaces wwan wwan0 ip-passthrough lease-time '60'
+# Optional: tune lease (default 3600 s, range 30–86400)
+#   The long default is safe because reacquire-bounce is on by default
+#   (IP changes are pushed via a LAN-port bounce, not renewals). Lower it
+#   only if you also disable-reacquire-bounce (e.g. downstream behind a
+#   switch), so a carrier IP change is tracked within a renewal window.
+set interfaces wwan wwan0 ip-passthrough lease-time '3600'
 
 # Optional: override the auto-provisioned management addresses
 #   (only takes effect if 'interfaces ethernet <if> address' is unset —
@@ -1007,13 +1013,13 @@ set interfaces wwan wwan0 ip-passthrough dns-server '2606:4700:4700::1111'
 #   Disabled (default): modern /32 + option 121 mode.
 # set interfaces wwan wwan0 ip-passthrough legacy-dhcpv4-compat
 
-# Optional: event-driven downstream re-acquire on a carrier IP change.
-#   Bounces the designated LAN port so a link-driven downstream (ISC
-#   dhclient, which ignores DHCPFORCERENEW) re-acquires the new carrier IP
-#   at once — letting you raise lease-time instead of relying on short
-#   leases. Off by default; briefly drops downstream connectivity and needs
-#   a directly-attached downstream (no intermediate switch holding carrier up).
-# set interfaces wwan wwan0 ip-passthrough reacquire-bounce
+# Optional: opt OUT of the carrier-change LAN-port bounce (it is ON by
+#   default). The bounce makes a link-driven downstream (ISC dhclient, which
+#   ignores DHCPFORCERENEW) re-acquire the new carrier IP at once, which is
+#   what makes the long default lease-time safe. Disable it for a downstream
+#   behind a switch or that must not see a link flap — and then lower
+#   lease-time so IP changes are tracked via renewals instead.
+# set interfaces wwan wwan0 ip-passthrough disable-reacquire-bounce
 
 # Optional: tune the downstream Router Advertisements (dnsmasq).
 #   Defaults shown; omit any line to keep its default. router-lifetime must

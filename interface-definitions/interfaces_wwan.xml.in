@@ -896,7 +896,7 @@
               </leafNode>
               <leafNode name="lease-time">
                 <properties>
-                  <help>DHCP lease time in seconds. Short leases speed up IP-change recovery for a link-event-driven downstream (e.g. ISC dhclient); enabling 'reacquire-bounce' makes recovery event-driven so a longer lease is safe.</help>
+                  <help>DHCP lease time in seconds (default: 3600). With 'reacquire-bounce' on by default, IP-change recovery is event-driven, so a long lease is safe and avoids frequent renewal churn on the downstream. Lower it only if you must track carrier IP changes purely via renewals (e.g. a downstream behind a switch where the bounce cannot drive re-acquisition).</help>
                   <valueHelp>
                     <format>u32:30-86400</format>
                     <description>Lease duration in seconds</description>
@@ -906,7 +906,7 @@
                   </constraint>
                   <constraintErrorMessage>Lease time must be 30-86400 seconds</constraintErrorMessage>
                 </properties>
-                <defaultValue>60</defaultValue>
+                <defaultValue>3600</defaultValue>
               </leafNode>
               <leafNode name="passthrough-management-address">
                 <properties>
@@ -963,9 +963,9 @@
                   <valueless/>
                 </properties>
               </leafNode>
-              <leafNode name="reacquire-bounce">
+              <leafNode name="disable-reacquire-bounce">
                 <properties>
-                  <help>On a carrier IP change, briefly bounce the downstream LAN port so a link-event-driven downstream (e.g. ISC dhclient, which ignores DHCPFORCERENEW) re-acquires the new address immediately instead of waiting for its DHCP renewal timer. Lets 'lease-time' be raised. Briefly drops all downstream connectivity on the passthrough segment; requires the downstream to be directly attached (no intermediate switch holding carrier up).</help>
+                  <help>Disable the carrier-change LAN-port bounce (default: enabled). When enabled, a carrier IP change briefly bounces the downstream LAN port so a link-event-driven downstream (e.g. ISC dhclient, which ignores DHCPFORCERENEW) re-acquires the new address immediately instead of waiting for its DHCP renewal timer -- which is what makes the long default 'lease-time' safe. It briefly drops downstream connectivity on the passthrough segment and only drives re-acquisition when the downstream is directly attached (no intermediate switch holding carrier up). Disable it if your downstream is behind a switch or must not see a link flap; then lower 'lease-time' so IP changes are tracked via renewals instead.</help>
                   <valueless/>
                 </properties>
               </leafNode>

@@ -35,7 +35,7 @@ RUN_DIR = Path('/run/wwan')
 DNSMASQ = '/usr/sbin/dnsmasq'
 GRACE_AFTER_RENEW_S = 5
 
-# Downstream re-acquire via LAN link bounce (opt-in, cfg.reacquire_bounce).
+# Downstream re-acquire via LAN link bounce (on by default, cfg.reacquire_bounce).
 # How long to hold the LAN port admin-down so a directly-attached downstream
 # NIC registers a carrier loss before we bring it back up.
 REACQUIRE_BOUNCE_SETTLE_S = 1.0
@@ -90,7 +90,7 @@ class PassthroughConfig:
     enabled: bool = False
     interface: str = ''
     mac: str = ''                   # '' = first-MAC-wins
-    lease_time: int = 60
+    lease_time: int = 3600
     management_address: str = ''    # '' if user owns ethernet
     management_address_ipv6: str = ''
     mgmt_owned_by_user: bool = False
@@ -110,14 +110,16 @@ class PassthroughConfig:
     # advertise a same-subnet router/netmask and suppress RFC 3442 option
     # 121 so older downstream stacks that ignore classless routes still work.
     legacy_dhcpv4_compat: bool = False
-    # Opt-in: on a carrier IP change, briefly bounce the downstream-facing LAN
-    # port so a link-event-driven downstream (e.g. ISC dhclient, which ignores
+    # On a carrier IP change, briefly bounce the downstream-facing LAN port so
+    # a link-event-driven downstream (e.g. ISC dhclient, which ignores
     # DHCPFORCERENEW) immediately re-acquires the new address instead of
-    # waiting for its own DHCP renewal timer.  Lets the operator raise
-    # lease_time well above the short values otherwise needed for timely
-    # IP-change recovery.  OFF by default: the admin-down/up briefly drops ALL
-    # downstream connectivity on the passthrough segment.
-    reacquire_bounce: bool = False
+    # waiting for its own DHCP renewal timer.  ON by default: this is what
+    # makes the long default lease_time safe (IP-change recovery is
+    # event-driven, not renewal-driven).  The admin-down/up briefly drops
+    # downstream connectivity on the passthrough segment and only drives
+    # re-acquisition for a directly-attached downstream, so it can be disabled
+    # (with a correspondingly lower lease_time) when that does not hold.
+    reacquire_bounce: bool = True
     # User-supplied DNS overrides.  When non-empty, these are advertised to
     # the downstream device instead of the carrier-supplied DNS list.
     # Mixed v4/v6 addresses are split internally.
@@ -139,7 +141,7 @@ class PassthroughConfig:
             enabled=bool(raw.get('enabled', False)),
             interface=str(raw.get('interface', '') or ''),
             mac=str(raw.get('mac', '') or '').lower(),
-            lease_time=int(raw.get('lease_time', 60) or 60),
+            lease_time=int(raw.get('lease_time', 3600) or 3600),
             management_address=str(raw.get('management_address', '') or ''),
             management_address_ipv6=str(raw.get('management_address_ipv6', '') or ''),
             mgmt_owned_by_user=bool(raw.get('mgmt_owned_by_user', False)),
@@ -147,7 +149,7 @@ class PassthroughConfig:
             mgmt_v6_ip=str(raw.get('mgmt_v6_ip', '') or ''),
             mss_clamp_enabled=bool(raw.get('mss_clamp_enabled', True)),
             legacy_dhcpv4_compat=bool(raw.get('legacy_dhcpv4_compat', False)),
-            reacquire_bounce=bool(raw.get('reacquire_bounce', False)),
+            reacquire_bounce=bool(raw.get('reacquire_bounce', True)),
             dns_servers=[str(d) for d in dns_raw if d],
             ra_interval=int(raw.get('ra_interval', 60) or 60),
             ra_router_lifetime=int(raw.get('ra_router_lifetime', 1800) or 1800),
@@ -966,15 +968,17 @@ class PassthroughManager:
 
         Event-driven complement to _force_renew_v4(): DHCPFORCERENEW (RFC 3203)
         is honoured by Windows but NOT by ISC dhclient (the VyOS downstream),
-        which only re-DISCOVERs on a link-up event.  Bouncing the port lets the
-        operator raise lease-time well above the short values otherwise needed
-        for timely IP-change recovery.
+        which only re-DISCOVERs on a link-up event.  Bouncing the port is what
+        makes the long default lease-time safe (IP-change recovery is
+        event-driven rather than renewal-driven).
 
-        Opt-in (cfg.reacquire_bounce): the admin-down/up briefly drops ALL
-        downstream connectivity on the passthrough segment, and only triggers
-        the downstream re-acquire when the port is directly attached (a switch
-        in between may hold the downstream's carrier up).  Debounced so a
-        flapping carrier cannot storm the port.
+        On by default (cfg.reacquire_bounce); disable via
+        'ip-passthrough disable-reacquire-bounce'.  The admin-down/up briefly
+        drops downstream connectivity on the passthrough segment, and only
+        triggers the downstream re-acquire when the port is directly attached (a
+        switch in between may hold the downstream's carrier up) -- disable it
+        (and lower lease-time) when that does not hold.  Debounced so a flapping
+        carrier cannot storm the port.
         """
         if not self.cfg.reacquire_bounce or not self.cfg.interface:
             return

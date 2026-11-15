@@ -695,7 +695,7 @@ def _build_ip_passthrough(wwan):
         'enabled': True,
         'interface': pt_iface,
         'mac': _leaf(ipt, 'mac', '') or '',
-        'lease_time': _leaf_int(ipt, 'lease_time', 60),
+        'lease_time': _leaf_int(ipt, 'lease_time', 3600),
         'management_address': mgmt_v4_cidr,
         'management_address_ipv6': mgmt_v6_cidr,
         'mgmt_owned_by_user': user_owns_eth,
@@ -711,10 +711,11 @@ def _build_ip_passthrough(wwan):
         # same-subnet router/netmask and suppress classless static route
         # option 121 for older clients that ignore RFC 3442.
         'legacy_dhcpv4_compat': _leaf_exists(ipt, 'legacy_dhcpv4_compat'),
-        # Opt-in: bounce the downstream LAN port on a carrier IP change so a
+        # Bounce the downstream LAN port on a carrier IP change so a
         # link-event-driven downstream (e.g. ISC dhclient) re-acquires at once,
-        # letting the operator raise lease-time. OFF by default.
-        'reacquire_bounce': _leaf_exists(ipt, 'reacquire_bounce'),
+        # which is what makes the long default lease-time safe. ON by default;
+        # 'disable-reacquire-bounce' opts out (e.g. downstream behind a switch).
+        'reacquire_bounce': not _leaf_exists(ipt, 'disable_reacquire_bounce'),
         # Optional user-supplied DNS override (multi-value). When set,
         # these resolvers are advertised to the downstream device in
         # place of carrier-supplied DNS.
