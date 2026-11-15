@@ -275,8 +275,8 @@ class TestConntrackFlush(TestCase):
             vf.flush_conntrack_for_addrs(['10.12.91.249',
                                           '2605:b100::1'], vacated_iface='eth1')
         cmds = [c.args[0] for c in rc.call_args_list]
-        self.assertIn('conntrack -D -f ipv4 -q 10.12.91.249', cmds)
-        self.assertIn('conntrack -D -f ipv6 -q 2605:b100::1', cmds)
+        self.assertIn('/usr/sbin/conntrack -D -f ipv4 -q 10.12.91.249', cmds)
+        self.assertIn('/usr/sbin/conntrack -D -f ipv6 -q 2605:b100::1', cmds)
 
     def test_get_iface_addresses_parses_global_only(self):
         vf = self.vf
@@ -300,7 +300,7 @@ class TestConntrackFlush(TestCase):
              patch.object(vf, 'journal'):
             vf.flush_conntrack_for_addrs(['10.12.91.249'], vacated_iface='eth1')
         cmds = [c.args[0] for c in rc.call_args_list]
-        self.assertEqual(cmds, ['conntrack -D -f ipv4 -q 10.12.91.249'])
+        self.assertEqual(cmds, ['/usr/sbin/conntrack -D -f ipv4 -q 10.12.91.249'])
         self.assertFalse(any('ipv6' in c for c in cmds))
 
     def test_route_family_filter_selects_matching_addrs(self):

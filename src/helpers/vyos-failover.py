@@ -297,7 +297,11 @@ def flush_conntrack_for_addrs(addrs, vacated_iface=''):
     kept its address (the common passthrough-upstream-dead case)."""
     for addr in addrs:
         fam = 'ipv6' if ':' in addr else 'ipv4'
-        rc, _ = rc_cmd(f'conntrack -D -f {fam} -q {addr}')
+        # Absolute path: the daemon runs under systemd's restricted PATH, which
+        # omits /usr/sbin (where conntrack-tools installs conntrack), so a bare
+        # `conntrack` would not be found -- matching the /usr/bin/ping and
+        # /usr/bin/arping convention used by the health checks.
+        rc, _ = rc_cmd(f'/usr/sbin/conntrack -D -f {fam} -q {addr}')
         print_debug(f'    [ CT-FLUSH ] conntrack -D -f {fam} -q {addr} '
                     f'(vacated {vacated_iface}) rc={rc}')
         journal.send(
