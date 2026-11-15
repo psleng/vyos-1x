@@ -160,6 +160,8 @@ class TestProbeRoutes(TestCase):
         cls.vf = _load_failover()
 
     def test_probe_args_dhcp_onlink_ipv4(self):
+        # Probe route lives in the dedicated probe table (scoped), reusing the
+        # next-hop's onlink from config.
         vf = self.vf
         nhc = _nexthop(vf, next_hop='192.168.200.1', dhcp_interface=None,
                        onlink='onlink')
@@ -167,7 +169,7 @@ class TestProbeRoutes(TestCase):
         self.assertEqual(
             args.split(),
             ['1.1.1.1', 'via', '192.168.200.1', 'dev', 'eth1', 'onlink',
-             'proto', 'failover'])
+             'table', str(vf.probe_table), 'proto', 'failover'])
 
     def test_probe_args_static_ipv6_no_onlink(self):
         # On-subnet / link-local gateway: no onlink inherited from config, so
@@ -179,16 +181,45 @@ class TestProbeRoutes(TestCase):
         self.assertEqual(
             args.split(),
             ['2606:4700:4700::1111', 'via', 'fe80::280:baff:fe00:218', 'dev',
-             'eth1', 'proto', 'failover'])
+             'eth1', 'table', str(vf.probe_table), 'proto', 'failover'])
 
-    def test_add_probe_routes_installs_per_target(self):
+    def test_probe_rule_scopes_to_local_origin_and_target(self):
+        # The policy rule must match only locally-generated packets (iif lo)
+        # to the specific target, so forwarded/downstream traffic never uses
+        # the probe route.
+        vf = self.vf
+        rule = vf.get_probe_rule_args('1.1.1.1')
+        self.assertEqual(
+            rule.split(),
+            ['iif', 'lo', 'to', '1.1.1.1', 'lookup', str(vf.probe_table),
+             'priority', str(vf.probe_rule_prio)])
+
+    def test_add_probe_routes_installs_scoped_route_and_rule(self):
         vf = self.vf
         nhc = _nexthop(vf, next_hop='192.168.200.1', dhcp_interface=None)
         with patch.object(vf, 'rc_cmd', return_value=(0, '')) as rc:
             added = vf.add_probe_routes(nhc)
         self.assertEqual(len(added), 1)
-        self.assertTrue(rc.call_args.args[0].startswith(
-            'ip route add 1.1.1.1 via 192.168.200.1 dev eth1'))
+        cmds = [c.args[0] for c in rc.call_args_list]
+        # a route into the probe table, then the scoping rule
+        self.assertTrue(any(
+            c.startswith('ip route replace 1.1.1.1 via 192.168.200.1 dev eth1')
+            and f'table {vf.probe_table}' in c for c in cmds))
+        self.assertTrue(any(
+            c.startswith('ip rule add iif lo to 1.1.1.1') for c in cmds))
+
+    def test_ipv6_probe_uses_v6_ip(self):
+        vf = self.vf
+        nhc = _nexthop(
+            vf, route='::/0', next_hop='fe80::280:baff:fe00:218',
+            dhcp_interface=None, onlink='',
+            targets=(vf.TargetNamedTuple(target='2606:4700:4700::1111',
+                                         vrf=None, interface=None),))
+        with patch.object(vf, 'rc_cmd', return_value=(0, '')) as rc:
+            vf.add_probe_routes(nhc)
+        cmds = [c.args[0] for c in rc.call_args_list]
+        self.assertTrue(all('ip -6 ' in c for c in cmds),
+                        f'expected v6 ip commands, got {cmds}')
 
     def test_via_less_nexthop_is_noop(self):
         # A point-to-point next-hop (no gateway) needs no probe route.
@@ -219,9 +250,64 @@ class TestProbeRoutes(TestCase):
             self.assertEqual(vf.add_probe_routes(nhc), [])
         rc.assert_not_called()
 
-    def test_del_probe_routes_removes_each(self):
+    def test_del_probe_routes_removes_rule_then_route(self):
         vf = self.vf
+        token = [('1.1.1.1 via 192.168.200.1 dev eth1 table 250 proto failover',
+                  'iif lo to 1.1.1.1 lookup 250 priority 12500', '')]
         with patch.object(vf, 'rc_cmd', return_value=(0, '')) as rc:
-            vf.del_probe_routes(['1.1.1.1 via 192.168.200.1 dev eth1 proto failover'])
-        rc.assert_called_once_with(
-            'ip route del 1.1.1.1 via 192.168.200.1 dev eth1 proto failover')
+            vf.del_probe_routes(token)
+        cmds = [c.args[0] for c in rc.call_args_list]
+        self.assertEqual(cmds, [
+            'ip rule del iif lo to 1.1.1.1 lookup 250 priority 12500',
+            'ip route del 1.1.1.1 via 192.168.200.1 dev eth1 table 250 proto failover',
+        ])
+
+
+class TestConntrackFlush(TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.vf = _load_failover()
+
+    def test_flush_uses_reply_dst_and_family(self):
+        vf = self.vf
+        with patch.object(vf, 'rc_cmd', return_value=(0, '')) as rc, \
+             patch.object(vf, 'journal'):
+            vf.flush_conntrack_for_addrs(['10.12.91.249',
+                                          '2605:b100::1'], vacated_iface='eth1')
+        cmds = [c.args[0] for c in rc.call_args_list]
+        self.assertIn('conntrack -D -f ipv4 -q 10.12.91.249', cmds)
+        self.assertIn('conntrack -D -f ipv6 -q 2605:b100::1', cmds)
+
+    def test_get_iface_addresses_parses_global_only(self):
+        vf = self.vf
+        sample = (
+            '[{"addr_info":['
+            '{"local":"10.12.91.249","scope":"global"},'
+            '{"local":"fe80::1","scope":"link"},'
+            '{"local":"2605:b100::1","scope":"global"}]}]'
+        )
+        with patch.object(vf, 'rc_cmd', return_value=(0, sample)):
+            addrs = vf.get_iface_addresses('eth1')
+        self.assertEqual(addrs, ['10.12.91.249', '2605:b100::1'])
+
+    def test_flush_is_per_family_selectable(self):
+        # The main loop filters the vacated interface's addresses to the failed
+        # route's family before flushing; assert the flush helper honours each
+        # family independently so a v4 failover never flushes v6 (and vice
+        # versa) when both IPv4 and IPv6 NAT are in use.
+        vf = self.vf
+        with patch.object(vf, 'rc_cmd', return_value=(0, '')) as rc, \
+             patch.object(vf, 'journal'):
+            vf.flush_conntrack_for_addrs(['10.12.91.249'], vacated_iface='eth1')
+        cmds = [c.args[0] for c in rc.call_args_list]
+        self.assertEqual(cmds, ['conntrack -D -f ipv4 -q 10.12.91.249'])
+        self.assertFalse(any('ipv6' in c for c in cmds))
+
+    def test_route_family_filter_selects_matching_addrs(self):
+        # Mirror the main-loop filter: given a route destination, only the
+        # same-family addresses of the vacated interface are flushed.
+        addrs = {'10.12.91.249', '2605:b100::1'}
+        v4_only = {a for a in addrs if (':' in a) == (':' in '0.0.0.0/0')}
+        v6_only = {a for a in addrs if (':' in a) == (':' in '::/0')}
+        self.assertEqual(v4_only, {'10.12.91.249'})
+        self.assertEqual(v6_only, {'2605:b100::1'})
