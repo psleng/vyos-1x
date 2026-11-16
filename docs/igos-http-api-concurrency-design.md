@@ -137,11 +137,17 @@ Splitting the proposed "offload to threadpool" fix by operation type:
   not "preserve" one. (Pre-existing characteristic: the single shared session
   also makes multi-client config editing coarse — the lock serializes it;
   parallelism neither causes nor fixes that.)
-- **Op-mode mutations and image ops need no config lock.** `reset_*`,
-  `clear_*`, `generate_*`, `restart_*`, `AddSystemImage`/`DeleteSystemImage` do
-  not stage changes in the shared session — REST `/reset`, `/generate` and
-  `/image` already run them lock-free in the threadpool. Putting them under the
-  config lock would let a multi-minute image download block every commit.
+- **Image ops need no config lock; other op-mode mutations do (in GraphQL).**
+  `AddSystemImage`/`DeleteSystemImage` and the Perle image mutations do not use
+  the shared session — REST `/image` already runs them lock-free — and putting
+  them under the config lock would let a multi-minute image download block
+  every commit. Other op-mode mutations (`reset_*`, `restart_*`, …) usually
+  don't touch the shared session either, but GraphQL runs op-mode scripts
+  **in-process**, where they can reach it through `SessionState()` — and the
+  Perle onboarding mutation does exactly that (sets and commits on the shared
+  session, `perle_igos_onboarding_mutation.py`). So GraphQL mutations take the
+  lock by default (§5.1 B). REST `/reset`/`/generate` run op-mode out of
+  process and stay lock-free.
 - **Read ops (GraphQL queries, REST `/show`) need no lock — except reads of the
   shared session's working config.** They are read-only by construction (§2),
   and REST `/show`/`/retrieve` already run concurrently with commits. A
@@ -300,30 +306,45 @@ which must stay under the GUI's nginx `proxy_read_timeout` of 300 s
 (`/webapi/`; the API location allows 600 s). Several GUI saves queued behind
 each other can still exceed that — see §5.2.
 
-**B. Offload GraphQL command execution off the event loop.** In
-`graphql/graphql/queries.py` / `mutations.py`, replace the inline
-`result = method()` with `result = await run_in_threadpool(method)` (factor the
-duplicated resolver body into one shared helper while doing so). Lock policy by
-resolver kind — the resolver factories already distinguish them:
-- **queries** (`make_*_query_resolver`) → **no lock**; concurrent, like REST
-  `/show`.
-- **config-session and composite/override mutations**
-  (`make_config_session_mutation_resolver`,
-  `make_composite_mutation_resolver`) → **the shared config lock from A**,
-  acquired inside the worker thread. Exception: `AddSystemImage` /
-  `DeleteSystemImage` are config-session mutations that do not touch the shared
-  session — exempt them (as REST `/image` is), or a multi-minute download blocks
-  all commits.
-- **op-mode mutations** (`make_gen_op_mutation_resolver`) → **no config lock**,
-  like REST `/reset` / `/generate`.
+**B. Offload GraphQL command execution off the event loop.** *(Implemented
+2026-11-16.)* In `graphql/graphql/queries.py` / `mutations.py`, the inline
+`result = method()` becomes `await run_in_threadpool(execute)`, where
+`execute` builds the session wrapper and runs the method in a worker thread.
+Lock policy:
+- **queries** → **no lock**; concurrent, like REST `/show`.
+- **mutations** → **the shared config lock from A by default**, acquired
+  inside the worker thread. Default-on because in-process op-mode mutations can
+  commit the shared session (Perle onboarding does, §4).
+- **exempt:** mutations whose name contains `SystemImage`
+  (`uses_config_lock()` in `mutations.py`) — `AddSystemImage`,
+  `DeleteSystemImage`, and the Perle `AddSystemImagePerleImageMutation`,
+  `RenameSystemImagePerleImageMutation`, `SetSystemImagePerleImageRenameMutation`
+  — long-running and not using the shared session.
+- `LoadConfigFile` (the only in-tree GraphQL commit, `session/session.py`)
+  waits for another session's commit like REST (`wait_for_system_commit`).
+- Trade-off accepted: quick op-mode mutations (restart/reset) can now wait
+  behind an in-flight API commit (~20–40 s).
+
+Found while doing this: the template override
+`session/override/remove_firewall_address_group_members.py` calls
+`super().configure()`, but `Session` has no `configure` method — the
+template-based config mutations (`session/templates/*.tmpl`) are already
+non-functional. Left as is.
+
+**B — test results** (reference unit, phase 1 code as baseline, 2026-11-16):
+
+| Scenario | Before (phase 1 only) | After |
+|---|---|---|
+| Slow GraphQL query (`ShowUpdateSystem`, update host unreachable, ~12 s) — concurrent `/info`, `/retrieve`, GraphQL `ShowVersion` | all **~12.4 s** (API frozen) | unaffected — `/info` polled every 0.5 s stayed **~10 ms** throughout (same as idle) |
+| GraphQL `SaveConfigFile` during a REST `/configure` commit | ran **during** the commit (done at 12.6 s; commit done at 38 s) and froze the loop ~10 s | **waits**, runs after the commit (done at 32.5 s; commit at 25.8 s) |
+| GraphQL `DeleteSystemImage` (exempt) during that commit | delayed by the loop freeze | not queued behind the lock |
+| GraphQL `ShowConfig` during that commit | 14.4 s | 1.3 s |
 
 A and B together fix the whole *class* of lock-ups — a slow `show`, a firmware
 check, or an image download no longer freezes the GUI — and close the
-GraphQL-vs-REST config race. A should land with or before B: B removes the
-accidental partial serialization of GraphQL mutations that loop-blocking
-provides today.
-*Prereq:* the narrowed reentrancy audit in §4 (process env, `vyos.*` globals,
-fixed temp paths).
+GraphQL-vs-REST config race.
+*Remaining:* the narrowed reentrancy audit in §4 (process env, `vyos.*`
+globals, fixed temp paths) — no problems seen in testing.
 
 **C. Cache the update check (remove internet from the request path).** Have the
 standalone daemon (`src/system/vyos-system-update-check.py`) **always** write a
@@ -341,11 +362,11 @@ worker) request path.
 existing `BackgroundOpManager` (`background.py`) — enqueue + poll — instead of
 blocking a request.
 
-**Small, while touching these files:**
-- `graphql/graphql/mutations.py:109` returns the key `'errore'` instead of
-  `'errors'`, so op-mode errors from mutations lose their error list.
-- `AuthToken` (token-auth mode) — run `generate_token` in the threadpool so PAM
-  cannot stall the loop.
+**Small, done with B:**
+- `mutations.py` returned the key `'errore'` instead of `'errors'`, so op-mode
+  errors from mutations lost their error list — fixed.
+- `AuthToken` (token-auth mode) — PAM and the user lookup now run in the
+  threadpool.
 
 ### 5.2 GUI (separate Perle Flask repo) — follow-ups
 
@@ -484,11 +505,13 @@ Paths under `src/services/api/` unless stated. Line numbers re-verified
   `os.environ` (pass an env copy to the commit instead).
 - **Cache format/location** for the update status (`/run/...` vs a persistent
   path), freshness window, and the "refresh now" UX (background op + poll).
-- **Out-of-tree GraphQL resolvers** — the Perle `vyos-custom-queries` package
-  (built from `flask-react-dev/perle-graphql`) installs additional
-  queries/mutations (e.g. onboarding). Confirm they go through the same resolver
-  factories so they inherit the threadpool offload and lock policy, and that
-  anything mutating config is registered as a mutation.
+- ~~**Out-of-tree GraphQL resolvers**~~ — **checked 2026-11-16:** the Perle
+  `vyos-custom-queries` package installs op-mode scripts, so its operations go
+  through the standard op-mode resolver factories and inherit B. Perle
+  follow-up: `perle_igos_onboarding_mutation.py` commits the shared session
+  directly — it is now serialized by the config lock, but should also call
+  `api.config_lock.wait_for_system_commit()` before `session.commit()` so it
+  waits for a CLI commit like the in-tree paths.
 - **GUI worker count / gevent cooperativeness** — Perle-repo decision.
 - ~~**API commit vs. a CLI commit in progress**~~ — **decided 2026-11-16:**
   bounded wait (120 s) then a clear "commit in progress; try again later" error
