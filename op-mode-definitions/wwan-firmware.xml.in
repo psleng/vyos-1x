@@ -46,7 +46,7 @@
     <children>
       <node name="firmware">
         <properties>
-          <help>Update system firmware</help>
+          <help>Update boot or modem firmware</help>
         </properties>
         <children>
           <tagNode name="wwan">
@@ -64,12 +64,32 @@
                 </properties>
                 <command>sudo ${vyos_op_scripts_dir}/wwan_firmware.py update_archive --interface="$4" --archive="$6"</command>
                 <children>
+                  <node name="force">
+                    <properties><help>Reinstall even when the same firmware version is running</help></properties>
+                    <command>sudo ${vyos_op_scripts_dir}/wwan_firmware.py update_archive --interface="$4" --archive="$6" --force</command>
+                    <children>
+                      <leafNode name="now">
+                        <properties><help>Reinstall without confirmation</help></properties>
+                        <command>sudo ${vyos_op_scripts_dir}/wwan_firmware.py update_archive --interface="$4" --archive="$6" --force --no-prompt</command>
+                      </leafNode>
+                    </children>
+                  </node>
                   <node name="force-unsigned">
                     <properties>
                       <help>Install local unsigned archive (explicitly enabled development images only)</help>
                     </properties>
                     <command>sudo ${vyos_op_scripts_dir}/wwan_firmware.py update_archive --interface="$4" --archive="$6" --force-unsigned</command>
                     <children>
+                      <node name="force">
+                        <properties><help>Reinstall even when the same firmware version is running</help></properties>
+                        <command>sudo ${vyos_op_scripts_dir}/wwan_firmware.py update_archive --interface="$4" --archive="$6" --force-unsigned --force</command>
+                        <children>
+                          <leafNode name="now">
+                            <properties><help>Reinstall without confirmation</help></properties>
+                            <command>sudo ${vyos_op_scripts_dir}/wwan_firmware.py update_archive --interface="$4" --archive="$6" --force-unsigned --force --no-prompt</command>
+                          </leafNode>
+                        </children>
+                      </node>
                       <leafNode name="now">
                         <properties><help>Install without confirmation</help></properties>
                         <command>sudo ${vyos_op_scripts_dir}/wwan_firmware.py update_archive --interface="$4" --archive="$6" --force-unsigned --no-prompt</command>
@@ -94,6 +114,16 @@
                 </properties>
                 <command>sudo ${vyos_op_scripts_dir}/wwan_firmware.py set_firmware --interface="$4" --version="$5"</command>
                 <children>
+                  <node name="force">
+                    <properties><help>Reinstall even when the same firmware version is running</help></properties>
+                    <command>sudo ${vyos_op_scripts_dir}/wwan_firmware.py set_firmware --interface="$4" --version="$5" --force</command>
+                    <children>
+                      <leafNode name="now">
+                        <properties><help>Reinstall without confirmation</help></properties>
+                        <command>sudo ${vyos_op_scripts_dir}/wwan_firmware.py set_firmware --interface="$4" --version="$5" --force --no-prompt</command>
+                      </leafNode>
+                    </children>
+                  </node>
                   <leafNode name="now">
                     <properties>
                       <help>Update without confirmation</help>

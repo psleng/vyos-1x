@@ -677,7 +677,7 @@ def delete_firmware(interface: str, version: str, no_prompt: bool = False) -> No
         raise vyos.opmode.DataUnavailable(f'Unable to delete firmware cache: {error}') from error
 
 
-def set_firmware(version: str, interface: str, no_prompt: bool = False) -> None:
+def set_firmware(version: str, interface: str, no_prompt: bool = False, force: bool = False) -> None:
     """Download one cataloged archive, validate, flash, and remove transient files."""
     try:
         with _firmware_update_lock():
@@ -688,9 +688,11 @@ def set_firmware(version: str, interface: str, no_prompt: bool = False) -> None:
                 raise vyos.opmode.IncorrectValue(f'Firmware {version} is not available for {interface}')
             release = {**compatible['releases'][version], 'manufacturer': compatible['manufacturer']}
             running = _running_version(compatible)
-            if running == version:
+            if running == version and not force:
                 print(f'Firmware {version} is already installed.')
                 return
+            if running == version and force:
+                print(f"Reinstalling firmware {version} (--force).")
             if running is None:
                 print('Running firmware is not in the catalog; version ordering is unknown.')
             elif version_key(version) < version_key(running):
@@ -711,7 +713,7 @@ def set_firmware(version: str, interface: str, no_prompt: bool = False) -> None:
         raise vyos.opmode.DataUnavailable(f'Unable to update WWAN firmware: {error}') from error
 
 
-def update_archive(interface: str, archive: str, no_prompt: bool = False, force_unsigned: bool = False) -> None:
+def update_archive(interface: str, archive: str, no_prompt: bool = False, force_unsigned: bool = False, force: bool = False) -> None:
     """Authenticate a standalone archive before extraction and compatibility checks."""
     version = get_version_data()
     if force_unsigned and not (
@@ -725,7 +727,7 @@ def update_archive(interface: str, archive: str, no_prompt: bool = False, force_
             modem = _get_modem_identity(interface)
             with prepare_standalone(FIRMWARE_ROOT, modem, archive, force_unsigned=force_unsigned) as firmware:
                 manifest = firmware['manifest']
-                if _running_version({'modem': modem, 'releases': {'archive': manifest}}) is not None:
+                if not force and _running_version({'modem': modem, 'releases': {'archive': manifest}}) is not None:
                     print(f"Firmware {manifest['telit_version']} is already installed.")
                     return
                 print('Standalone archive: release ordering is unknown without a catalog.')
