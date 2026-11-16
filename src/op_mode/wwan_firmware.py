@@ -239,7 +239,7 @@ def _get_uxfp_diagnostic_port(firmware_path: Path, usb_device: Path) -> Path:
 
 
 def _get_tfl_diagnostic_port(firmware_path: Path, usb_device: Path) -> Path:
-    """Validate TFL compatibility and return the diagnostic port."""
+    """Validate the TFL package against an explicitly selected modem port."""
     modem_ports = _get_modem_serial_ports(usb_device)
     if not modem_ports:
         raise vyos.opmode.DataUnavailable(f'No serial ports were found below {usb_device}')
@@ -248,12 +248,16 @@ def _get_tfl_diagnostic_port(firmware_path: Path, usb_device: Path) -> Path:
 
     diagnostic_port = max(modem_ports, key=lambda port: int(re.search(r'\d+$', port.name).group()))
 
-    print('Validating TFL firmware compatibility and modem ports...')
-    return_code, output = rc_cmd(['tfl', str(firmware_path), '--port', str(diagnostic_port), '--dry-run', '--debug'])
+    print('Validating TFL firmware package and modem ports...')
+    # TFL requires --force whenever --port is explicit, including dry runs.
+    # Publisher trust and modem model/revision were checked before this point.
+    return_code, output = rc_cmd([
+        'tfl', str(firmware_path), '--port', str(diagnostic_port), '--force', '--dry-run', '--debug'
+    ])
     if return_code:
         raise vyos.opmode.IncorrectValue(output or 'TFL firmware compatibility validation failed')
 
-    print('TFL firmware compatibility validation succeeded.')
+    print('TFL firmware package validation succeeded.')
     return diagnostic_port
 
 
