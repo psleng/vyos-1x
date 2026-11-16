@@ -27,6 +27,7 @@ from vyos.utils.dict import dict_search
 from vyos.utils.process import is_systemd_service_running
 from vyos import ConfigError
 from vyos import airbag
+from vyos import fips
 airbag.enable()
 
 def get_config(config=None):
@@ -43,6 +44,15 @@ def verify(config_dict):
 
     rip = config_dict['rip']
     rip['policy'] = config_dict['policy']
+
+    # FIPS 140-3: RIP interface authentication is MD5 or plaintext only (no
+    # HMAC-SHA option), native FRR crypto with no OpenSSL backstop.
+    if fips.fips_enabled():
+        fips.reject_present_keys(
+            rip, ('md5', 'plaintext_password'),
+            'RIP MD5/plaintext authentication',
+            'No FIPS-approved (HMAC-SHA) RIP authentication is available. '
+            'Remove it, or disable FIPS.')
 
     verify_common_route_maps(rip)
 

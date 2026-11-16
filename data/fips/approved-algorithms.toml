@@ -1,0 +1,446 @@
+# igOS FIPS 140-3 approved-algorithm policy.
+#
+# Single, auditable allow-list of the crypto tokens permitted when the system is
+# placed into FIPS mode (`set system option fips`). Each [leaf."<cli path>"]
+# section lists the approved subset of the matching CLI <completionHelp> tokens;
+# `remove_node` names whole features removed under FIPS.
+#
+# Each leaf has two fields with DIFFERENT jobs:
+#
+#   approved = [...]   The VALIDATION allow-list: every value the operator is
+#                      permitted to set. Membership-only (order does not matter),
+#                      and permissive -- it includes every approvable option.
+#                      Consumed by reject_unapproved() -> verify() fails closed
+#                      on an explicitly-set value not in this set.
+#
+#   default  = [...]   What is EMITTED when the operator leaves the leaf unset,
+#                      to override a non-approved downstream compiled default
+#                      (e.g. OpenSSH curve25519/chacha20, OpenVPN chacha20/SHA1).
+#                      It is an ORDERED preference list (strongest/fastest first)
+#                      and is always a subset of `approved` (enforced by a test).
+#                      Consumed by apply_fips_defaults() (fill-if-absent). A
+#                      single-value leaf (e.g. OpenVPN `hash`) takes default[0].
+#
+# A leaf has NO `default` when "unset" cannot fall through to a non-approved
+# value -- i.e. the operator must specify it (IPsec proposals) or there is simply
+# no non-approved fallback (OpenVPN legacy `cipher`, `data-ciphers-fallback`). In
+# those cases only the `approved` reject applies.
+#
+# Consumed by python/vyos/fips.py:
+#   * reject_unapproved()  -> conf-mode verify() refuses explicitly-set
+#                             non-approved values (fail-closed at commit).
+#   * approved() / default() -> the approved set / emitted default for a leaf.
+#   * apply_fips_defaults()  -> emit `default` for leaves left unset.
+#
+# This file is the compliance artifact: one place stating the approved set per
+# subsystem. Keep tokens in sync with the grammar's <completionHelp> lists.
+
+# Whole-feature removals under FIPS (no approvable configuration). Consumed by
+# the WireGuard/PPTP/PPPoE-client/SSTP-client/system-email fail-closed verify()
+# rejects. Declared first so it is a top-level key, not absorbed into a [leaf.*] table.
+remove_node = [
+    "interfaces wireguard",
+    "vpn pptp",
+    "interfaces pppoe",
+    "interfaces sstpc",
+    "system email",
+]
+
+# Features/config paths with NO approvable form under FIPS. Enabling FIPS is
+# refused (interactively) while any of these is configured, and each owning
+# conf-mode script's verify() refuses the feature while FIPS is set (fail-closed,
+# including at boot). A "*" path element is a tagNode wildcard (any instance).
+#
+#   WireGuard / PPTP: non-approved by construction (Curve25519/ChaCha20; MPPE/RC4).
+#   RADIUS: classic RADIUS authenticates with MD5 and there is no RadSec here.
+#   TACACS+: MD5, no TLS variant. SAML remains the approved admin login (§4.1).
+#   NTS: Network Time Security needs AES-SIV, which is absent from the FIPS
+#        provider (plain NTP has no crypto and keeps working).
+[[reject_under_fips]]
+label = "WireGuard"
+path = ["interfaces", "wireguard"]
+
+[[reject_under_fips]]
+label = "PPTP VPN"
+path = ["vpn", "pptp"]
+
+[[reject_under_fips]]
+label = "RADIUS (system login)"
+path = ["system", "login", "radius"]
+
+[[reject_under_fips]]
+label = "TACACS+ (system login)"
+path = ["system", "login", "tacacs"]
+
+[[reject_under_fips]]
+# PPP subscriber auth (PAP/CHAP/MS-CHAP/MS-CHAPv2) has no FIPS-approved protocol
+# and there is no EAP option, so the whole server is non-approvable (this also
+# subsumes the RADIUS-under-pppoe case).
+label = "PPPoE server (no FIPS-approved PPP authentication)"
+path = ["service", "pppoe-server"]
+
+[[reject_under_fips]]
+label = "RADIUS (IPoE server)"
+path = ["service", "ipoe-server", "authentication", "radius"]
+
+[[reject_under_fips]]
+label = "L2TP remote-access (no FIPS-approved PPP authentication)"
+path = ["vpn", "l2tp", "remote-access"]
+
+[[reject_under_fips]]
+label = "SSTP (no FIPS-approved PPP authentication)"
+path = ["vpn", "sstp"]
+
+[[reject_under_fips]]
+# PPP clients: same non-approved PPP auth as the servers, and real access
+# concentrators / SSTP servers require it, so an auth-less client would never
+# come up. Removed entirely rather than configurable into a failing state.
+label = "PPPoE client (no FIPS-approved PPP authentication)"
+path = ["interfaces", "pppoe"]
+
+[[reject_under_fips]]
+label = "SSTP client (no FIPS-approved PPP authentication)"
+path = ["interfaces", "sstpc"]
+
+[[reject_under_fips]]
+# msmtp is built against GnuTLS (verified with ldd on target), not the
+# validated OpenSSL FIPS module, so SMTP TLS/auth is out of boundary.
+label = "System email (msmtp uses GnuTLS, outside the FIPS module)"
+path = ["system", "email"]
+
+[[reject_under_fips]]
+label = "RADIUS (OpenConnect)"
+path = ["vpn", "openconnect", "authentication", "radius"]
+
+[[reject_under_fips]]
+label = "RADIUS (IPsec EAP)"
+path = ["vpn", "ipsec", "remote-access", "radius"]
+
+[[reject_under_fips]]
+label = "RADIUS (wireless WPA-Enterprise)"
+path = ["interfaces", "wireless", "*", "security", "wpa", "radius"]
+
+[[reject_under_fips]]
+label = "WEP (wireless)"
+path = ["interfaces", "wireless", "*", "security", "wep"]
+
+[[reject_under_fips]]
+label = "NTS (Network Time Security)"
+path = ["service", "ntp", "server", "*", "nts"]
+
+# ---------------------------------------------------------------------------
+# SSH (OpenSSH native crypto -- not OpenSSL-backed, so defaults are enforced in
+# the sshd_config.j2 FIPS branch and explicit values are rejected here).
+# ---------------------------------------------------------------------------
+[leaf."service ssh cipher"]
+approved = [
+    "aes128-ctr", "aes192-ctr", "aes256-ctr",
+    "aes128-gcm@openssh.com", "aes256-gcm@openssh.com",
+]
+default = [
+    "aes256-gcm@openssh.com", "aes128-gcm@openssh.com",
+    "aes256-ctr", "aes192-ctr", "aes128-ctr",
+]
+
+[leaf."service ssh mac"]
+approved = [
+    "hmac-sha2-256", "hmac-sha2-512",
+    "hmac-sha2-256-etm@openssh.com", "hmac-sha2-512-etm@openssh.com",
+]
+default = [
+    "hmac-sha2-512-etm@openssh.com", "hmac-sha2-256-etm@openssh.com",
+    "hmac-sha2-512", "hmac-sha2-256",
+]
+
+[leaf."service ssh key-exchange"]
+approved = [
+    "ecdh-sha2-nistp256", "ecdh-sha2-nistp384", "ecdh-sha2-nistp521",
+    "diffie-hellman-group14-sha256", "diffie-hellman-group16-sha512",
+    "diffie-hellman-group18-sha512",
+]
+default = [
+    "ecdh-sha2-nistp521", "ecdh-sha2-nistp384", "ecdh-sha2-nistp256",
+    "diffie-hellman-group16-sha512", "diffie-hellman-group18-sha512",
+    "diffie-hellman-group14-sha256",
+]
+
+[leaf."service ssh hostkey-algorithm"]
+approved = [
+    "rsa-sha2-256", "rsa-sha2-512",
+    "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521",
+]
+default = [
+    "rsa-sha2-512", "rsa-sha2-256",
+    "ecdsa-sha2-nistp521", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp256",
+]
+
+[leaf."service ssh pubkey-accepted-algorithm"]
+approved = [
+    "rsa-sha2-256", "rsa-sha2-512",
+    "rsa-sha2-256-cert-v01@openssh.com", "rsa-sha2-512-cert-v01@openssh.com",
+    "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521",
+    "ecdsa-sha2-nistp256-cert-v01@openssh.com",
+    "ecdsa-sha2-nistp384-cert-v01@openssh.com",
+    "ecdsa-sha2-nistp521-cert-v01@openssh.com",
+]
+default = [
+    "rsa-sha2-512", "rsa-sha2-256",
+    "ecdsa-sha2-nistp521", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp256",
+]
+
+# ---------------------------------------------------------------------------
+# IPsec (strongSwan). IKE and ESP proposals share the same encryption/hash
+# token vocabulary; dh-group is numeric. Approved = AES (CBC/CTR/GCM/CCM-128),
+# SHA-2 / AES-CMAC / AES-XCBC integrity, and MODP>=2048 / ECP>=256 groups.
+# ---------------------------------------------------------------------------
+[leaf."vpn ipsec ike-group proposal encryption"]
+approved = [
+    "aes128", "aes192", "aes256",
+    "aes128ctr", "aes192ctr", "aes256ctr",
+    "aes128gcm128", "aes192gcm128", "aes256gcm128",
+    "aes128ccm128", "aes192ccm128", "aes256ccm128",
+]
+
+[leaf."vpn ipsec ike-group proposal hash"]
+approved = [
+    "sha256", "sha384", "sha512", "aesxcbc", "aescmac",
+]
+
+[leaf."vpn ipsec ike-group proposal dh-group"]
+approved = ["14", "15", "16", "17", "18", "19", "20", "21"]
+
+[leaf."vpn ipsec esp-group proposal encryption"]
+approved = [
+    "aes128", "aes192", "aes256",
+    "aes128ctr", "aes192ctr", "aes256ctr",
+    "aes128gcm128", "aes192gcm128", "aes256gcm128",
+    "aes128ccm128", "aes192ccm128", "aes256ccm128",
+]
+
+[leaf."vpn ipsec esp-group proposal hash"]
+approved = [
+    "sha256", "sha384", "sha512", "aesxcbc", "aescmac",
+]
+
+[leaf."vpn ipsec esp-group pfs"]
+approved = [
+    "enable", "disable",
+    "dh-group14", "dh-group15", "dh-group16", "dh-group17", "dh-group18",
+    "dh-group19", "dh-group20", "dh-group21",
+]
+
+# ---------------------------------------------------------------------------
+# OpenVPN (OpenSSL-backed). Under FIPS the config renders `providers fips base`
+# so the validated module refuses non-approved algorithms at runtime; these
+# sets additionally reject explicitly-set non-approved values at commit, and the
+# data-ciphers `default` is emitted when the operator left it unset so a FIPS
+# tunnel negotiates cleanly (OpenVPN's compiled default now offers chacha20).
+# ---------------------------------------------------------------------------
+[leaf."interfaces openvpn encryption cipher"]
+approved = ["aes128", "aes192", "aes256", "aes128gcm", "aes192gcm", "aes256gcm"]
+
+[leaf."interfaces openvpn encryption data-ciphers"]
+approved = ["aes128", "aes192", "aes256", "aes128gcm", "aes192gcm", "aes256gcm"]
+default = ["aes256gcm", "aes128gcm", "aes256", "aes128"]
+
+[leaf."interfaces openvpn encryption data-ciphers-fallback"]
+approved = ["aes128", "aes192", "aes256", "aes128gcm", "aes192gcm", "aes256gcm"]
+
+[leaf."interfaces openvpn hash"]
+approved = ["sha256", "sha384", "sha512"]
+default = ["sha256"]
+
+# ---------------------------------------------------------------------------
+# HTTPS / GUI (nginx TLS, OpenSSL-backed). Operator-selectable cipher suites
+# (feature parity with SSH); verify() rejects non-approved under FIPS and the
+# approved default is emitted when unset. TLS 1.2 (ssl_ciphers) and TLS 1.3
+# (ssl_conf_command Ciphersuites) are separate leaves. Approved = AES-GCM /
+# AES-CBC-SHA2 (no CHACHA20, no SHA1, no DSS); TLS 1.3 = AES-GCM/CCM only.
+# ---------------------------------------------------------------------------
+[leaf."service https cipher-suite"]
+approved = [
+    "ECDHE-ECDSA-AES256-GCM-SHA384", "ECDHE-RSA-AES256-GCM-SHA384",
+    "ECDHE-ECDSA-AES128-GCM-SHA256", "ECDHE-RSA-AES128-GCM-SHA256",
+    "ECDHE-ECDSA-AES256-SHA384", "ECDHE-RSA-AES256-SHA384",
+    "ECDHE-ECDSA-AES128-SHA256", "ECDHE-RSA-AES128-SHA256",
+    "DHE-RSA-AES256-GCM-SHA384", "DHE-RSA-AES128-GCM-SHA256",
+]
+default = [
+    "ECDHE-ECDSA-AES256-GCM-SHA384", "ECDHE-RSA-AES256-GCM-SHA384",
+    "ECDHE-ECDSA-AES128-GCM-SHA256", "ECDHE-RSA-AES128-GCM-SHA256",
+    "ECDHE-ECDSA-AES256-SHA384", "ECDHE-RSA-AES256-SHA384",
+    "ECDHE-ECDSA-AES128-SHA256", "ECDHE-RSA-AES128-SHA256",
+]
+
+[leaf."service https cipher-suite-tls13"]
+approved = [
+    "TLS_AES_256_GCM_SHA384", "TLS_AES_128_GCM_SHA256", "TLS_AES_128_CCM_SHA256",
+]
+default = ["TLS_AES_256_GCM_SHA384", "TLS_AES_128_GCM_SHA256"]
+
+
+# ---------------------------------------------------------------------------
+# Wireless / WiFi (hostapd). WEP and WPA-Enterprise RADIUS are whole-feature
+# rejects (reject_under_fips, above). Here the WPA pairwise/group cipher and the
+# WPA mode are restricted: AES-based CCMP/GCMP only (no TKIP), and WPA2/WPA3 only
+# (no WPA1, no wpa+wpa2 mix). The grammar default is `wpa+wpa2`, which enables
+# WPA1/TKIP, so the approved `wpa2` default is emitted when the operator leaves
+# `mode` unset.
+# ---------------------------------------------------------------------------
+[leaf."interfaces wireless security wpa cipher"]
+approved = ["GCMP-256", "GCMP", "CCMP-256", "CCMP"]
+
+[leaf."interfaces wireless security wpa group-cipher"]
+approved = ["GCMP-256", "GCMP", "CCMP-256", "CCMP"]
+
+[leaf."interfaces wireless security wpa mode"]
+approved = ["wpa2", "wpa3"]
+default = ["wpa2"]
+
+# ---------------------------------------------------------------------------
+# SNMPv3 (net-snmp). Authentication protocol must be SHA-2 (reject MD5 and the
+# SHA-1 `sha`); privacy protocol must be AES (reject DES). The grammar defaults
+# are `md5`/`des`, both non-approved, so approved defaults are emitted when the
+# operator configures a v3 user/trap but leaves the protocol unset. The privacy
+# default is AES-128 so it never out-strengths an explicitly chosen approved
+# auth protocol (RFC 3414 localizes the privacy key with the auth hash).
+# ---------------------------------------------------------------------------
+[leaf."service snmp v3 user auth type"]
+approved = ["sha224", "sha256", "sha384", "sha512"]
+default = ["sha256"]
+
+[leaf."service snmp v3 user privacy type"]
+approved = ["aes", "aes192", "aes256"]
+default = ["aes"]
+
+# ---------------------------------------------------------------------------
+# haproxy (OpenSSL-backed). The TLS bind cipher list must not offer CHACHA20;
+# approved = the AES-GCM suites only. The grammar default includes the two
+# chacha20-poly1305 suites, so the approved default is emitted when the operator
+# leaves `ssl-bind-ciphers` unset.
+# ---------------------------------------------------------------------------
+[leaf."load-balancing haproxy global-parameters ssl-bind-ciphers"]
+approved = [
+    "ecdhe-ecdsa-aes128-gcm-sha256", "ecdhe-rsa-aes128-gcm-sha256",
+    "ecdhe-ecdsa-aes256-gcm-sha384", "ecdhe-rsa-aes256-gcm-sha384",
+    "dhe-rsa-aes128-gcm-sha256", "dhe-rsa-aes256-gcm-sha384",
+]
+default = [
+    "ecdhe-ecdsa-aes256-gcm-sha384", "ecdhe-rsa-aes256-gcm-sha384",
+    "ecdhe-ecdsa-aes128-gcm-sha256", "ecdhe-rsa-aes128-gcm-sha256",
+    "dhe-rsa-aes256-gcm-sha384", "dhe-rsa-aes128-gcm-sha256",
+]
+
+# ---------------------------------------------------------------------------
+# stunnel (OpenSSL-backed, auto-detects fips=yes so TLS 1.2 `ciphers` = FIPS).
+# EMIT-ONLY: these have no CLI leaf; get_config() emits `default` per service
+# under FIPS. stunnel hard-codes its own `curves` (X25519:P-256:X448:...) and
+# TLS 1.3 `ciphersuites` (incl. CHACHA20), overriding OpenSSL's defaults.
+# Verified on target: the FIPS provider drops CHACHA20, but X25519/X448 key
+# exchange is still offered (client) and accepted (server) -- not approved for
+# key establishment (SP 800-56A: NIST P-curves only). TLS 1.2 `ciphers` is left
+# at stunnel's FIPS default so PSK services keep working.
+# ---------------------------------------------------------------------------
+[leaf."service stunnel curves"]
+approved = ["P-256", "P-384", "P-521"]
+default = ["P-256", "P-384", "P-521"]
+
+[leaf."service stunnel ciphersuites"]
+approved = ["TLS_AES_256_GCM_SHA384", "TLS_AES_128_GCM_SHA256"]
+default = ["TLS_AES_256_GCM_SHA384", "TLS_AES_128_GCM_SHA256"]
+
+[leaf."service stunnel ssl-version-min"]
+approved = ["TLSv1.2", "TLSv1.3"]
+default = ["TLSv1.2"]
+
+# ---------------------------------------------------------------------------
+# System-wide OpenSSL TLS defaults (openssl.cnf ssl_conf -> system_default),
+# rendered by system_option.py under FIPS. EMIT-ONLY (no CLI leaf). Applies to
+# every OpenSSL application that does not set its own groups/versions (nginx,
+# syslog-TLS, email, OpenVPN TLS, serial IOLAN daemons, ...). The FIPS provider
+# still implements X25519/X448 (not approved for key establishment), and
+# OpenSSL's default group list leads with X25519 -- verified on target that
+# nginx negotiated X25519 before this. Mirrors RHEL's FIPS crypto-policy:
+# NIST P-curves + RFC 7919 FFDHE (SP 800-56A safe-prime groups).
+# ---------------------------------------------------------------------------
+[leaf."system openssl tls groups"]
+approved = ["P-256", "P-384", "P-521", "ffdhe2048", "ffdhe3072", "ffdhe4096",
+            "ffdhe6144", "ffdhe8192"]
+default = ["P-256", "P-384", "P-521", "ffdhe2048", "ffdhe3072", "ffdhe4096"]
+
+[leaf."system openssl tls min-protocol"]
+approved = ["TLSv1.2", "TLSv1.3"]
+default = ["TLSv1.2"]
+
+[leaf."system openssl dtls min-protocol"]
+approved = ["DTLSv1.2"]
+default = ["DTLSv1.2"]
+
+# TLS 1.2 cipher list for every OpenSSL app using DEFAULT (TLS 1.3 suites are
+# governed separately and already AES-GCM-only under the FIPS provider). The FIPS
+# provider does NOT strip static-RSA key transport (PKCS#1 v1.5 -- disallowed by
+# SP 800-131A Rev2 after 2023, and no forward secrecy), HMAC-SHA1 CBC suites,
+# DSS, anonymous (aNULL) or CCM8 suites -- verified on target that OpenSSL
+# DEFAULT (and so rsyslog x509 modes) offered static-RSA/SHA1 suites. Keep only
+# forward-secret (EC)DHE with AES-GCM/CCM/CBC-SHA2 (mirrors RHEL FIPS policy).
+[leaf."system openssl tls cipher-string"]
+approved = ["@SECLEVEL=2:kECDHE:kDHE:!aNULL:!eNULL:!kRSA:!aDSS:!SHA1:!AESCCM8:!CAMELLIA:!ARIA:!SEED"]
+default = ["@SECLEVEL=2:kECDHE:kDHE:!aNULL:!eNULL:!kRSA:!aDSS:!SHA1:!AESCCM8:!CAMELLIA:!ARIA:!SEED"]
+
+# ---------------------------------------------------------------------------
+# Serial console-server TLS -- Perle IOLAN daemons (iol_direct/iol_rawd/...).
+# These dynamically link the system OpenSSL 3.x and do NOT override providers,
+# so under FIPS they route through the validated FIPS provider (verified on
+# target: libssl.so.3 + no OPENSSL_CONF/provider overrides). The provider is a
+# runtime backstop; these leaves are the config-layer "clean, not broken" layer.
+# Single-value leaves: `approved` gates explicit values, `default`[0] is emitted
+# when the operator leaves the field at its non-approved grammar default
+# (version=any, min/max-key-size=40, key-exchange=any, hmac=any).
+# ---------------------------------------------------------------------------
+[leaf."service serial global-parameters tls template version"]
+approved = ["tlsv1.2", "tlsv1.2b", "tlsv1.3"]
+default = ["tlsv1.2"]
+
+[leaf."service serial global-parameters tls template cipher-options encryption"]
+approved = ["aes", "aes-gcm"]
+default = ["aes-gcm"]
+
+[leaf."service serial global-parameters tls template cipher-options min-key-size"]
+# 168 = 3DES (disallowed since 2023); 40/56/64 = export/DES. AES-128 floor.
+approved = ["128", "256"]
+default = ["128"]
+
+[leaf."service serial global-parameters tls template cipher-options max-key-size"]
+approved = ["128", "256"]
+default = ["256"]
+
+[leaf."service serial global-parameters tls template cipher-options key-exchange"]
+# reject adh (anonymous -- no auth) and edh-dss (DSA, disallowed); 'any' allows them.
+approved = ["rsa", "edh-rsa", "ecdh-ecdsa"]
+default = ["ecdh-ecdsa"]
+
+[leaf."service serial global-parameters tls template cipher-options hmac"]
+# md5 disallowed; sha1 approved-as-HMAC but discouraged -> require SHA-2.
+approved = ["sha256", "sha384"]
+default = ["sha256"]
+
+# ---------------------------------------------------------------------------
+# DHCP dynamic-DNS-update TSIG key (kea-dhcp-ddns, OpenSSL-backed on target:
+# libkea-cryptolink -> libcrypto.so.3, so the FIPS provider is a runtime
+# backstop). HMAC-MD5 is disallowed; HMAC-SHA1 remains FIPS-approved, SHA-2
+# preferred. The `algorithm` leaf is mandatory (no grammar default), so this is
+# a reject-only gate with no default to emit.
+# ---------------------------------------------------------------------------
+[leaf."service dhcp-server dynamic-dns-update tsig-key algorithm"]
+approved = ["sha1", "sha224", "sha256", "sha384", "sha512"]
+
+# ---------------------------------------------------------------------------
+# TLS minimum version -- shared include tls-version-min.xml.i (openvpn tls,
+# openconnect). Keyed by the include name since the approved floor is identical
+# for every consumer. TLS 1.0/1.1 are below the FIPS floor. For OpenSSL-backed
+# OpenVPN the provider blocks <1.2 at runtime anyway; openconnect is GnuTLS
+# (no provider backstop) but its grammar already defaults to 1.2 -- so this is a
+# reject-only gate on an explicit 1.0/1.1.
+# ---------------------------------------------------------------------------
+[leaf."tls-version-min"]
+approved = ["1.2", "1.3"]

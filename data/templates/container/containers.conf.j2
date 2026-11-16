@@ -527,6 +527,11 @@ network_backend = "netavark"
 # Whether to pull new image before running a container
 #
 #pull_policy = "missing"
+{% if fips is vyos_defined %}
+# FIPS 140-3: never fetch from a registry (podman's Go TLS is outside the
+# validated module); images are loaded from local archives only.
+pull_policy = "never"
+{% endif %}
 
 # Indicates whether the application should be running in remote mode. This flag modifies the
 # --remote option on container engines. Setting the flag to true will default

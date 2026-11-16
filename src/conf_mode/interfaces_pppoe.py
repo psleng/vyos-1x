@@ -32,6 +32,7 @@ from vyos.utils.process import call
 from vyos.utils.process import is_systemd_service_running
 from vyos import ConfigError
 from vyos import airbag
+from vyos import fips
 airbag.enable()
 
 def get_config(config=None):
@@ -72,12 +73,21 @@ def get_config(config=None):
         if 'mru' not in pppoe:
             pppoe['mru'] = pppoe['mtu']
 
+    pppoe['_fips'] = fips.fips_enabled(conf)
+
     return pppoe
 
 def verify(pppoe):
     if 'deleted' in pppoe:
         # bail out early
         return None
+
+    # FIPS 140-3: PPP authentication (PAP cleartext / CHAP MD5 / MS-CHAP MD4+DES)
+    # has no approved form, and real PPPoE access concentrators require it, so an
+    # auth-less client would only configure into a link that never comes up.
+    # Whole-feature reject, like the PPP servers / WireGuard / PPTP.
+    if pppoe.get('_fips'):
+        fips.reject_feature('PPPoE client (no FIPS-approved PPP authentication)')
 
     verify_source_interface(pppoe)
     verify_authentication(pppoe)

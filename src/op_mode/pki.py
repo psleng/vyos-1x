@@ -40,6 +40,7 @@ from vyos.pki import create_certificate_request
 from vyos.pki import create_certificate_revocation_list
 from vyos.pki import create_private_key
 from vyos.pki import create_dh_parameters
+from vyos.pki import FFDHE_SIZES
 from vyos.pki import load_certificate
 from vyos.pki import load_certificate_request
 from vyos.pki import load_private_key
@@ -386,10 +387,18 @@ def write_file(filename, contents):
 
 # Generation functions
 def generate_private_key():
+    from vyos.fips import fips_enabled
+
+    fips = fips_enabled()
+
+    # FIPS input gate (igos-fips-140-3-design.md): DSA is non-approved; RSA must
+    # be >= 2048; EC is restricted to P-256/384/521. Approved-only choices are
+    # offered so a non-approved key cannot be requested under FIPS.
+    key_types = ['rsa', 'ec'] if fips else ['rsa', 'dsa', 'ec']
     key_type = ask_input(
-        'Enter private key type: [rsa, dsa, ec]',
+        f'Enter private key type: [{", ".join(key_types)}]',
         default='rsa',
-        valid_responses=['rsa', 'dsa', 'ec'],
+        valid_responses=key_types,
     )
 
     size_valid = []
@@ -397,10 +406,10 @@ def generate_private_key():
 
     if key_type in ['rsa', 'dsa']:
         size_default = 2048
-        size_valid = [512, 1024, 2048, 4096]
+        size_valid = [2048, 4096] if fips else [512, 1024, 2048, 4096]
     elif key_type == 'ec':
         size_default = 256
-        size_valid = [224, 256, 384, 521]
+        size_valid = [256, 384, 521] if fips else [224, 256, 384, 521]
 
     size = ask_input(
         'Enter private key bits:',
@@ -832,9 +841,24 @@ def generate_ssh_keypair(name, install=False, file=False):
 
 
 def generate_dh_parameters(name, install=False, file=False):
+    from vyos.fips import fips_enabled
+
     bits = ask_input('Enter DH parameters key size:', default=2048, numeric_only=True)
 
-    print('Generating parameters...')
+    # FIPS input gate: only the approved RFC 7919 FFDHE groups are allowed; an
+    # arbitrary on-the-fly safe prime is not an approved group under FIPS.
+    if fips_enabled() and bits not in FFDHE_SIZES:
+        print(
+            f'FIPS mode: DH parameter size {bits} is not an approved FFDHE '
+            f'group. Approved sizes: {", ".join(str(s) for s in FFDHE_SIZES)}'
+        )
+        return None
+
+    if bits in FFDHE_SIZES:
+        # Standard sizes use the pre-computed RFC 7919 FFDHE groups - instant.
+        print('Using standard RFC 7919 FFDHE parameters...')
+    else:
+        print(f'Generating {bits}-bit parameters, this may take a long time...')
 
     dh_params = create_dh_parameters(bits)
     if not dh_params:
@@ -1145,15 +1169,6 @@ def import_ssh_hostkey(name, path):
         os.system(f"sudo cp '{path2}' /etc/ssh/ssh_tpm_host_ecdsa_key.pub")
         os.system(f"sudo ssh-tpm-keygen --import '{path}' -t ecdsa -f /etc/ssh/ssh_tpm_host_ecdsa_key")
         os.system("sudo systemctl restart ssh-tpm-agent")
-    elif name == 'ssh_host_dsa_key':
-        if os.system(f"grep -q 'ssh-dss' '{path2}'") != 0:
-            print(f'Error: SSH server host public key file: {path2} is not ssh-dsa format')
-            return
-        print('Warning: DSA TSS2 format is not supported.')
-        print(f'Copying SSH DSA server host key: {path} to {destination}')
-        os.system(f"sudo cp '{path}' '{destination}'")
-        os.system(f"sudo cp '{path2}' '{destination2}'")
-        cmd(f'{conf_mode_dir}/service_ssh.py')
     elif name == 'ssh_host_ed25519_key':
         if os.system(f"grep -q 'ssh-ed25519' '{path2}'") != 0:
             print(f'Error: SSH server host public key file: {path2} is not ssh-ed25519 format')
@@ -1239,7 +1254,6 @@ def save_ssh_hostkey_txt(name: str, key_txt: str, type: str):
     supported = (
         'ssh_host_rsa_key',
         'ssh_host_ecdsa_key',
-        'ssh_host_dsa_key',
         'ssh_host_ed25519_key',
     )
     if name not in supported:
@@ -1254,7 +1268,7 @@ def save_ssh_hostkey_txt(name: str, key_txt: str, type: str):
         pub_path = temp_filename + '.pub'
         txt = key_txt.strip()
         # If already contains a space and starts with known prefixes, assume full OpenSSH public key
-        if txt.startswith('ssh-') or txt.startswith('ecdsa-') or txt.startswith('ecdsa-sha') or txt.startswith('ecdsa-sha2') or txt.startswith('ssh-dss') or txt.startswith('ssh-ed25519'):
+        if txt.startswith('ssh-') or txt.startswith('ecdsa-') or txt.startswith('ecdsa-sha') or txt.startswith('ecdsa-sha2') or txt.startswith('ssh-ed25519'):
             pub_line = txt
         else:
             # Only the base64 body was provided. Prefix based on name.
@@ -1263,8 +1277,6 @@ def save_ssh_hostkey_txt(name: str, key_txt: str, type: str):
             elif name == 'ssh_host_ecdsa_key':
                 # Default to nistp256 curve identifier for ecdsa public key storage
                 pub_line = 'ecdsa-sha2-nistp256 ' + txt
-            elif name == 'ssh_host_dsa_key':
-                pub_line = 'ssh-dss ' + txt
             elif name == 'ssh_host_ed25519_key':
                 pub_line = 'ssh-ed25519 ' + txt
             else:
@@ -1294,7 +1306,7 @@ def save_ssh_hostkey_txt(name: str, key_txt: str, type: str):
                 b64_body = ''.join(txt.split())
                 if re.fullmatch(r'[A-Za-z0-9+/=]+', b64_body):
                     # Choose header/footer according to key name
-                    if name == 'ssh_host_rsa_key' or name == 'ssh_host_ecdsa_key' or name == 'ssh_host_dsa_key' or name == 'ssh_host_ed25519_key':
+                    if name == 'ssh_host_rsa_key' or name == 'ssh_host_ecdsa_key' or name == 'ssh_host_ed25519_key':
                         # New OpenSSH private keys use the OPENSSH PRIVATE KEY wrapper
                         header = '-----BEGIN OPENSSH PRIVATE KEY-----'
                         footer = '-----END OPENSSH PRIVATE KEY-----'

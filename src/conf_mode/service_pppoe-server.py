@@ -34,6 +34,7 @@ from vyos.accel_ppp_util import verify_accel_ppp_authentication
 from vyos.accel_ppp_util import verify_accel_ppp_ip_pool
 from vyos.accel_ppp_util import get_pools_in_order
 from vyos import ConfigError
+from vyos import fips
 from vyos import airbag
 from vyos.vpp.control_vpp import VPPControl
 
@@ -134,6 +135,11 @@ def get_config(config=None):
     if any(conditions):
         pppoe.update({'restart_required': {}})
     pppoe['server_type'] = 'pppoe'
+    # FIPS 140-3: PPP subscriber auth (PAP/CHAP/MS-CHAP/MS-CHAPv2) has no
+    # approved protocol and there is no EAP option, so the whole server is
+    # non-approvable (this also covers RADIUS-under-pppoe).
+    if fips.fips_enabled(conf):
+        pppoe['fips_reject_ppp'] = {}
     return pppoe
 
 def verify_pado_delay(pppoe):
@@ -167,6 +173,12 @@ def verify_pado_delay(pppoe):
 def verify(pppoe):
     if 'remove' in pppoe:
         return None
+
+    if 'fips_reject_ppp' in pppoe:
+        fips.reject_feature(
+            'PPPoE server',
+            'PPP subscriber authentication (PAP/CHAP/MS-CHAP/MS-CHAPv2) has no '
+            'FIPS-approved protocol. Remove it, or disable FIPS.')
 
     verify_accel_ppp_authentication(pppoe)
     verify_accel_ppp_ip_pool(pppoe)

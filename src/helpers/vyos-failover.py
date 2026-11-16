@@ -261,6 +261,56 @@ def is_route_exists(ip_args):
     return False
 
 
+def get_iface_addresses(iface):
+    """Return the global-scope IPv4/IPv6 addresses currently on `iface`."""
+    rc, out = rc_cmd(f'ip --json addr show dev {iface}')
+    if rc != 0:
+        return []
+    try:
+        data = json.loads(out)
+    except (ValueError, TypeError):
+        return []
+    addrs = []
+    for link in data:
+        for a in link.get('addr_info', []):
+            ip = a.get('local')
+            if ip and a.get('scope') == 'global':
+                addrs.append(ip)
+    return addrs
+
+
+def flush_conntrack_for_addrs(addrs, vacated_iface=''):
+    """Flush conntrack entries for masqueraded flows pinned to these addresses.
+
+    On a failover the active egress changes, but conntrack keeps replaying the
+    source-NAT translation captured when each flow was created -- so an
+    established downstream (LAN) flow keeps egressing with the *old* interface's
+    address and is dropped (the carrier/return path no longer owns it). The
+    router's own traffic re-sources naturally, which is why only forwarded/
+    masqueraded flows stick. Deleting the stale entries (reply-dst = the vacated
+    interface's address) forces them to re-establish and re-NAT via the new
+    egress.
+
+    Keyed on the vacated interface's address rather than its oif (conntrack
+    cannot filter deletes by outgoing interface), using the address the
+    interface held while it was active -- so it still works when the interface
+    kept its address (the common passthrough-upstream-dead case)."""
+    for addr in addrs:
+        fam = 'ipv6' if ':' in addr else 'ipv4'
+        # Absolute path: the daemon runs under systemd's restricted PATH, which
+        # omits /usr/sbin (where conntrack-tools installs conntrack), so a bare
+        # `conntrack` would not be found -- matching the /usr/bin/ping and
+        # /usr/bin/arping convention used by the health checks.
+        rc, _ = rc_cmd(f'/usr/sbin/conntrack -D -f {fam} -q {addr}')
+        print_debug(f'    [ CT-FLUSH ] conntrack -D -f {fam} -q {addr} '
+                    f'(vacated {vacated_iface}) rc={rc}')
+        journal.send(
+            f'failover: flushed conntrack for {addr} after egress change '
+            f'(vacated interface {vacated_iface})',
+            SYSLOG_IDENTIFIER=my_name,
+        )
+
+
 def is_port_open(ip, port, vrf=''):
     """
     Check connection to remote host and port
@@ -533,6 +583,8 @@ def parse_config(config, path):
 def flush_all_routes():
     print_debug("flush_all_routes called")
     # Flush both families' failover routes (IPv4 and IPv6 are separate tables).
+    # "table all" includes the dedicated probe table, so scoped probe routes
+    # are reaped here too; their policy rules are removed separately.
     for flush_cmd in ('ip route flush protocol failover table all',
                       'ip -6 route flush protocol failover table all'):
         run(flush_cmd)
@@ -540,6 +592,7 @@ def flush_all_routes():
             flush_cmd,
             SYSLOG_IDENTIFIER=my_name,
         )
+    flush_probe_rules()
 
 
 kill_called = False
@@ -571,6 +624,98 @@ def delete_route(ip_args):
         f'ip route del {ip_args}',
         SYSLOG_IDENTIFIER=my_name,
     )
+
+
+# Scoped health-probe routing. A probe route must let the health-check ping
+# reach an off-link target via the next-hop gateway even when the failover
+# default is withdrawn -- but it must NOT be visible to forwarded/downstream
+# traffic, or it would hijack LAN traffic to the target IP (e.g. a check target
+# that is also the clients' DNS server) down a possibly-dead interface. So the
+# route lives in a dedicated table reached only by a policy rule matching
+# locally-generated packets (iif lo) to that specific target.
+probe_table = 250
+probe_rule_prio = 12500
+
+
+def get_probe_route_args(target, nhc):
+    """ip-route args (in the dedicated probe table) for a transient host route
+    that lets the health probe reach ``target`` through this next-hop's
+    gateway, independent of whether the next-hop's own failover route is
+    currently installed.
+
+    It reuses the next-hop's via/dev/onlink verbatim, so it makes no assumption
+    about the interface's own lease prefix: an on-subnet gateway (no onlink), an
+    off-subnet /32 passthrough gateway (onlink, from config), or a link-local
+    IPv6 gateway are all handled exactly as the real route handles them. Marked
+    proto failover so a crash leaves it for flush_all_routes() to clean up."""
+    onlink = f'{nhc.onlink} ' if nhc.onlink else ''
+    return (f'{target} via {nhc.next_hop} dev {nhc.conf_iface} '
+            f'{onlink}table {probe_table} proto failover')
+
+
+def get_probe_rule_args(target):
+    """ip-rule args scoping the probe route to locally-generated packets
+    (iif lo) destined to this specific target, so forwarded/downstream traffic
+    (iif = a real interface) never uses the probe route."""
+    return f'iif lo to {target} lookup {probe_table} priority {probe_rule_prio}'
+
+
+def add_probe_routes(nhc):
+    """Install scoped per-target probe routes so an off-link check target is
+    reached through the next-hop gateway even while this next-hop's failover
+    route is withdrawn.
+
+    Without this the probe is bound to the egress interface (ping -I <iface>),
+    the kernel treats the target as on-link, ARPs it directly and never gets a
+    reply -- so after the route is withdrawn (e.g. by a DHCP gateway
+    re-resolution) the check can never pass to bring it back: a self-latching
+    failure whose only escape is some other actor transiently re-installing a
+    usable route.
+
+    The route is confined to a dedicated table reached only by an `iif lo to
+    <target>` policy rule, so it is invisible to forwarded/downstream traffic
+    and only steers the health-check ping itself.
+
+    Returns the list of (route_args, rule_args, fam) to remove once the probe
+    completes. No-op for a via-less (point-to-point) next-hop that needs no
+    gateway resolution, for ARP checks (which test the on-link neighbour
+    itself), and for targets carrying their own interface/vrf override or a
+    null host."""
+    added = []
+    if not nhc.next_hop or nhc.proto not in ('icmp', 'tcp'):
+        return added
+    for t in nhc.targets:
+        if t.interface or t.vrf or t.target in ('0.0.0.0', '::'):
+            continue
+        fam = '-6 ' if ':' in t.target else ''
+        route_args = get_probe_route_args(t.target, nhc)
+        rule_args = get_probe_rule_args(t.target)
+        rc, _ = rc_cmd(f'ip {fam}route replace {route_args}')
+        if rc != 0:
+            continue
+        rc_cmd(f'ip {fam}rule add {rule_args}')
+        added.append((route_args, rule_args, fam))
+    return added
+
+
+def del_probe_routes(probe_routes):
+    """Remove the scoped probe routes/rules added by add_probe_routes()."""
+    for route_args, rule_args, fam in probe_routes:
+        rc_cmd(f'ip {fam}rule del {rule_args}')
+        rc_cmd(f'ip {fam}route del {route_args}')
+
+
+def flush_probe_rules():
+    """Remove any leftover probe policy rules at probe_rule_prio (crash-safety;
+    the probe routes themselves are in the probe table and marked proto
+    failover, so flush_all_routes() reaps them)."""
+    for fam in ('', '-6 '):
+        # Deleting by priority removes one matching rule per call; loop until
+        # none remain (bounded to avoid spinning on an unexpected error).
+        for _ in range(16):
+            rc, _ = rc_cmd(f'ip {fam}rule del priority {probe_rule_prio}')
+            if rc != 0:
+                break
 
 
 def update_configuration(last_modification_times, all_routes, config_dir):
@@ -669,7 +814,13 @@ def update_configuration(last_modification_times, all_routes, config_dir):
     print_debug(f"All routes: {all_routes}")
 
 
-def process_dhcp_interface(nhc, nexthop_by_dhcp_nexthop):
+# Number of consecutive polls that may resolve no DHCP gateway (while one was
+# previously known) before a working dhcp-interface route is withdrawn. Keeps a
+# single transient lease-file read miss from instantly dropping a healthy route.
+dhcp_gw_absent_limit = 3
+
+
+def process_dhcp_interface(nhc, nexthop_by_dhcp_nexthop, gw_miss_state=None):
     """
     Processes NextHopNamedTuple with dhcp_interface != None
     Return NextHopNamedTuple with next_hop equal to DHCP gateway of nhc.
@@ -678,6 +829,10 @@ def process_dhcp_interface(nhc, nexthop_by_dhcp_nexthop):
     Args:
         nhc(NextHopNamedTuple): configuration with dhcp_interface
         nexthop_by_dhcp_nexthop(dict): dict with previous returned values
+        gw_miss_state(dict): per-nexthop count of consecutive polls that
+            resolved no DHCP gateway while one was previously known; used to
+            debounce a transient "gateway gone" reading. Optional; when omitted
+            the previous (delete-on-first-miss) behaviour is kept.
     """
     cur_dhcpgw = get_dhcp_router(nhc.dhcp_interface)
     if not cur_dhcpgw:
@@ -687,6 +842,28 @@ def process_dhcp_interface(nhc, nexthop_by_dhcp_nexthop):
         prev_dhcpgw = nexthop_by_dhcp_nexthop[nhc].next_hop
     else:
         prev_dhcpgw = False
+
+    # Debounce a transient "no gateway" reading. The lease env file is now
+    # written atomically (03-vyos-dhclient-hook), so a missing gateway should
+    # be a real signal -- but keeping a healthy route across a single unlucky
+    # read (lease-file rotation, a stat hiccup, or any future non-atomic
+    # writer) avoids instantly dropping it, and removes the asymmetry where one
+    # miss withdrew the route while recovery needed success_count good polls.
+    if gw_miss_state is not None:
+        if not cur_dhcpgw and prev_dhcpgw:
+            misses = gw_miss_state.get(nhc, 0) + 1
+            gw_miss_state[nhc] = misses
+            if misses < dhcp_gw_absent_limit:
+                print_debug(
+                    f"No DHCP gateway for interface {nhc.dhcp_interface} "
+                    f"(miss {misses}/{dhcp_gw_absent_limit}); keeping previous "
+                    f"gateway '{prev_dhcpgw}'"
+                )
+                return nexthop_by_dhcp_nexthop[nhc]
+        else:
+            # Any definitive reading (gateway present, or confirmed absent with
+            # no previous gateway) clears the miss counter.
+            gw_miss_state.pop(nhc, None)
 
     # Equal - do nothing, just return previous value
     if prev_dhcpgw == cur_dhcpgw:
@@ -761,6 +938,24 @@ if __name__ == '__main__':
     # link does not flap on a single dropped probe.
     nexthop_health_state = {}
 
+    # Per-dhcp-interface next-hop count of consecutive polls that resolved no
+    # DHCP gateway while one was previously known; debounces a transient lease
+    # read miss in process_dhcp_interface().
+    dhcp_gw_miss_state = {}
+
+    # Per-route (vrf, dest) -> currently active (lowest-metric, installed)
+    # egress interface. When it changes (failover/failback) we flush conntrack
+    # bound to the vacated interface so established masqueraded downstream flows
+    # re-establish via the new egress instead of staying pinned to the old
+    # interface's source address. Deliberately NOT cleared when a route goes
+    # fully down, so a later recovery on a *different* egress is still detected
+    # as a change and triggers the flush.
+    active_egress_by_route = {}
+    # iface -> last-known global addresses while it was the active egress; used
+    # to flush conntrack by the address the interface held even if it has since
+    # lost it (e.g. a link-down failover).
+    iface_addr_cache = {}
+
     had_sleeps = True
     while not kill_called:
         # Check in case daemon was launched without routes
@@ -782,30 +977,45 @@ if __name__ == '__main__':
             vrf = route_config.vrf
             vrf_opt = route_config.vrf_opt
 
+            # Per-nexthop (metric, iface, route-present-after-this-iteration),
+            # used after the loop to find the active egress and detect failover.
+            route_nexthop_states = []
+
             for nhc in route_config.nexthops:
                 # Perle change start: process dhcp_interface
                 is_dhcp_iface = True if nhc.dhcp_interface is not None else False
                 # Perle change end
 
                 if nhc.dhcp_interface:
-                    nhc = process_dhcp_interface(nhc, nexthop_by_dhcp_nexthop)
+                    nhc = process_dhcp_interface(nhc, nexthop_by_dhcp_nexthop,
+                                                 dhcp_gw_miss_state)
                     if not nhc:
                         continue
 
                 next_hop = nhc.next_hop
                 ip_args = get_ip_command_args(nhc)
 
-                is_alive = is_target_alive(
-                    nhc.targets,
-                    nhc.conf_iface,
-                    nhc.proto,
-                    nhc.port,
-                    nexthop_vrf=vrf,
-                    policy=nhc.policy,
-                    # Perle change start
-                    is_dhcp_interface=is_dhcp_iface,
-                    # Perle change end
-                )
+                # Break the probe<->route latch: install transient per-target
+                # host routes via this next-hop's gateway so the check can reach
+                # an off-link target even while the failover route is withdrawn,
+                # then remove them once the probe completes (no-op for via-less
+                # next-hops / ARP checks). Without this the probe can never pass
+                # to bring a withdrawn route back on its own.
+                probe_routes = add_probe_routes(nhc)
+                try:
+                    is_alive = is_target_alive(
+                        nhc.targets,
+                        nhc.conf_iface,
+                        nhc.proto,
+                        nhc.port,
+                        nexthop_vrf=vrf,
+                        policy=nhc.policy,
+                        # Perle change start
+                        is_dhcp_interface=is_dhcp_iface,
+                        # Perle change end
+                    )
+                finally:
+                    del_probe_routes(probe_routes)
 
                 # Update this next-hop's consecutive fail/success counters so a
                 # single dropped probe on a lossy link does not flip the route.
@@ -821,6 +1031,10 @@ if __name__ == '__main__':
                     hstate['success'] = 0
 
                 route_present = is_route_exists(ip_args)
+                # Tracks whether this next-hop's route is installed after this
+                # iteration's add/delete action (seeds the active-egress /
+                # conntrack-flush decision below).
+                present_now = route_present
 
                 # Effective (hysteresis-smoothed) health: bring a route up only
                 # after success_count consecutive OK polls, take it down only
@@ -848,24 +1062,50 @@ if __name__ == '__main__':
                         # If something is wrong and gateway not added
                         # Example: Error: Next-hop has invalid gateway.
                         if rc != 0:
+                            present_now = False
                             print_debug(
                                 f'{command} -- return-code [RC: {rc}] {next_hop} dev {nhc.conf_iface}'
                             )
                         else:
+                            present_now = True
                             journal.send(
                                 f'ip route add {ip_args}',
                                 SYSLOG_IDENTIFIER=my_name,
                             )
                     else:
-                        print_debug(
-                            f'    [ TARGET_FAIL ] target checks fails for [{nhc.pretty_targets}] '
-                            f'(fail {hstate["fail"]}, success {hstate["success"]}/{nhc.success_count}), do nothing'
-                        )
-                        journal.send(
-                            f'Check fail for route {route} interface "{nhc.conf_iface}" target {nhc.pretty_targets} proto {nhc.proto} '
-                            f'{nhc.port_opt}',
-                            SYSLOG_IDENTIFIER=my_name,
-                        )
+                        if is_alive:
+                            # Probe passed but the route is not installed yet:
+                            # we are still accumulating success_count
+                            # consecutive successes before (re)installing it.
+                            # This is NOT a failure -- log it distinctly so it
+                            # is not misread as a dead target (e.g. during the
+                            # convergence that follows a daemon restart).
+                            print_debug(
+                                f'    [ TARGET_OK_PENDING ] target check passed '
+                                f'for [{nhc.pretty_targets}] on {nhc.conf_iface}; '
+                                f'awaiting success-count '
+                                f'({hstate["success"]}/{nhc.success_count}) '
+                                f'before (re)installing route'
+                            )
+                            journal.send(
+                                f'Check ok for route {route} interface '
+                                f'"{nhc.conf_iface}" target {nhc.pretty_targets} '
+                                f'proto {nhc.proto} {nhc.port_opt}-- awaiting '
+                                f'success-count '
+                                f'({hstate["success"]}/{nhc.success_count}) '
+                                f'before installing route',
+                                SYSLOG_IDENTIFIER=my_name,
+                            )
+                        else:
+                            print_debug(
+                                f'    [ TARGET_FAIL ] target checks fails for [{nhc.pretty_targets}] '
+                                f'(fail {hstate["fail"]}, success {hstate["success"]}/{nhc.success_count}), do nothing'
+                            )
+                            journal.send(
+                                f'Check fail for route {route} interface "{nhc.conf_iface}" target {nhc.pretty_targets} proto {nhc.proto} '
+                                f'{nhc.port_opt}',
+                                SYSLOG_IDENTIFIER=my_name,
+                            )
                 else:
                     # Route is installed; withdraw it only once the failure
                     # threshold is reached (failure_count consecutive failures).
@@ -875,11 +1115,53 @@ if __name__ == '__main__':
                             f"({hstate['fail']}/{nhc.failure_count} consecutive failures)"
                         )
                         delete_route(ip_args)
+                        present_now = False
+
+                # Record this next-hop's post-action state for the active-egress
+                # decision after the loop.
+                if nhc.conf_iface:
+                    route_nexthop_states.append(
+                        (int(nhc.conf_metric), nhc.conf_iface, present_now))
 
                 had_sleeps = True
                 time.sleep(int(nhc.timeout))
                 if kill_called:
                     break
+
+            # After processing all next-hops for this route, determine the
+            # active (lowest-metric, installed) egress. If it changed since the
+            # last iteration, flush conntrack bound to the vacated interface so
+            # established masqueraded downstream flows re-establish via the new
+            # egress rather than staying pinned to the old interface's address
+            # (otherwise the router itself fails over but LAN clients hang).
+            present_egress = [(m, i) for (m, i, p) in route_nexthop_states if p]
+            new_active = min(present_egress)[1] if present_egress else None
+            eg_key = (vrf or '', route)
+            old_active = active_egress_by_route.get(eg_key)
+            if new_active:
+                iface_addr_cache[new_active] = get_iface_addresses(new_active)
+            if old_active and new_active and new_active != old_active:
+                addrs = set(iface_addr_cache.get(old_active, []))
+                addrs |= set(get_iface_addresses(old_active))
+                # Flush only the family that actually failed over -- this
+                # route's destination family. IPv4 (route) and IPv6 (route6)
+                # defaults fail over independently, so flushing the vacated
+                # interface's *other*-family addresses would needlessly reset
+                # still-healthy connections (e.g. a v4 failover must not drop v6
+                # NAT flows that are still correctly routed via that interface).
+                route_is_v6 = ':' in route
+                addrs = {a for a in addrs if (':' in a) == route_is_v6}
+                if addrs:
+                    print_debug(
+                        f'    [ FAILOVER ] route {route} egress '
+                        f'{old_active} -> {new_active}; flushing conntrack')
+                    flush_conntrack_for_addrs(sorted(addrs),
+                                              vacated_iface=old_active)
+            # Only record a concrete egress; leave the last-known value in place
+            # across a full outage so a recovery on a different egress is still
+            # seen as a change.
+            if new_active:
+                active_egress_by_route[eg_key] = new_active
 
             # Note: a dial-on-demand WWAN bearer is NOT torn down on failback
             # here. Dial-on-demand idles its own bearer down when no traffic is

@@ -24,6 +24,7 @@ import shutil
 import signal
 import socket
 import struct
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -33,6 +34,14 @@ logger = logging.getLogger(__name__)
 RUN_DIR = Path('/run/wwan')
 DNSMASQ = '/usr/sbin/dnsmasq'
 GRACE_AFTER_RENEW_S = 5
+
+# Downstream re-acquire via LAN link bounce (on by default, cfg.reacquire_bounce).
+# How long to hold the LAN port admin-down so a directly-attached downstream
+# NIC registers a carrier loss before we bring it back up.
+REACQUIRE_BOUNCE_SETTLE_S = 1.0
+# Minimum seconds between consecutive LAN bounces, so a flapping carrier cannot
+# storm the downstream port down/up.
+REACQUIRE_BOUNCE_MIN_INTERVAL_S = 15
 
 # Safety-net: how often the reconcile loop re-checks that dnsmasq is actually
 # running.  Covers a downstream LAN port that appears AFTER the bearer
@@ -81,7 +90,7 @@ class PassthroughConfig:
     enabled: bool = False
     interface: str = ''
     mac: str = ''                   # '' = first-MAC-wins
-    lease_time: int = 60
+    lease_time: int = 3600
     management_address: str = ''    # '' if user owns ethernet
     management_address_ipv6: str = ''
     mgmt_owned_by_user: bool = False
@@ -101,6 +110,16 @@ class PassthroughConfig:
     # advertise a same-subnet router/netmask and suppress RFC 3442 option
     # 121 so older downstream stacks that ignore classless routes still work.
     legacy_dhcpv4_compat: bool = False
+    # On a carrier IP change, briefly bounce the downstream-facing LAN port so
+    # a link-event-driven downstream (e.g. ISC dhclient, which ignores
+    # DHCPFORCERENEW) immediately re-acquires the new address instead of
+    # waiting for its own DHCP renewal timer.  ON by default: this is what
+    # makes the long default lease_time safe (IP-change recovery is
+    # event-driven, not renewal-driven).  The admin-down/up briefly drops
+    # downstream connectivity on the passthrough segment and only drives
+    # re-acquisition for a directly-attached downstream, so it can be disabled
+    # (with a correspondingly lower lease_time) when that does not hold.
+    reacquire_bounce: bool = True
     # User-supplied DNS overrides.  When non-empty, these are advertised to
     # the downstream device instead of the carrier-supplied DNS list.
     # Mixed v4/v6 addresses are split internally.
@@ -122,7 +141,7 @@ class PassthroughConfig:
             enabled=bool(raw.get('enabled', False)),
             interface=str(raw.get('interface', '') or ''),
             mac=str(raw.get('mac', '') or '').lower(),
-            lease_time=int(raw.get('lease_time', 60) or 60),
+            lease_time=int(raw.get('lease_time', 3600) or 3600),
             management_address=str(raw.get('management_address', '') or ''),
             management_address_ipv6=str(raw.get('management_address_ipv6', '') or ''),
             mgmt_owned_by_user=bool(raw.get('mgmt_owned_by_user', False)),
@@ -130,6 +149,7 @@ class PassthroughConfig:
             mgmt_v6_ip=str(raw.get('mgmt_v6_ip', '') or ''),
             mss_clamp_enabled=bool(raw.get('mss_clamp_enabled', True)),
             legacy_dhcpv4_compat=bool(raw.get('legacy_dhcpv4_compat', False)),
+            reacquire_bounce=bool(raw.get('reacquire_bounce', True)),
             dns_servers=[str(d) for d in dns_raw if d],
             ra_interval=int(raw.get('ra_interval', 60) or 60),
             ra_router_lifetime=int(raw.get('ra_router_lifetime', 1800) or 1800),
@@ -238,6 +258,10 @@ class PassthroughManager:
         self._last_v4: Optional[str] = None
         self._last_v6: Optional[str] = None
         self._last_v6_prefix: int = 0
+
+        # monotonic timestamp of the last downstream LAN bounce (reacquire),
+        # used to debounce bounces when the carrier IP flaps.
+        self._last_bounce: Optional[float] = None
 
         # iptables saddr-block state (set during a swap)
         self._v4_block_active: bool = False
@@ -498,6 +522,16 @@ class PassthroughManager:
             await self._force_renew_v4()
         if v6_changed:
             await self._reconfigure_v6()
+
+        # Event-driven re-acquire for link-driven downstream clients (e.g. ISC
+        # dhclient, which ignores DHCPFORCERENEW): bounce the LAN port so the
+        # downstream immediately re-DISCOVERs the new carrier IP.  Opt-in and
+        # debounced; complements the _force_renew_v4() DHCPFORCERENEW above and
+        # lets the operator raise lease-time.  Done after dnsmasq is serving the
+        # new range and the inbound route / source whitelist for the new carrier
+        # IP are installed, so the re-acquired client has a working path.
+        if v4_changed or v6_changed:
+            await self._bounce_downstream_link()
 
         # Schedule the unblock after the renewal grace window.
         if v4_changed:
@@ -926,6 +960,45 @@ class PassthroughManager:
         if not self.cfg.interface:
             return
         await _run('ip', 'link', 'set', 'dev', self.cfg.interface, 'up')
+
+    async def _bounce_downstream_link(self) -> None:
+        """Briefly flap the downstream-facing LAN port so a link-event-driven
+        downstream client re-acquires its DHCP lease immediately on a carrier
+        IP change, instead of waiting for its own renewal timer.
+
+        Event-driven complement to _force_renew_v4(): DHCPFORCERENEW (RFC 3203)
+        is honoured by Windows but NOT by ISC dhclient (the VyOS downstream),
+        which only re-DISCOVERs on a link-up event.  Bouncing the port is what
+        makes the long default lease-time safe (IP-change recovery is
+        event-driven rather than renewal-driven).
+
+        On by default (cfg.reacquire_bounce); disable via
+        'ip-passthrough disable-reacquire-bounce'.  The admin-down/up briefly
+        drops downstream connectivity on the passthrough segment, and only
+        triggers the downstream re-acquire when the port is directly attached (a
+        switch in between may hold the downstream's carrier up) -- disable it
+        (and lower lease-time) when that does not hold.  Debounced so a flapping
+        carrier cannot storm the port.
+        """
+        if not self.cfg.reacquire_bounce or not self.cfg.interface:
+            return
+        now = time.monotonic()
+        if (self._last_bounce is not None
+                and now - self._last_bounce < REACQUIRE_BOUNCE_MIN_INTERVAL_S):
+            logger.debug("passthrough: skipping LAN bounce on %s (debounced)",
+                         self.cfg.interface, extra=self._log_extra)
+            return
+        self._last_bounce = now
+        iface = self.cfg.interface
+        logger.info("passthrough: bouncing LAN port %s to trigger downstream "
+                    "DHCP re-acquire", iface, extra=self._log_extra)
+        await _run('ip', 'link', 'set', 'dev', iface, 'down')
+        await asyncio.sleep(REACQUIRE_BOUNCE_SETTLE_S)
+        await _run('ip', 'link', 'set', 'dev', iface, 'up')
+        # dnsmasq binds the LAN address (--bind-interfaces); the admin-down/up
+        # keeps the configured address, so the bound socket resumes on up.
+        # Re-assert admin-up in case anything raced the bounce.
+        await self._ensure_lan_link_up()
 
     async def _apply_passthrough_sysctls(self) -> None:
         """Apply ARP/rp_filter/forwarding tweaks for DOCSIS-style passthrough.

@@ -34,6 +34,7 @@ from vyos.utils.process import is_systemd_service_running
 from vyos.utils.process import process_named_running
 from vyos import ConfigError
 from vyos import airbag
+from vyos import fips
 airbag.enable()
 
 def get_config(config=None):
@@ -213,6 +214,16 @@ def verify(config_dict):
 
     if 'system_as' not in bgp:
         raise ConfigError('BGP system-as number must be defined!')
+
+    # FIPS 140-3: BGP neighbor/peer-group authentication is TCP-MD5 (RFC 2385)
+    # only -- no TCP-AO/HMAC-SHA option is exposed -- and it is native crypto
+    # with no OpenSSL provider backstop. Reject any configured password.
+    if fips.fips_enabled():
+        fips.reject_present_keys(
+            bgp, 'password',
+            'BGP TCP-MD5 authentication',
+            'No FIPS-approved BGP authentication is available. '
+            'Remove the neighbor/peer-group password, or disable FIPS.')
 
     # Verify BMP
     if 'bmp' in bgp:

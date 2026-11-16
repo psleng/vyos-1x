@@ -62,6 +62,11 @@ Smoketests (`smoketest/`) run inside the QEMU harness invoked by
 - `src/validators/` - value validators (Python; OCaml validators come from
   `src/ocaml/`).
 - `src/migration-scripts/` - config-format migrations between releases.
+  igOS-only migrations go under `src/migration-scripts/igos/` (component
+  `igos`, version in `interface-definitions/include/version/igos-version.xml.i`)
+  and never into upstream components, so their numbering cannot collide with
+  upstream on merge. Every component's highest `N-to-M` target must equal its
+  declared version, or migration fails with "incomplete migration".
 - `src/services/` - runtime services, including the HTTP API implementation.
 - `interface-definitions/` - XML CLI declarations (preprocessed via
   `scripts/build-command-templates`, `scripts/override-default`,

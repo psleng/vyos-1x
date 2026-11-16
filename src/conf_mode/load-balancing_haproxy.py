@@ -35,6 +35,7 @@ from vyos.pki import encode_private_key
 from vyos.template import render
 from vyos.utils.file import write_file
 from vyos import ConfigError
+from vyos import fips
 from vyos import airbag
 airbag.enable()
 
@@ -58,6 +59,18 @@ def get_config(config=None):
                               with_recursive_defaults=True,
                               with_pki=True)
 
+    # FIPS 140-3: the TLS bind cipher list must not offer CHACHA20. The grammar
+    # default includes chacha20-poly1305 suites, so emit the approved default
+    # when the operator left `global-parameters ssl-bind-ciphers` unset;
+    # explicitly-set non-approved suites are rejected in verify().
+    if fips.fips_enabled(conf):
+        lb['fips'] = {}
+        leaf = 'load-balancing haproxy global-parameters ssl-bind-ciphers'
+        if not conf.exists(base + ['global-parameters', 'ssl-bind-ciphers']):
+            tmp = fips.default(leaf)
+            if tmp is not None:
+                lb.setdefault('global_parameters', {})['ssl_bind_ciphers'] = tmp
+
     return lb
 
 def verify(lb):
@@ -66,6 +79,14 @@ def verify(lb):
 
     if 'backend' not in lb or 'service' not in lb:
         raise ConfigError('Both "service" and "backend" must be configured!')
+
+    # FIPS 140-3: reject an explicitly-set non-approved TLS bind cipher suite.
+    if 'fips' in lb:
+        messages = fips.reject_unapproved(
+            lb.get('global_parameters', {}),
+            {'ssl_bind_ciphers': 'load-balancing haproxy global-parameters ssl-bind-ciphers'})
+        if messages:
+            raise ConfigError('\n'.join(messages))
 
     for front, front_config in lb['service'].items():
         if 'port' not in front_config:

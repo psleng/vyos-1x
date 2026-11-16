@@ -13,7 +13,12 @@ Type=idle
 SyslogIdentifier=vyos-http-api
 SyslogFacility=daemon
 
-Restart=on-failure
+# Use 'always' rather than 'on-failure': a reload (SIGHUP) that races the
+# server's startup can make it exit cleanly, which 'on-failure' would not
+# recover, leaving the API (and the GUI config service) dead until the next
+# manual restart. An explicit 'systemctl stop' is not subject to Restart=.
+Restart=always
+RestartSec=1
 
 # Does't work but leave it here
 User=root

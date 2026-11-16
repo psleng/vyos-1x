@@ -78,7 +78,7 @@
                     <list>&lt;filename&gt;</list>
                   </completionHelp>
                 </properties>
-                <command>podman build --net host --layers --force-rm --tag "$4" $6</command>
+                <command>bash -c 'if cli-shell-api existsActive system option fips; then pull=--pull=never; fi; podman build --net host --layers --force-rm $pull --tag "$1" $2' _ "$4" "$6"</command>
               </tagNode>
             </children>
           </tagNode>
@@ -205,7 +205,7 @@
                 <path>container name</path>
               </completionHelp>
             </properties>
-            <command>bash -c 'if cli-shell-api existsActive container name "'$4'"; then podman pull $(cli-shell-api returnActiveValue container name "'$4'" image); else echo "Container '$4' does not exist"; fi'</command>
+            <command>${vyos_op_scripts_dir}/container.py update_image --name "$4"</command>
           </tagNode>
         </children>
       </node>

@@ -39,6 +39,7 @@ from vyos.utils.process import call
 from vyos.template import render
 from vyos import ConfigError
 from vyos import airbag
+from vyos import fips
 airbag.enable()
 
 stunnel_dir = '/run/stunnel'
@@ -66,6 +67,17 @@ def get_config(config=None):
                               with_recursive_defaults=True,
                               with_pki=True)
     stunnel['config_file'] = config_file
+
+    # FIPS 140-3: stunnel hard-codes its own curves (X25519/X448 first) and TLS
+    # 1.3 ciphersuites, overriding OpenSSL's. Emit the approved values from the
+    # policy per service; TLS 1.2 `ciphers` stays at stunnel's FIPS default.
+    if fips.fips_enabled(conf):
+        stunnel['fips'] = {
+            'curves': ':'.join(fips.default('service stunnel curves')),
+            'ciphersuites': ':'.join(fips.default('service stunnel ciphersuites')),
+            'ssl_version_min': fips.default('service stunnel ssl-version-min')[0],
+        }
+
     return stunnel
 
 

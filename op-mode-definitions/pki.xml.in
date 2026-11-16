@@ -586,42 +586,6 @@
                       </tagNode>
                     </children>
                   </node>
-                  <node name="ssh-dsa">
-                    <properties>
-                       <help>SSH server hostkey type DSA</help>
-                    </properties>
-                    <children>
-                      <tagNode name="public-key">
-                        <properties>
-                          <help>Public key without headers and footers</help>
-                          <constraint>
-                            <validator name="base64"/>
-                          </constraint>
-                          <constraintErrorMessage>Public key is not base64-encoded</constraintErrorMessage>
-                        </properties>
-                        <command>${vyos_op_scripts_dir}/pki.py import_pki --pki-type ssh-hostkey-txt-pub --name "ssh_host_dsa_key" --key-txt "$7"</command>
-                      </tagNode>
-                      <tagNode name="private-key">
-                        <properties>
-                          <help>Private key without headers and footers</help>
-                          <constraint>
-                            <validator name="base64"/>
-                          </constraint>
-                          <constraintErrorMessage>Private key is not base64-encoded</constraintErrorMessage>
-                        </properties>
-                        <command>${vyos_op_scripts_dir}/pki.py import_pki --pki-type ssh-hostkey-txt-priv --name "ssh_host_dsa_key" --key-txt "$7"</command>
-                      </tagNode>
-                      <tagNode name="key-file">
-                        <properties>
-                           <help>Path to SSH server hostkey files: name and name.pub</help>
-                           <completionHelp>
-                             <list>&lt;name&gt;</list>
-                           </completionHelp>
-                        </properties>
-                        <command>${vyos_op_scripts_dir}/pki.py import_pki --pki-type ssh-hostkey --name "ssh_host_dsa_key" --filename "$7"</command>
-                      </tagNode>
-                    </children>
-                  </node>
                   <node name="ssh-ed25519">
                     <properties>
                        <help>SSH server hostkey type ED25519</help>

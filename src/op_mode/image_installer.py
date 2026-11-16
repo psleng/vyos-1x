@@ -567,6 +567,14 @@ def get_cli_kernel_options(config_file: str) -> list:
     config = ConfigTree(read_file(config_file))
     config_dict = loads(config.to_json())
     cmdline_options = []
+
+    # Top-level 'system option' flags that are independent of
+    # 'system option kernel' must be evaluated before the early return below.
+    # FIPS 140-3 kernel mode (approved-mode; inert unless CONFIG_CRYPTO_FIPS).
+    # Keep this in sync with system_option.py:generate().
+    if dict_search('system.option.fips', config_dict) is not None:
+        cmdline_options.append('fips=1')
+
     kernel_options = dict_search('system.option.kernel', config_dict)
     if kernel_options is None:
         return cmdline_options

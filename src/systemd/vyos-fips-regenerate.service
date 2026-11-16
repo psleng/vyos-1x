@@ -1,0 +1,16 @@
+[Unit]
+Description=Regenerate OpenSSL FIPS module config (fipsmodule.cnf in tmpfs)
+Documentation=https://docs.vyos.io
+DefaultDependencies=no
+After=local-fs.target
+Before=sysinit.target
+# Only relevant once a system OpenSSL config exists on disk.
+ConditionPathExists=/etc/ssl/openssl.cnf
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/vyos/system/fips-regenerate.sh
+
+[Install]
+WantedBy=sysinit.target

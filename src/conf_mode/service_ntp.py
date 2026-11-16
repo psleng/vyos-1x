@@ -27,6 +27,7 @@ from vyos.utils.network import get_interface_config
 from vyos.template import render
 from vyos.template import is_ipv4
 from vyos import ConfigError
+from vyos import fips
 from vyos import airbag
 airbag.enable()
 
@@ -58,12 +59,23 @@ def get_config(config=None):
         del default_values['ptp']
 
     ntp = config_dict_merge(default_values, ntp)
+    # FIPS 140-3: flag FIPS mode so verify() rejects NTS (plain NTP is unaffected).
+    if fips.fips_enabled(conf):
+        ntp['fips'] = {}
     return ntp
 
 def verify(ntp):
     # bail out early - looks like removal from running config
     if not ntp:
         return None
+
+    if 'fips' in ntp and any('nts' in s for s in ntp.get('server', {}).values()):
+        fips.reject_feature(
+            'NTS (Network Time Security)',
+            'NTS uses AES-SIV, which the OpenSSL FIPS module does not provide. '
+            'Use plain NTP (remove "nts" from the server) to keep time sync, or '
+            'disable FIPS.',
+        )
 
     if 'server' not in ntp:
         raise ConfigError('NTP server not configured')

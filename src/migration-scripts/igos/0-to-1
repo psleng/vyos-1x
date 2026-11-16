@@ -16,6 +16,10 @@
 #
 # WWAN ip-passthrough management address keys were renamed to avoid
 # CLI keyword collisions that force host-only prefix validation.
+#
+# igOS-only migrations live under the 'igos' component so their numbering
+# never collides with upstream components (this was interfaces/34-to-35,
+# which clashed with upstream's T3871 hw-id migration).
 
 from vyos.configtree import ConfigTree
 

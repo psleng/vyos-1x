@@ -15,6 +15,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import os
+import platform
 import psutil
 import re
 
@@ -43,6 +44,8 @@ from vyos.utils.network import is_intf_addr_assigned
 from vyos.utils.system import sysctl_write
 from vyos.configdep import set_dependents
 from vyos.configdep import call_dependents
+from vyos.configdict import is_node_changed
+from vyos import fips
 from vyos import ConfigError
 from vyos import airbag
 
@@ -57,6 +60,17 @@ systemd_action_file = '/lib/systemd/system/ctrl-alt-del.target'
 usb_autosuspend = r'/etc/udev/rules.d/40-usb-autosuspend.rules'
 kernel_dynamic_debug = r'/sys/kernel/debug/dynamic_debug/control'
 time_format_to_locale = {'12-hour': 'en_US.UTF-8', '24-hour': 'en_GB.UTF-8'}
+
+# FIPS 140-3: the validated OpenSSL provider is shipped per-arch into the
+# OpenSSL module directory; openssl.cnf is rendered to activate it.
+arch_map = {
+    'x86_64': 'x86_64-linux-gnu',
+    'aarch64': 'aarch64-linux-gnu',
+}
+arch = arch_map.get(platform.machine())
+openssl_config = '/etc/ssl/openssl.cnf'
+openssl_fipsmodule_config = '/run/ssl/fipsmodule.cnf'
+
 tuned_profiles = {
     'power-save': 'powersave',
     'network-latency': 'network-latency',
@@ -193,6 +207,40 @@ def get_config(config=None):
         base, key_mangling=('-', '_'), get_first_key=True, with_recursive_defaults=True
     )
 
+    # FIPS 140-3: record the previously-committed state here, using the single
+    # Config instance, so apply() can detect a real change without creating a
+    # second Config instance (enforced by test_configd_inspect).
+    options['fips_effective'] = conf.exists_effective(['system', 'option', 'fips'])
+
+    # When the FIPS toggle changes, re-run the crypto consumers that need
+    # FIPS-aware (re)generation -- otherwise, since 'service ssh' / 'vpn ipsec' /
+    # 'interfaces openvpn' did not themselves change, their conf-mode scripts
+    # would not run until the next boot, leaving sshd offering non-approved host
+    # keys under the active FIPS provider (the SSH lockout) and OpenVPN loading
+    # the non-FIPS default provider. call_dependents() in apply() invokes them.
+    #
+    # Only for post-boot (runtime) toggles: during boot config replay
+    # is_node_changed() is always true (the effective tree starts empty), and
+    # these consumers already run under the booted FIPS state as part of the
+    # normal boot commit. Re-running them a second time there is pure redundant
+    # work -- a full sshd reload + strongSwan restart + nginx/HTTP-API restart +
+    # OpenVPN rebuild -- that added ~20s to every boot for no behavioural gain.
+    if is_node_changed(conf, ['system', 'option', 'fips']) and boot_configuration_complete():
+        set_dependents('fips', conf)
+        # OpenVPN is a per-interface (tagNode) script, so it must be registered
+        # with each interface's tagnode -- a bare dependent would run with an
+        # empty ifname and fail.
+        if conf.exists(['interfaces', 'openvpn']):
+            for openvpn_ifname in conf.list_nodes(['interfaces', 'openvpn']):
+                set_dependents('fips_openvpn', conf, openvpn_ifname)
+
+    # FIPS 140-3: interactive gate -- refuse to enable FIPS while a feature with
+    # no approvable form (WireGuard/PPTP/RADIUS/TACACS+) is configured, naming
+    # what to remove. Only post-boot: at boot the owning scripts' own verify()
+    # rejects enforce fail-closed, so this must not block config replay.
+    if 'fips' in options and boot_configuration_complete():
+        options['fips_rejected_features'] = fips.features_present(conf)
+
     if 'performance' in options:
         # Update IPv4/IPv6 and sysctl options after tuned applied it's settings
         set_dependents('ip_ipv6', conf)
@@ -202,6 +250,25 @@ def get_config(config=None):
 
 
 def verify(options):
+    if 'fips' in options:
+        if arch is None:
+            raise ConfigError(
+                f'FIPS mode is not supported on this architecture '
+                f'({platform.machine()})'
+            )
+        fips_module = f'/usr/lib/{arch}/ossl-modules/fips.so'
+        if not os.path.exists(fips_module):
+            raise ConfigError(
+                f'OpenSSL FIPS module not found: {fips_module}. '
+                f'The FIPS provider package must be installed.'
+            )
+        rejected = options.get('fips_rejected_features')
+        if rejected:
+            raise ConfigError(
+                'FIPS mode cannot be enabled while these non-approved features '
+                'are configured; remove them first:\n  - ' + '\n  - '.join(rejected)
+            )
+
     if 'http_client' in options:
         config = options['http_client']
         if 'source_interface' in config:
@@ -304,6 +371,35 @@ def verify(options):
 
 
 def generate(options):
+    # FIPS 140-3: run the module self-test (POST) and (re)generate the module
+    # config, then render openssl.cnf to activate (or deactivate) the provider.
+    # fipsinstall is run with OPENSSL_CONF unset to a minimal config so it does
+    # not try to load the (possibly fips-referencing) system openssl.cnf before
+    # /run/ssl/fipsmodule.cnf exists.
+    if 'fips' in options:
+        os.makedirs(os.path.dirname(openssl_fipsmodule_config), exist_ok=True)
+        fips_module = f'/usr/lib/{arch}/ossl-modules/fips.so'
+        cmd(
+            f'openssl fipsinstall -module {fips_module} '
+            f'-out {openssl_fipsmodule_config}',
+            env={**os.environ, 'OPENSSL_CONF': '/dev/null'},
+        )
+    else:
+        if os.path.exists(openssl_fipsmodule_config):
+            os.remove(openssl_fipsmodule_config)
+
+    # FIPS: system-wide approved TLS groups / protocol floor (openssl.cnf
+    # system_default), so OpenSSL apps don't negotiate X25519/X448 by default.
+    if 'fips' in options:
+        options['fips_tls'] = {
+            'groups': ':'.join(fips.default('system openssl tls groups')),
+            'tls_min_protocol': fips.default('system openssl tls min-protocol')[0],
+            'dtls_min_protocol': fips.default('system openssl dtls min-protocol')[0],
+            'cipher_string': fips.default('system openssl tls cipher-string')[0],
+        }
+
+    render(openssl_config, 'openssl/openssl.cnf.j2', options)
+
     render(curlrc_config, 'system/curlrc.j2', options)
     render(ssh_config, 'system/ssh_config.j2', options)
     render(usb_autosuspend, 'system/40_usb_autosuspend.j2', options)
@@ -333,6 +429,12 @@ def generate(options):
     # Keep this in sync with image_installer.py:get_cli_kernel_options()
     if 'reboot_on_panic' in options:
         cmdline_options.append('panic=60')
+
+    # FIPS 140-3 kernel mode (approved-mode operation; not a validated kernel
+    # module). Inert unless the kernel is built with CONFIG_CRYPTO_FIPS.
+    # Keep this in sync with image_installer.py:get_cli_kernel_options()
+    if 'fips' in options:
+        cmdline_options.append('fips=1')
 
     if 'disable_hpet' in kernel_opts:
         cmdline_options.append('hpet=disable')
@@ -493,6 +595,23 @@ def apply(options):
             Warning(
                 'Kernel configuration options have changed. '
                 'To apply these changes, you must save the configuration and reboot the system!'
+            )
+
+    # FIPS 140-3: a provider switch only fully applies once every process
+    # restarts under the new openssl.cnf, so a toggle is reboot-applied. Detect
+    # a real change against the previously-committed value (fips_effective,
+    # captured in get_config) and only warn post-boot (boot_configuration_complete)
+    # to avoid a boot-loop during config replay. The actual pending state is
+    # tracked level-triggered by comparing the configured value against the
+    # booted FIPS state (see op-mode 'show system fips'), so no persistent marker
+    # is written here.
+    if boot_configuration_complete():
+        fips_now = 'fips' in options
+        fips_was = options.get('fips_effective', False)
+        if fips_now != fips_was:
+            Warning(
+                'FIPS mode has changed. To fully apply this change you must '
+                'save the configuration and reboot the system!'
             )
 
     # System bootup beep

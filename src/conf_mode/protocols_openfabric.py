@@ -25,6 +25,7 @@ from vyos.frrender import FRRender
 from vyos.frrender import get_frrender_dict
 from vyos import ConfigError
 from vyos import airbag
+from vyos import fips
 airbag.enable()
 
 def get_config(config=None):
@@ -42,6 +43,16 @@ def verify(config_dict):
     openfabric = config_dict['openfabric']
     if 'deleted' in openfabric:
         return None
+
+    # FIPS 140-3: OpenFabric domain-password and interface password are MD5 or
+    # plaintext only (no HMAC-SHA option), native FRR (fabricd) crypto with no
+    # OpenSSL backstop -- same as IS-IS, which OpenFabric is derived from.
+    if fips.fips_enabled():
+        fips.reject_present_keys(
+            openfabric, ('md5', 'plaintext_password'),
+            'OpenFabric MD5/plaintext authentication',
+            'No FIPS-approved (HMAC-SHA) OpenFabric authentication is available. '
+            'Remove domain-password / interface password, or disable FIPS.')
 
     if 'net' not in openfabric:
         raise ConfigError('Network entity is mandatory!')

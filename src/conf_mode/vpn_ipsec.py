@@ -30,10 +30,12 @@ from vyos.config import config_dict_merge
 from vyos.configdep import set_dependents
 from vyos.configdep import call_dependents
 from vyos.configdict import get_interface_dict
+from vyos.configdict import is_node_changed
 from vyos.configdict import leaf_node_changed
 from vyos.configverify import verify_interface_exists
 from vyos.configverify import dynamic_interface_pattern
 from vyos.defaults import directories
+from vyos import fips
 from vyos.ifconfig import Interface
 from vyos.pki import encode_public_key
 from vyos.pki import load_private_key
@@ -66,6 +68,9 @@ charon_conf        = '/etc/strongswan.d/charon.conf'
 charon_dhcp_conf   = '/etc/strongswan.d/charon/dhcp.conf'
 charon_radius_conf = '/etc/strongswan.d/charon/eap-radius.conf'
 charon_systemd_conf = '/etc/strongswan.d/charon-systemd.conf'
+# FIPS 140-3 plugin override. Sorts last in strongswan.d/charon so its load=no
+# settings override the shipped per-plugin load=yes (last definition wins).
+charon_fips_conf   = '/etc/strongswan.d/charon/zzz-vyos-fips.conf'
 interface_conf     = '/etc/strongswan.d/interfaces_use.conf'
 swanctl_conf       = f'{swanctl_dir}/swanctl.conf'
 
@@ -214,6 +219,19 @@ def get_config(config=None):
 
     ipsec['vpp_ipsec_exists'] = conf.exists(['vpp', 'settings', 'ipsec'])
 
+    # FIPS 140-3: flag FIPS mode so verify() rejects explicitly-set non-approved
+    # IKE/ESP crypto. Uses the single Config instance (configd-safe).
+    if fips.fips_enabled(conf):
+        ipsec['fips'] = {}
+        # EAP-RADIUS remote-access auth uses classic RADIUS (MD5) -> no approved
+        # form.
+        if conf.exists(['vpn', 'ipsec', 'remote-access', 'radius']):
+            ipsec['fips_reject_radius'] = {}
+    # A FIPS toggle changes the charon plugin set, which only takes effect on a
+    # full charon restart (reload does not re-read strongswan.d plugin configs).
+    if is_node_changed(conf, ['system', 'option', 'fips']):
+        ipsec['fips_changed'] = True
+
     return ipsec
 
 def get_dhcp_address(iface):
@@ -307,6 +325,41 @@ def verify(ipsec):
                         raise ConfigError(
                             f"A PRF algorithm is mandatory in IKE proposal {proposal}"
                         )
+
+    # FIPS 140-3: fail closed on explicitly-set non-approved IKE/ESP crypto.
+    if 'fips' in ipsec:
+        if 'fips_reject_radius' in ipsec:
+            fips.reject_feature('RADIUS (IPsec EAP)')
+        ike_leaf_map = {
+            'encryption': 'vpn ipsec ike-group proposal encryption',
+            'hash': 'vpn ipsec ike-group proposal hash',
+            'dh_group': 'vpn ipsec ike-group proposal dh-group',
+        }
+        for name, ike_config in ipsec.get('ike_group', {}).items():
+            for proposal, proposal_config in ike_config.get('proposal', {}).items():
+                messages = fips.reject_unapproved(proposal_config, ike_leaf_map)
+                if messages:
+                    raise ConfigError(
+                        f'IKE group "{name}" proposal "{proposal}": '
+                        + '; '.join(messages)
+                    )
+
+        esp_leaf_map = {
+            'encryption': 'vpn ipsec esp-group proposal encryption',
+            'hash': 'vpn ipsec esp-group proposal hash',
+        }
+        esp_pfs_map = {'pfs': 'vpn ipsec esp-group pfs'}
+        for name, esp_config in ipsec.get('esp_group', {}).items():
+            for proposal, proposal_config in esp_config.get('proposal', {}).items():
+                messages = fips.reject_unapproved(proposal_config, esp_leaf_map)
+                if messages:
+                    raise ConfigError(
+                        f'ESP group "{name}" proposal "{proposal}": '
+                        + '; '.join(messages)
+                    )
+            messages = fips.reject_unapproved(esp_config, esp_pfs_map)
+            if messages:
+                raise ConfigError(f'ESP group "{name}": ' + '; '.join(messages))
 
     if 'l2tp' in ipsec:
         if 'esp_group' in ipsec['l2tp']:
@@ -766,6 +819,14 @@ def generate_pki_files_rsa(pki, rsa_conf):
 def generate(ipsec):
     cleanup_pki_files()
 
+    # FIPS 140-3: when enabled, force charon IKE crypto through the validated
+    # OpenSSL provider by disabling the native crypto plugins (and kernel af-alg);
+    # remove the override otherwise. ESP bulk crypto stays in the kernel.
+    if ipsec and 'fips' in ipsec:
+        render(charon_fips_conf, 'ipsec/fips_plugins.conf.j2', {})
+    elif os.path.exists(charon_fips_conf):
+        os.unlink(charon_fips_conf)
+
     if not ipsec or 'deleted' in ipsec:
         for config_file in [charon_dhcp_conf, charon_radius_conf, interface_conf, swanctl_conf]:
             if os.path.isfile(config_file):
@@ -877,7 +938,12 @@ def apply(ipsec):
         if vti_updown_db_exists():
             remove_vti_updown_db()
     else:
-        call(f'systemctl reload-or-restart {systemd_service}')
+        # A FIPS toggle changes the charon plugin set, which is only read at
+        # daemon startup, so force a full restart rather than a reload.
+        if ipsec.get('fips_changed'):
+            call(f'systemctl restart {systemd_service}')
+        else:
+            call(f'systemctl reload-or-restart {systemd_service}')
         if ipsec['enabled_vti_interfaces']:
             with open_vti_updown_db_for_create_or_update() as db:
                 db.removeAllOtherInterfaces(ipsec['enabled_vti_interfaces'])

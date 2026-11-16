@@ -34,6 +34,7 @@ from vyos.utils.network import is_listen_port_bind_service
 from vyos.utils.process import call
 from vyos.utils.process import is_systemd_service_running
 from vyos import ConfigError
+from vyos import fips
 from passlib.hash import sha512_crypt
 from time import sleep
 
@@ -71,12 +72,27 @@ def get_config(config=None):
         with_pki=True,
     )
 
+    # FIPS 140-3: classic RADIUS (MD5) has no approved form.
+    if fips.fips_enabled(conf):
+        ocserv['fips'] = {}
+        if conf.exists(base + ['authentication', 'radius']):
+            ocserv['fips_reject_radius'] = {}
+
     return ocserv
 
 
 def verify(ocserv):
     if ocserv is None:
         return None
+
+    if 'fips_reject_radius' in ocserv:
+        fips.reject_feature('RADIUS (OpenConnect)')
+    # FIPS 140-3: ocserv is GnuTLS (no provider backstop), so the config floor is
+    # the only enforcement -- reject an explicit TLS 1.0/1.1 minimum.
+    if 'fips' in ocserv:
+        messages = fips.reject_unapproved(ocserv, {'tls_version_min': 'tls-version-min'})
+        if messages:
+            raise ConfigError('\n'.join(messages))
     # Check if listen-ports not binded other services
     # It can be only listen by 'ocserv-main'
     for proto, port in ocserv.get('listen_ports').items():

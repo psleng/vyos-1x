@@ -29,6 +29,7 @@ from vyos.utils.io import ask_input
 from vyos.utils.io import ask_yes_no
 from vyos.utils.process import rc_cmd
 from vyos.tpm import tpm_enabled
+from vyos.fips import fips_enabled
 from vyos.template import render
 from vyos.pki import encode_certificate
 from vyos.pki import get_certificate_fingerprint
@@ -641,6 +642,15 @@ def generate_tpm(
         print('Invalid action: TPM is disabled')
         return
 
+    # FIPS 140-3 (§6.1): TPM-resident key generation/signing runs in the TPM,
+    # not the validated OpenSSL module. On an uncertified fTPM this is outside
+    # the FIPS boundary, so TPM-backed PKI generation is refused under FIPS.
+    if fips_enabled():
+        print('Invalid action: TPM-backed PKI generation is not FIPS-approved '
+              '(the TPM is outside the validated boundary). Disable '
+              '"system option fips" to use it.')
+        return
+
     [(get_tpm_pki_dir() / d).mkdir(parents=True, exist_ok=True)
         for d in ('cert', 'csr', 'kpair')]
 
@@ -665,6 +675,15 @@ def import_tpm(
 ):
     if not tpm_enabled():
         print('Invalid action: TPM is disabled')
+        return
+
+    # FIPS 140-3 (§6.1): importing a key into the TPM makes the TPM the crypto
+    # operator for it -- outside the validated OpenSSL boundary on an uncertified
+    # fTPM. Refused under FIPS.
+    if fips_enabled():
+        print('Invalid action: TPM-backed PKI import is not FIPS-approved '
+              '(the TPM is outside the validated boundary). Disable '
+              '"system option fips" to use it.')
         return
 
     [(get_tpm_pki_dir() / d).mkdir(parents=True, exist_ok=True)

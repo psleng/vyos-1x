@@ -43,6 +43,12 @@
               </tagNode>
             </children>
           </node>
+          <leafNode name="fips">
+            <properties>
+              <help>Show FIPS 140-3 approved-mode status</help>
+            </properties>
+            <command>${vyos_op_scripts_dir}/system_fips.py show</command>
+          </leafNode>
           <node name="connections">
             <properties>
               <help>Show active network connections on the system</help>

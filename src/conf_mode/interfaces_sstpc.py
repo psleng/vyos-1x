@@ -33,6 +33,7 @@ from vyos.utils.process import is_systemd_service_running
 from vyos.utils.file import write_file
 from vyos import ConfigError
 from vyos import airbag
+from vyos import fips
 airbag.enable()
 
 def get_config(config=None):
@@ -57,11 +58,20 @@ def get_config(config=None):
             # bail out early - no need to further process other nodes
             break
 
+    sstpc['_fips'] = fips.fips_enabled(conf)
+
     return sstpc
 
 def verify(sstpc):
     if 'deleted' in sstpc:
         return None
+
+    # FIPS 140-3: SSTP's outer TLS is provider-governed, but the inner PPP
+    # authentication (PAP / CHAP MD5 / MS-CHAP MD4+DES) runs non-approved crypto
+    # on-box, and SSTP servers require it -- an auth-less client would never
+    # connect. Whole-feature reject, like the SSTP server / WireGuard / PPTP.
+    if sstpc.get('_fips'):
+        fips.reject_feature('SSTP client (no FIPS-approved PPP authentication)')
 
     verify_authentication(sstpc)
     verify_vrf(sstpc)

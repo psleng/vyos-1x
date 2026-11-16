@@ -1,8 +1,20 @@
 # Don't add default route if no-default-route is configured for interface
 
-# As configuration is not available to cli-shell-api at the first boot, we must use vyos.config, which contains a workaround for this
 function get_no_default_route {
-python3 - <<PYEND
+    local conf="/run/dhclient/dhclient_${interface}.conf"
+    if [ -f "$conf" ]; then
+        # interface.py (data/templates/dhcp-client/ipv4.j2) omits "routers"
+        # from the DHCP request line exactly when no-default-route is
+        # configured for this interface. Use that as a cheap, boot-safe signal
+        # (the conf is rendered before dhclient starts) instead of loading the
+        # full running config on every DHCP event.
+        grep -qw routers "$conf" || echo "True"
+        return
+    fi
+    # Fallback (conf not yet rendered): consult the running config. As
+    # configuration is not available to cli-shell-api at the first boot, we
+    # must use vyos.config, which contains a workaround for this.
+    python3 - <<'PYEND'
 from vyos.config import Config
 import os
 

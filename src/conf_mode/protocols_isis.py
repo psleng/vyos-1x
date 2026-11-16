@@ -29,6 +29,7 @@ from vyos.utils.network import get_interface_config
 from vyos.utils.process import is_systemd_service_running
 from vyos import ConfigError
 from vyos import airbag
+from vyos import fips
 airbag.enable()
 
 def get_config(config=None):
@@ -54,6 +55,15 @@ def verify(config_dict):
 
     if 'deleted' in isis:
         return None
+
+    # FIPS 140-3: IS-IS area/domain/circuit authentication is MD5 or plaintext
+    # only (no HMAC-SHA option), native FRR crypto with no OpenSSL backstop.
+    if fips.fips_enabled():
+        fips.reject_present_keys(
+            isis, ('md5', 'plaintext_password'),
+            'IS-IS MD5/plaintext authentication',
+            'No FIPS-approved (HMAC-SHA) IS-IS authentication is available. '
+            'Remove it, or disable FIPS.')
 
     if 'net' not in isis:
         raise ConfigError('Network entity is mandatory!')

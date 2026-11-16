@@ -43,6 +43,7 @@ from vyos.utils.network import is_subnet_connected
 from vyos.utils.network import is_addr_assigned
 from vyos import ConfigError
 from vyos import airbag
+from vyos import fips
 
 airbag.enable()
 
@@ -229,6 +230,8 @@ def get_config(config=None):
 
     if bool(list(dict_search_recursive(dhcp, 'ping_check'))):
         dhcp['any_ping_check'] = True
+
+    dhcp['fips_enabled'] = fips.fips_enabled(conf)
 
     return dhcp
 
@@ -509,9 +512,19 @@ def verify(dhcp):
         ddns = dhcp['dynamic_dns_update']
         if 'tsig_key' in ddns:
             invalid_keys = []
+            tsig_leaf = 'service dhcp-server dynamic-dns-update tsig-key algorithm'
+            tsig_approved = fips.approved(tsig_leaf) if dhcp.get('fips_enabled') else None
             for tsig_key_name, tsig_key_config in ddns['tsig_key'].items():
                 if not ('algorithm' in tsig_key_config and 'secret' in tsig_key_config):
                     invalid_keys.append(tsig_key_name)
+                # FIPS 140-3: HMAC-MD5 is disallowed for TSIG (SHA-1/SHA-2 ok).
+                algorithm = tsig_key_config.get('algorithm')
+                if (tsig_approved is not None and algorithm is not None
+                        and algorithm not in tsig_approved):
+                    raise ConfigError(
+                        f"FIPS mode: TSIG key '{tsig_key_name}' algorithm "
+                        f"'{algorithm}' is not approved. Approved algorithms: "
+                        f"{', '.join(tsig_approved)}")
             if len(invalid_keys) > 0:
                 raise ConfigError(f'Both algorithm and secret need to be set for TSIG keys: {", ".join(invalid_keys)}')
 

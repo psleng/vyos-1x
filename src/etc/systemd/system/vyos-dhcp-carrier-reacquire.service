@@ -1,0 +1,37 @@
+[Unit]
+Description=VyOS re-acquire DHCP on carrier-up for opted-in interfaces
+Documentation=https://docs.vyos.io
+After=vyos-router.service
+# Cheap always-on netlink listener. It does nothing unless an interface has
+# opted in via `dhcp-options reacquire-on-carrier` (marker file in
+# /run/dhclient), so it is safe to run unconditionally.
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/libexec/vyos/vyos-dhcp-carrier-reacquire.py
+Restart=on-failure
+RestartSec=10
+User=root
+Group=root
+
+# Hardening -- the daemon only reads /sys, reads marker files and runs
+# systemctl restart dhclient@<if>; it needs netlink and systemctl but little
+# else.
+ProtectHome=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+MemoryMax=96M
+OOMScoreAdjust=300
+
+Environment=PYTHONPATH=/usr/lib/python3/dist-packages
+Environment=PYTHONUNBUFFERED=1
+
+SyslogIdentifier=vyos-dhcp-carrier-reacquire
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
