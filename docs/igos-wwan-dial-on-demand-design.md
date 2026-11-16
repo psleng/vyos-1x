@@ -33,9 +33,12 @@ route (ICMP check to 8.8.8.8).
 - The modem reconnects within ~1 min of every idle-down because all DNS goes
   to the carrier resolvers via `wwan0` (`/etc/resolv.conf` contains only
   `161.216.x.x`, routed out `wwan0`) and `eth1` has no link, so the only
-  default route is `wwan0`. `wwan0` got a new carrier IP on each reconnect.
-  (Config/environment issue — see §11; not fixed by this design but made
-  cheap by it.)
+      default route is `wwan0`. `wwan0` got a new carrier IP on each reconnect.
+      (Config/environment issue — see §11. This design makes the daemon-side
+      *cycle* cheap, but it does **not** make the per-reconnect cost cheap: a
+      changed carrier IP still drives a full FSM IP re-apply and a
+      reconnect-attempt/bearer-up alert pair every cycle — only stopping the
+      needless reconnects (§11) removes that. See §11.4.)
 
 ### How the code works today
 
@@ -335,7 +338,9 @@ Unchanged
 ## 11. Related issues found on the unit (configuration guidance, out of scope)
 
 These are why the reference unit reconnects every ~78 s; the new daemon makes
-each cycle cheap but does not stop them:
+each *daemon-side cycle* cheap but does **not** stop the reconnects, and does
+**not** reduce the per-reconnect FSM/consumer cost those reconnects incur
+(§11.4):
 
 1. **DNS only via the carrier.** With `eth1` down, `/etc/resolv.conf` holds
    only the carrier resolvers, reached via `wwan0`; every lookup (NTP pool
@@ -351,6 +356,28 @@ each cycle cheap but does not stop them:
    each failure runs `dhclient-script-vyos` (several Python helpers via
    `vyos-hostsd-client`): ~950 s CPU in 4 h. Upstream VyOS behaviour; guidance
    is to disable unused DHCP ports.
+4. **A new carrier IP on every reconnect drives a per-cycle FSM cost this
+   design does not remove.** Each reconnect gets a *different* carrier IP, so
+   every cycle runs the full `_apply_bearer_ip_configuration()` (IPv6 sysctl
+   hardening, output-hygiene nft rules, link-up, re-install addresses +
+   default routes for both families) **and** emits a
+   `reconnect_attempt` + `bearer_up` alert pair (`_record_reconnect_attempt()`
+   / `_record_bearer_up()` → `_emit_alert()`), inflating the reconnect/downtime
+   counters. The changed address also re-churns downstream consumers of the
+   WWAN address on every cycle: `vyos-failover` conntrack flush + route moves,
+   FRR DHCP-gateway re-resolution, hostsd. This is **not** an FSM correctness
+   bug — a fresh IP per connect is a normal connect, applied cleanly each time —
+   but at ~78 s cadence it is alert/log noise and steady reconfiguration work
+   that the daemon refactor cannot touch. Only removing the needless reconnects
+   (items 1–2) removes it.
+   - **Not applicable on this unit, but note for the inverse case:** the heavy
+     `ip-passthrough` handoff (conntrack flush, **dnsmasq hard-restart**, lease
+     wipe, deprecation RAs, DHCPFORCERENEW / LAN-port bounce) also keys off a
+     changed carrier IP, so a **flapping bearer on an always-on + passthrough**
+     interface would run that handoff every reconnect. It does **not** occur
+     here because `ip-passthrough` is mutually exclusive with
+     `connection-mode dial-on-demand` (rejected at commit time,
+     `src/conf_mode/interfaces_wwan.py`).
 
 ---
 
