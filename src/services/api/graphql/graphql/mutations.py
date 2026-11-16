@@ -20,16 +20,30 @@ from typing import Any, Dict, Optional  # pylint: disable=W0611 # noqa: F401
 from graphql import GraphQLResolveInfo  # pylint: disable=W0611 # noqa: F401
 
 from ariadne import ObjectType, convert_camel_case_to_snake
+from fastapi.concurrency import run_in_threadpool
 from makefun import with_signature
 
 from vyos.opmode import Error as OpModeError
 
+from ...config_lock import config_lock
 from ...session import SessionState
 from ..libs import key_auth
 from ..session.session import Session
 from ..session.errors.op_mode_errors import op_mode_err_msg, op_mode_err_code
 
 mutation = ObjectType('Mutation')
+
+
+def uses_config_lock(class_name: str) -> bool:
+    """Whether a mutation must hold the API config lock.
+
+    Any mutation may stage or commit changes in the shared config session
+    (op-mode scripts run in-process and can reach it via SessionState), so
+    the lock is the default. Image add/delete/rename/set-default (in-tree and
+    out-of-tree, e.g. AddSystemImagePerleImageMutation) can take minutes and
+    do not use the shared session; holding the lock would block all commits.
+    """
+    return 'SystemImage' not in class_name
 
 
 def make_mutation_resolver(mutation_name, class_name, session_func):
@@ -49,6 +63,7 @@ def make_mutation_resolver(mutation_name, class_name, session_func):
     resolver_name = f'resolve_{func_base_name}'
     func_sig = '(obj: Any, info: GraphQLResolveInfo, data: Optional[Dict]=None)'
     state = SessionState()
+    locked = uses_config_lock(class_name)
 
     @mutation.field(mutation_name)
     @with_signature(func_sig, func_name=resolver_name)
@@ -95,9 +110,18 @@ def make_mutation_resolver(mutation_name, class_name, session_func):
                 # otherwise, dynamically generate subclass to invoke subclass
                 # name based functions
                 klass = type(class_name, (Session,), {})
-            k = klass(session, data)
-            method = getattr(k, session_func)
-            result = method()
+
+            # Run in the threadpool so the event loop stays free; the config
+            # lock is taken inside the worker thread, never on the loop
+            def execute():
+                k = klass(session, data)
+                method = getattr(k, session_func)
+                if locked:
+                    with config_lock:
+                        return method()
+                return method()
+
+            result = await run_in_threadpool(execute)
             data['result'] = result
 
             return {'success': True, 'data': data}
@@ -106,7 +130,7 @@ def make_mutation_resolver(mutation_name, class_name, session_func):
             msg = str(e)
             return {
                 'success': False,
-                'errore': ['op_mode_error'],
+                'errors': ['op_mode_error'],
                 'op_mode_error': {
                     'name': f'{typename}',
                     'message': msg if msg else op_mode_err_msg.get(typename, 'Unknown'),

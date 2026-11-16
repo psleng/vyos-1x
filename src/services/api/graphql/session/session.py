@@ -23,6 +23,7 @@ from vyos.configtree import ConfigTree
 from vyos.defaults import directories
 from vyos.opmode import Error as OpModeError
 
+from api.config_lock import wait_for_system_commit
 from api.graphql.libs.op_mode import load_op_mode_as_module, split_compound_op_mode_name
 from api.graphql.libs.op_mode import normalize_output
 
@@ -110,6 +111,7 @@ class Session:
 
         try:
             session.load_config(data['file_name'])
+            wait_for_system_commit()
             session.commit()
         except Exception as error:
             raise error
