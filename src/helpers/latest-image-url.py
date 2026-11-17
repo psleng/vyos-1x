@@ -9,6 +9,7 @@ from vyos.version import get_version_data
 
 if __name__ == '__main__':
     image_path = ''
+    image_version = ''
 
     config = ConfigTreeQuery()
     if config.exists('system update-check url'):
@@ -23,7 +24,11 @@ if __name__ == '__main__':
         remote_url_list = get_remote_version(configured_url_version)
         if remote_url_list:
             image_path = remote_url_list[0].get('url')
+            image_version = remote_url_list[0].get('version') or ''
         else:
             sys.exit(1)
 
+    # Line 1: image URL; line 2: its version, so the installer can warn
+    # before downloading an image that is not newer than the running one
     print(image_path)
+    print(image_version)
