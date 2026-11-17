@@ -415,7 +415,7 @@ image checker (`vyos-system-update-check.py`).
      obtained directly and authenticated by its own `.sig` in step 4.
 3. Map running `telit_version` → running `igos_version`. Resolve target
    (`<igos_version>` or `latest`). Compare (numeric-tuple):
-   - equal → "already installed"
+   - equal → "already installed"; explicit `force` permits reinstalling with all trust/compatibility checks retained
    - target > running → upgrade
    - target < running → **downgrade warning + confirm**
    - running not in catalog → "running: unknown", ordering indeterminate (warn)
@@ -621,3 +621,12 @@ carrier bug-fix case is covered by the ad-hoc archive path, §4 case 3.)
 - Done: `tfl`/`uxfp` added as `Recommends:` (soft runtime dep) to vyos-1x
   `debian/control`.
 - Pending: everything in §§1–8 above.
+
+### Explicit same-version reinstall
+
+Use `update firmware wwan <wwanN> <igos_version|latest> force [now]`
+or `update firmware wwan <wwanN> archive <url-or-local-path> force [now]`
+to reinstall the running version. `force` only bypasses the same-version skip;
+signature verification and model/revision checks still apply. Confirmation is
+required unless `now` is supplied. For the existing development-only unsigned
+path, use `archive <local-path> force-unsigned force [now]`.
