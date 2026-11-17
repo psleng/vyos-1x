@@ -496,7 +496,7 @@ thread (`flask/app/core/operation/software_management/software_update.py`)
 `vyos.remote.download()` → `HttpC.download()` (`python/vyos/remote.py`),
 then install.
 
-*E.1 No stall tolerance or resume in the downloader (CLI and GUI).*
+*E.1 No stall tolerance or resume in the downloader (CLI and GUI) — fixed, see below.*
 `HttpC.download()` opens the local file with `'wb'` (truncate), makes a single
 GET with no `Range` header and no retry, and uses `timeout=10.0`, which applies
 per read. Any stall over 10 s raises, the install fails, and the next attempt
@@ -508,16 +508,73 @@ Browsers / `wget -c` / `curl -C -` would resume, which is what users expect
 for large files. CLI `add system image <url>` uses the same code, so it fails
 the same way (VRF downloads too, via `src/helpers/simple-download.py`).
 
-Proposed fix in `HttpC.download()` (covers CLI, GUI, VRF and other
-`vyos.remote` users such as config load and the modem firmware archive):
-- raise the per-read stall timeout from 10 s to ~60 s;
-- on a read error, reconnect and continue with
-  `Range: bytes=<bytes written>-`, appending to the file; several retries with
-  short backoff, retry count reset whenever progress is made;
-- if the server answers `200` instead of `206` (no range support), restart
-  from byte 0;
-- keep the existing pre-download space check and post-download signature
-  check. Note `vyos.remote` is upstream code (keep the change self-contained).
+**Implemented 2026-11-17 — resume after stalls and drops:**
+- `vyos.remote.HttpC.download()` (CLI, GUI and VRF ISO downloads, and other
+  `vyos.remote` HTTP users such as config load): on a dropped connection, a
+  read stalled past the timeout, or a 5xx, reconnect and continue with
+  `Range: bytes=<bytes on disk>-`, appending to the file. Up to 8 consecutive
+  attempts **without receiving data** (backoff 2 s → 30 s); the count resets
+  whenever data arrives, so a slow but progressing link never gives up.
+  A server answering `200` instead of `206` restarts from byte 0; 4xx errors
+  are not retried. The 10 s per-read timeout is kept: with resume, a short
+  timeout recovers faster from a dead connection. The existing space check
+  and post-download signature check are unchanged.
+- Cellular firmware archives use a **separate** downloader
+  (`download_archive()` in `vyos/utils/wwan/interfaces_wwan_firmware.py`,
+  urllib, 30 s timeout) — not `vyos.remote` as first noted here — and are
+  usually fetched over the cellular link itself. Same resume logic added;
+  it also now reads with `read1()`, because the 1 MiB `read()` discarded up
+  to 1 MiB of received data on every stall. The archive SHA-256 is still
+  verified afterwards.
+- **Resume across runs (ISO).** In-run retries only bridge outages of about
+  2.5 minutes; in poor coverage a download may need several attempts. ISO
+  downloads therefore go to a stable path per URL,
+  `/var/cache/vyos/image-downloads/<sha256(url)[:16]>.iso` (persistent
+  overlay, survives reboots), with a `<file>.resume` record (URL, size,
+  validator). When a run fails, is interrupted, or the session drops, the
+  partial file is **kept** and the installer prints "Partial download kept
+  (N MiB); run the same command again to resume." Re-running the same command
+  (`add system image latest` or the same URL) continues from the end of the
+  file. Ranged requests carry `If-Range` with the server's strong ETag (or
+  Last-Modified), so if the ISO on the server changed the server sends the
+  whole new file instead of a mismatched remainder. A complete file left by a
+  run killed during install is reused without downloading again; the
+  signature check still validates the result. Housekeeping: only the partial
+  for the most recent URL is kept, nothing older than 7 days, and the file and
+  its record are deleted after a normal install or abort, or when a complete
+  download fails later (e.g. signature).
+  `vyos.remote.download(..., resume=True)` is opt-in; other callers are
+  unchanged. VRF downloads pass `--resume` to `simple-download.py`.
+- Correction: Ctrl+C **during the download** never reached the installer's
+  cleanup — `vyos.remote.download()` catches it and calls `sys.exit(1)` —
+  which likely explains the 16 MB leftover in E.3. With resume this now
+  deliberately keeps the partial file.
+- Verified on the reference unit against `download.perle.com`: a run killed
+  with SIGKILL at 7.3 MB, then a second run printed "Resuming download at
+  6.9 MiB of 769.0 MiB" and continued; the 128 KB around the join matched the
+  server's bytes exactly.
+- **Resume across runs (cellular firmware).** Catalog release downloads go
+  to `/var/cache/vyos/wwan-firmware-downloads/<archive_sha256>.part` (separate
+  from the archive cache, which prunes `.partial-*`). On failure or
+  interruption the partial is kept with the same "run the same command again
+  to resume" hint; the next `update firmware wwan …` for that release
+  continues it. Here the catalog's SHA-256 is the integrity guard: only a
+  file matching it is moved into the transient release directory, a
+  mismatching one is deleted (so a changed server file cannot survive), and a
+  complete partial left by a killed run (server answers 416) is verified and
+  used. Same housekeeping: only the current release's partial, max 7 days.
+  Standalone archives (`update firmware wwan … archive <url>`) have no
+  catalog digest and resume within a run only. Verified on the reference
+  unit with the real LE910C4-NFD archive (117.7 MB): run killed at 0.3 MB,
+  second run "Resuming firmware download at 0.3 MiB", completed and passed
+  the catalog SHA-256 check; nothing left behind.
+- Tests: `src/tests/test_remote_resume.py` runs both downloaders against a
+  local HTTP server (drop mid-file, stall past the read timeout, no range
+  support, 404, no data at all). `download.perle.com` range support was
+  verified earlier (`206` on the 806 MB ISO); an end-to-end resume over a
+  real cellular link has not been tested yet.
+- Note `vyos.remote` is upstream code; the change is self-contained in
+  `HttpC.download()`.
 
 *E.2 nginx 600 s limit on the GUI → API request (GUI only).* Download plus
 install must finish within one request through nginx's API location
@@ -537,6 +594,74 @@ How to tell which cause hit a given failure: `/var/log/nginx/error.log`
 the image later present in `show system image` → E.2; a read timeout /
 connection error in `journalctl -u vyos-http-api` → E.1. Retrying from the CLI
 also separates them: it succeeds where the GUI failed only for E.2.
+
+*E.3 `latest` downloaded an older release; partial downloads left behind
+(observed on the reference unit 2026-11-17, fixed same day).* The unit ran a
+development build (`999.202611171841`, built that day); `add system image
+latest` resolved, via the baked-in update URL, to the latest release
+`1.5-rolling-202611160734` (a day and a half older) and started downloading
+it with no version check. 16 MB of the 806 MB ISO was left in
+`/root/<uuid>.iso`: Ctrl+C cleaned up, but a download error (`image_fetch`'s
+`except` → `exit(1)`) or a dropped session (SIGHUP) did not. The update check
+also said "Update available" because it tested *different*, not *newer*.
+Fixed:
+- `vyos.version.compare_build_versions()` orders images by the trailing
+  `YYYYMMDDHHMM` build stamp shared by release (`1.5-rolling-…`) and
+  development (`999.…`) versions; versions without one are "not orderable".
+- `add system image latest`: `latest-image-url.py` also returns the listed
+  version; if it is older than or the same as the running image, the
+  installer says so and asks "Download and install it anyway?" (default no)
+  **before** downloading; with `--no-prompt` it declines. Explicit URLs and
+  files are unchanged.
+- Update check (`show system updates`, `ShowUpdateSystem`, MOTD): an update is
+  reported only when the listed image is newer; unorderable versions keep the
+  "different" check.
+- Partial ISO handling: superseded by resume across runs (E.1) — an
+  incomplete download is now kept for resuming (with housekeeping) rather
+  than deleted; SIGHUP/SIGTERM still take the Ctrl+C path.
+- Cellular firmware, same principle: a downgrade now asks before downloading
+  (it used to download first and only confirm at install time, and `now`
+  downgraded without asking); `now` refuses a downgrade unless `force` is also
+  given. Its transient download directory was already removed on errors and
+  Ctrl+C; SIGHUP/SIGTERM now take that path too — a killed run left the
+  directory behind, which then blocked retrying that version
+  (`work.mkdir(exist_ok=False)`).
+
+**F. Download authenticity (follow-ups, reviewed 2026-11-17).** What a unit
+downloads and how each item is authenticated today:
+
+| Download | Signed? | Check today |
+|---|---|---|
+| `image-version.json` (image update listing) | **no** (`.sig` 404 on download.perle.com) | HTTPS certificate only |
+| ISO | yes, `.minisig` | `minisign` against `/usr/share/vyos/keys/*.minisign.pub` (on igOS: `perle.minisign.pub` only; key ID matches the published signature) |
+| `modem-firmware.json` (firmware catalog) | yes, detached CMS `.sig` + CRL | `verify_file()` against `igos-firmware-root-ca.pem` (expiry, purpose, revocation) |
+| Modem firmware archives | via the signed catalog | SHA-256 from the signed catalog |
+
+Follow-ups:
+1. **Sign the image update listing.** Publish `image-version.json.sig` and
+   verify it before trusting the version/URL (`vyos.version.get_remote_version`,
+   used by `add system image latest`, the update check, MOTD and GUI) — reuse
+   the firmware catalog's CMS + CRL scheme (`verify_file()`, same trust store)
+   so both listings are handled alike. Today a tampered listing cannot get an
+   unsigned ISO accepted, but it can point units at a different, validly
+   signed Perle ISO (e.g. an old one) or hide updates; HTTPS limits this to
+   someone able to impersonate download.perle.com. Needs a publishing step,
+   since the build writes the listing but nothing signs or uploads it.
+2. **Refuse unsigned ISOs when nobody can be asked.** In `image_fetch()` a
+   missing `.minisig` only prompts interactively; with `no_prompt` the install
+   continues unsigned. Make `no_prompt` refuse a missing signature (an
+   invalid signature already always prompts), and change the GUI default
+   `proceed_without_signature` from `True` to `False`
+   (`flask/app/core/operation/service.py`, Perle repo).
+3. **Build-input (TOML) integrity.** The build-flavor TOMLs (e.g.
+   `igos-am64x-all.toml`, which sets `update_url` and
+   `wwan_firmware_map_url`) are never downloaded by units; their values are
+   baked into `/usr/share/vyos/version.json` inside the image and are
+   protected only as part of the image (ISO signature, signed boot
+   artifacts). Their integrity is therefore a build-pipeline concern: who can
+   change them in `vyos-build`, and whether builds run from reviewed/signed
+   commits. Worth deciding alongside item 1, since a changed `update_url`
+   redirects every unit built from it.
 
 **Small, done with B:**
 - `mutations.py` returned the key `'errore'` instead of `'errors'`, so op-mode
@@ -701,9 +826,15 @@ Paths under `src/services/api/` unless stated. Line numbers re-verified
 
 ## 7. Open items / decisions
 
-- **Image download reliability** (§5.1 E): implement resume/retry in
-  `vyos.remote.HttpC.download()` (E.1); decide the E.2 stop-gap (raise the API
-  location's `proxy_read_timeout`, or GUI → unix socket) until fix D.
+- **Download authenticity** (§5.1 F): sign the image update listing; refuse
+  unsigned ISOs under `no_prompt` and flip the GUI's
+  `proceed_without_signature` default; decide build-input (TOML) integrity
+  controls.
+- **Image download reliability** (§5.1 E): resume/retry done (E.1, ISO and
+  cellular firmware). Still to decide: the E.2 stop-gap (raise the API
+  location's `proxy_read_timeout`, or GUI → unix socket) until fix D — resume
+  makes slow downloads succeed but they can still exceed nginx's 600 s on the
+  GUI path.
 - ~~**Deferred HTTPS commit hand-off**~~ — **decided 2026-11-16:** acquire the
   lock in the background task only (§5.1 A); the short exposure window is
   accepted.
@@ -804,3 +935,25 @@ download failure: the downloader has a 10 s per-read timeout with no retry or
 resume (CLI and GUI), although the Perle download server supports range
 requests; and the GUI's install request is capped by nginx's 600 s
 `proxy_read_timeout`. Neither is fixed by phases 1/2.
+
+**2026-11-17 (latest / downgrades)** — §5.1 E.3: `add system image latest`
+and cellular firmware ask before downloading an older image/firmware; the
+update check reports only newer images; partial ISO downloads are cleaned up
+on failure and on SIGHUP/SIGTERM.
+
+**2026-11-17 (resume)** — §5.1 E.1 implemented: ISO (`vyos.remote`) and
+cellular firmware downloads resume with HTTP Range after stalls and drops.
+
+**2026-11-17 (resume across runs)** — interrupted ISO downloads are kept in
+`/var/cache/vyos/image-downloads/` and resumed by re-running the command
+(If-Range protects against a changed file); verified against the real
+server on the reference unit.
+
+**2026-11-17 (firmware resume)** — cellular firmware catalog downloads also
+resume across runs (keyed by archive SHA-256); verified on the reference
+unit with a real archive.
+
+**2026-11-17 (authenticity)** — added §5.1 F: review of what units download
+and how it is authenticated; follow-ups to sign the image update listing,
+refuse unsigned ISOs without a prompt, and address build-input (TOML)
+integrity.

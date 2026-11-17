@@ -732,9 +732,18 @@ The updater:
 1. Reads the modem identity, authenticates the catalog, and selects the matching
    hardware track. It uses the release's full archive URL directly.
 2. Returns without flashing if that igOS release is already installed. A lower
-   target label prints a downgrade warning; an unmapped running revision prints
-   an unknown-ordering warning.
+   target label is a downgrade: it prints a warning and asks
+   "Download and install older firmware …?" (default no) **before**
+   downloading anything. With `now` (`--no-prompt`) a downgrade is refused
+   unless `force` is also given (`... <version> force now`). An unmapped
+   running revision prints an unknown-ordering warning.
 3. Downloads only the selected archive, or reuses an eligible cached copy.
+   Stalls and dropped connections resume automatically. If the download
+   still fails (for example a long loss of coverage), the partial file is
+   kept in `/var/cache/vyos/wwan-firmware-downloads/` and running the same
+   command again continues where it stopped; it is only used if the result
+   matches the catalog SHA-256, and is discarded after 7 days or when
+   another release is downloaded.
    Checks free space and the catalog's `archive_sha256` before extraction.
    Extraction rejects absolute/traversal paths, symbolic/hard links, and special
    device entries. Storage checks preserve a 32 MiB free-space reserve.
