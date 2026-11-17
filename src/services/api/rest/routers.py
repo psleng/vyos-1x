@@ -620,19 +620,23 @@ async def retrieve_op(data: RetrieveModel):
     op = data.op
     path = ' '.join(data.path)
 
+    # Read the committed config, not the shared session: every API config op
+    # commits or discards under the config lock, so between requests the two
+    # are equal, and during one the session holds another client's
+    # uncommitted changes
     try:
         if op == 'returnValue':
-            res = config.return_value(path)
+            res = config.return_effective_value(path)
         elif op == 'returnValues':
-            res = config.return_values(path)
+            res = config.return_effective_values(path)
         elif op == 'exists':
-            res = config.exists(path)
+            res = config.exists_effective(path)
         elif op == 'showConfig':
             config_format = 'json'
             if data.configFormat:
                 config_format = data.configFormat
 
-            res = session.show_config(path=data.path)
+            res = session.show_config(path=data.path, effective=True)
 
             config_tree = ConfigTree(res)
             if data.withDefaults:

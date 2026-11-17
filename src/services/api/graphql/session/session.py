@@ -85,7 +85,9 @@ class Session:
         out = ''
 
         try:
-            out = session.show_config(data['path'])
+            # committed config: the shared session may hold another
+            # request's uncommitted changes (see rest retrieve_op)
+            out = session.show_config(data['path'], effective=True)
             if data.get('config_format', '') == 'json':
                 config_tree = ConfigTree(out)
                 out = json.loads(config_tree.to_json())
