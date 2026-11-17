@@ -902,48 +902,71 @@ remove cataloged cached releases.
 
 ### Automatic checks and notifications
 
-Enable notification-only checks, optionally broadcasting changed notices:
+Notification-only checks run by default on any unit with a modem: whenever an
+enabled `interfaces wwan` interface is configured, the `interfaces wwan`
+configuration starts `vyos-wwan-firmware-check.service` (the unit has no
+`[Install]` section, so units without a modem never run it). This matches the
+system image update check, which is also on by default. To also broadcast
+changed notices to logged-in users:
 
 ```text
 configure
-set system update-check cellular-firmware auto-check
 set system update-check cellular-firmware wall
 commit
 save
 exit
 ```
 
-`vyos-cellular-firmware-check.service` runs an immediate check when started and
-then every 12 hours, with a 180-second timeout per check. It uses the same FSM
-identity, authenticated catalog, revision matching, and running-version mapping
-as the operational handler. It checks present configured WWAN interfaces and
-aggregates newer-release notices into `/run/motd.d/11-vyos-cellular-firmware`.
-Each notice names the interface, available igOS label, and exact update command.
+The service runs an immediate check when started and then every 12 hours, with
+a 180-second timeout per check. If a check fails -- typically at boot, before
+the modem or uplink is up -- it retries after 5 minutes, doubling up to once an
+hour, until a check succeeds. It uses the same FSM identity, authenticated
+catalog, revision matching, and running-version mapping as the operational
+handler. It checks present configured WWAN interfaces and writes
+newer-release notices to `/run/motd.d/11-vyos-cellular-firmware`, shown at login
+right after the image update notice and in the same layout:
+
+```text
+---
+Current cellular firmware (wwan0): 2.0
+Cellular firmware update available: 2.1
+---
+```
+
+As with the image update notice, a failed or incomplete check leaves any
+existing notice in place. A successful check that finds nothing newer clears it
+(a modem flash does not reboot the unit, so the notice would otherwise stay).
 Unknown running versions are not guessed to be upgrades. Unavailable modems are
-skipped; checks never stop the manager, download firmware archives, or auto-flash.
+skipped; checks never stop the manager, download firmware archives, or
+auto-flash.
+
+Every check records its result in `/run/vyos-cellular-firmware-status.json`.
+While that result is fresh (13 hours after a success, about an hour after a
+failure), `show interfaces wwan <wwanN> firmware` and the GUI use the cached,
+authenticated catalog instead of downloading it again.
 
 `wall` broadcasts only when notice content changes. Removing `wall` leaves MOTD
-notices enabled. To disable cellular checks explicitly:
+notices enabled. To disable cellular checks:
 
 ```text
 configure
-delete system update-check cellular-firmware auto-check
 set system update-check cellular-firmware disable
 commit
 save
 exit
 ```
 
-`auto-check` and `disable` cannot coexist. Removing `auto-check`, or setting
-`disable`, stops/disables the cellular service and clears its MOTD fragment.
-Delete `disable` before enabling `auto-check` again. These cellular toggles are
-independent of the parent image-update notification toggle.
+`set system update-check disable` also disables cellular checks, along with
+image update checks. Disabling stops the cellular service and clears its MOTD
+fragment. `auto-check` is still accepted for compatibility but is no longer
+needed; it cannot be combined with `disable`.
 
 For diagnostics from the router shell:
 
 ```bash
-systemctl status vyos-cellular-firmware-check.service
-journalctl -u vyos-cellular-firmware-check.service
+systemctl status vyos-wwan-firmware-check.service
+journalctl -u vyos-wwan-firmware-check.service
+cat /run/vyos-cellular-firmware-status.json
 ```
 
 ### Firmware build and signing workflow

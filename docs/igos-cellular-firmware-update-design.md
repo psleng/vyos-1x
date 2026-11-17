@@ -601,8 +601,12 @@ Global:
     to dev/debug builds only?
 13. **Scheduled-check hosting:** a dedicated `vyos-cellular-firmware-check.service` loop
     (recommended) vs extending the image checker; cadence (reuse the 12h interval?).
-14. **Toggle granularity:** independent cellular `auto-check`/`disable` under
-    `system update-check` vs inheriting the image toggles.
+14. **Toggle granularity (decided 2026-11-17):** on by default whenever an enabled
+    wwan interface is configured (conf_mode start/stop, no image-level enable, so
+    units without a modem never run it); `system update-check disable` disables
+    both checks and `cellular-firmware disable` only this one; `auto-check` is an
+    accepted no-op. Service name as built: `vyos-wwan-firmware-check.service`.
+    See `igos-http-api-concurrency-design.md` §5.1 C.2.
 15. **Revision pattern semantics (decided):** exact + whole-segment prefix (`1.*`) +
     bare `*` catch-all (**allowed**), most-specific wins (exact > longest prefix > `*`),
     override-not-merge from broader patterns. Remaining nit: keep partial-segment globs

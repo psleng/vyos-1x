@@ -156,18 +156,25 @@ Splitting the proposed "offload to threadpool" fix by operation type:
   commit (commits take ~20–40 s on the reference unit), re-creating the
   lock-out this work is meant to remove. Op-mode `show` reads system state, not
   the session, and is safe.
-  **Caveat (observed 2026-11-16):** reads that parse the *shared session's
-  working config* — REST `/retrieve` (`showConfig`, and `Config(session_env=…)`
-  lookups) and GraphQL `ShowConfig` — can observe a **torn** config while an
-  API commit is in flight: the unit logged `/retrieve` 500s with
-  `ValueError: Failed to parse config: Syntax error on line 9 …` during
-  commits, both before and after the fix-A change. On the legacy backend the
-  commit tears down and remounts the session's union view
-  (`vyatta-cfg` `cstore-unionfs.cpp:815`–`840`), so a concurrent reader can
-  catch it mid-way. Since fix A makes each API request's stage+commit atomic,
-  between requests the shared session has no pending changes; such reads
-  could therefore read the **active** config instead of the session (no
-  wait, no tear from the session remount) — see §7.
+  **Caveat — diff output, not torn reads (observed 2026-11-16, root-caused
+  and fixed 2026-11-17):** REST `/retrieve` `showConfig` and GraphQL
+  `ShowConfig` returned 500 / `ValueError: Failed to parse config: Syntax error
+  on line 9 …` while an API config op was in flight. Cause:
+  `ConfigSession.show_config()` ran `cli-shell-api showConfig` **without**
+  `--show-active-only`/`--show-working-only`, and while a session has
+  uncommitted changes `showConfig` prints a **diff** with `+`/`-` markers,
+  which `ConfigTree` cannot parse (the same FIXUP is documented in
+  `python/vyos/configsource.py:245`). Every API config op stages changes in
+  the shared session for its whole duration, so any concurrent read of it
+  failed. **Fix:** `ConfigSession.show_config(..., effective=True)` adds
+  `--show-active-only`; `/retrieve` (`showConfig`, `exists`, `returnValue(s)`)
+  and GraphQL `ShowConfig` now read the **committed** config. Because every
+  API config op commits or discards under the config lock, between requests
+  the committed config is what the session would show; during one, readers no
+  longer see another client's uncommitted changes. Verified on the unit: 0
+  failures across 16 reads during a commit. Note the active config is updated
+  when the config is applied (~10 s into a ~25 s `/configure` on the unit),
+  before post-commit hooks finish.
 - **In-process op-mode reentrancy — narrower than first feared.** GraphQL loads
   op-mode scripts with `load_as_module` (`python/vyos/utils/system.py:100`),
   which **re-executes the file into a fresh module object on every call**. So
@@ -349,7 +356,8 @@ GraphQL-vs-REST config race.
 *Remaining:* the narrowed reentrancy audit in §4 (process env, `vyos.*`
 globals, fixed temp paths) — no problems seen in testing.
 
-**C. Cache the update checks (remove internet from the request path).** Applies
+**C. Cache the update checks (remove internet from the request path).**
+*(Implemented 2026-11-17 — see "C — implementation and test results".)* Applies
 to **both** the ISO update check and the cellular modem firmware check (C.2).
 Have each standalone daemon **always** write a machine-readable status file
 after each poll (e.g. `/run/vyos-update-status.json` and
@@ -365,10 +373,37 @@ API; the remaining value is removing the wait from the GUI's own (single gevent
 worker) request path — up to ~9 s for the ISO check and up to ~90 s for the
 modem check (three catalog fetches at 30 s timeout each).
 
-Daemon retry: both daemons check once at boot and then sleep 12 h. At boot the
-uplink (often the cellular bearer) is usually not up yet, so the check fails
-and nothing is retried for 12 h. On failure, retry after a short delay (e.g.
-5–10 min, backing off) and record the failure in the status file.
+Daemon retry: both daemons checked once at boot and then slept 12 h. At boot
+the uplink (often the cellular bearer) is usually not up yet, so the check
+failed and nothing was retried for 12 h. Now, after a failed check, they retry
+after 5 min, doubling up to once an hour, and record the failure in the status
+file.
+
+**C — implementation and test results** (2026-11-17):
+- `python/vyos/utils/update_status.py`: status files
+  (`/run/vyos-update-status.json`, `/run/vyos-cellular-firmware-status.json`,
+  0644, written atomically, best effort so non-root CLI callers just skip the
+  write), freshness (success: 13 h; failure: 65 min, i.e. until the daemon's
+  next retry is due), URL match, backoff (5 min → 60 min), and the shared ISO
+  compare (`compare_system_version`, moved from `src/op_mode/system.py`).
+- ISO: `vyos-system-update-check.py` records every attempt and retries;
+  `show system updates` / GraphQL `ShowUpdateSystem` answer from the cache
+  when fresh, else fetch live and record the result.
+- Cellular: `execute_check_firmware` records every attempt — an error if the
+  catalog download failed (`load_catalog()` silently falls back to its cached
+  copy; detected by the cache file not being rewritten), a modem was skipped
+  (e.g. FSM identity not ready), or a wwan interface is configured but not
+  present yet. The daemon reads that record after each run to decide between
+  12 h and a retry. `show_firmware` (CLI and `ShowFirmwareWwanFirmware`) uses
+  the authenticated cached catalog while the record is fresh.
+- Unit tests: `src/tests/test_update_status.py`. Reference unit (ISO path,
+  legacy backend): with the update host unreachable, `ShowUpdateSystem` took
+  11.5 s live and 2.1 s from the cached error; with the host reachable, 1.5 s
+  cached. The remaining ~1.4 s is `src/op_mode/system.py` building a
+  module-level `ConfigTreeQuery()` on every call (the module is re-executed
+  per GraphQL call) — a possible later optimisation (look up the URL lazily).
+  Daemon: status written with the error immediately when unreachable, and
+  with the result once reachable.
 
 **C.2 Cellular modem firmware check — parity with the ISO check** (merged from
 `psl-master` 2026-11-17: `src/system/vyos-wwan-firmware-check.py`,
@@ -397,21 +432,43 @@ Done 2026-11-17:
 - **Firmware mutations exempt from the config lock** (§5.1 B) — a flash takes
   minutes and would otherwise block every API commit.
 
-Remaining (with C):
-1. **On by default, and top-level `system update-check disable` turns off both
-   checks.** Either enable `vyos-wwan-firmware-check` in the `vyos-build` hook
-   (matching the ISO check) or make `system_update-check.py` opt-out — decide
-   which, and whether `auto-check` stays as a no-op/compat node.
-2. **Status file + retry** as described in C above.
-3. **GUI:** show modem firmware status the same way as ISO status — read the
-   cached status via `ShowFirmwareWwanFirmware`, never live-fetch on login
-   (see §5.2).
+Done 2026-11-17 (with C):
+1. **On by default — only on units with a modem.** Not every product has a
+   modem, so the check is tied to wwan configuration rather than enabled in
+   the image: like `igos-wwan-manager`, `vyos-wwan-firmware-check.service`
+   now has no `[Install]` section and is started/stopped by conf_mode —
+   `interfaces_wwan.py` (on every wwan commit, including boot replay) and
+   `system_update-check.py` (restarted there so a changed URL or re-enable
+   checks at once). It runs while an enabled wwan interface is configured and
+   neither `system update-check disable` nor `... cellular-firmware disable`
+   is set (`cellular_firmware_check_wanted()`). `auto-check` is kept as an
+   accepted no-op, like the ISO's legacy `auto-check`. No `vyos-build` hook
+   change is needed (the ISO check's hook just runs `systemctl enable` at image
+   build time). `After=vyos-router.service` was removed from the unit: it is
+   started from inside vyos-router at boot (same note as the manager unit).
+2. **Status file + retry** as above.
+2a. **MOTD notice aligned with the ISO check:** same `---` layout with the
+   version in blue, no extra lines (the `Run: update firmware wwan …` hint was
+   dropped for consistency; `execute_check_firmware` without `--notify` still
+   prints it); a failed or
+   incomplete check leaves the existing notice in place (it used to delete it
+   on any catalog failure or skipped modem). One intended difference: a
+   successful check with nothing newer clears the notice, because a modem
+   flash does not reboot the unit. `wall` stays opt-in and change-only, as
+   plain text.
+
+Remaining:
+3. **GUI:** show modem firmware status the same way as ISO status via
+   `ShowFirmwareWwanFirmware`, which now answers from the cache (§5.2).
 4. **Perle owner to weigh:** firmware flash via GraphQL
    (`SetFirmwareWwanFirmware`, `UpdateArchiveWwanFirmware`) runs **inside the
    API process** — it stops ModemManager, and an API restart mid-flash kills
    the flash; without `noPrompt` it calls `ask_yes_no()` on the service's
    stdin. Consider running it as a background op in a separate process
    (fix D), or not exposing flash over GraphQL.
+5. **Not tested on hardware:** the cellular parts (default-on start/stop,
+   status, retry) are covered by unit tests and local checks only; the
+   reference unit's image predates the merged firmware code.
 
 **D. Long-running ops → background.** Route genuinely long operations through the
 existing `BackgroundOpManager` (`background.py`) — enqueue + poll — instead of
@@ -549,21 +606,20 @@ Paths under `src/services/api/` unless stated. Line numbers re-verified
 - ~~**Deferred HTTPS commit hand-off**~~ — **decided 2026-11-16:** acquire the
   lock in the background task only (§5.1 A); the short exposure window is
   accepted.
-- **Torn reads of the shared session during a commit** (§4 caveat, observed):
-  switch `/retrieve` and GraphQL `ShowConfig` (and other `Config(session_env=…)`
-  reads outside a config op) to read the **active** config rather than the
-  shared session, or retry once on a parse error. Taking the config lock for
-  them is the fallback but makes GUI config reads wait ~20–40 s behind every
-  commit.
+- ~~**Torn reads of the shared session during a commit**~~ — **fixed
+  2026-11-17:** root cause was `showConfig` diff output, not tearing; reads
+  now use the committed config (§4 caveat).
 - **Reentrancy audit** (§4) — check the process env (`IN_COMMIT_CONFIRM`),
   globals in the `vyos.*` modules the GUI's op-mode calls import, and fixed temp
   paths. Decide whether commit-confirm should stop mutating the shared
   `os.environ` (pass an env copy to the commit instead).
-- **Cache format/location** for the update status files — ISO and cellular
-  (`/run/...` vs a persistent path), freshness window, and the "refresh now" UX
-  (background op + poll).
-- **Cellular firmware check default-on mechanism** (§5.1 C.2 item 1):
-  `vyos-build` hook vs. opt-out in `system_update-check.py`.
+- ~~**Cache format/location**~~ — **decided 2026-11-17:** `/run` JSON files
+  (cleared on reboot, the daemons re-check at boot), freshness 13 h after a
+  success / 65 min after a failure. Still open: a "refresh now" UX (background
+  op + poll) for users who want to bypass the cache.
+- ~~**Cellular firmware check default-on mechanism**~~ — **decided
+  2026-11-17:** conf_mode start/stop tied to wwan configuration, not a
+  `vyos-build` hook (§5.1 C.2).
 - ~~**Out-of-tree GraphQL resolvers**~~ — **checked 2026-11-16:** the Perle
   `vyos-custom-queries` package installs op-mode scripts, so its operations go
   through the standard op-mode resolver factories and inherit B. Perle
@@ -619,3 +675,11 @@ Decided: deferred HTTPS commit takes the lock in the background task; API
 commits wait up to 30 s (later raised to 120 s) for another session's commit. Found that reads of the
 shared session's working config can be torn during a commit (§4 caveat, new §7
 item). Reference unit confirmed on the legacy backend.
+
+**2026-11-17 (later)** — fix C implemented for both update checks (status
+files, cached reads, retry after failure) and tested on the unit for the ISO
+path. Cellular firmware check now on by default on units with a configured
+wwan interface (conf_mode start/stop, no image hook). The "torn reads" were
+root-caused to `showConfig` printing a diff while the shared session has
+staged changes; `/retrieve` and GraphQL `ShowConfig` now read the committed
+config.
