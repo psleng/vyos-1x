@@ -27,7 +27,7 @@
             <children>
               #include <include/url-http-https.xml.i>
               <leafNode name="auto-check">
-                <properties><help>Check cellular firmware every 12 hours (notify only)</help><valueless/></properties>
+                <properties><help>Deprecated: cellular firmware checks run by default when a wwan interface is configured</help><valueless/></properties>
               </leafNode>
               <leafNode name="disable">
                 <properties><help>Disable cellular firmware checks</help><valueless/></properties>

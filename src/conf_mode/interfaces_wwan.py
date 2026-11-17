@@ -40,6 +40,8 @@ from vyos.firewall import remove_nftables_rule
 from vyos.ifconfig import WWANIf
 from vyos.utils.network import interface_exists
 from vyos.utils.process import call
+from vyos.utils.update_status import cellular_firmware_check_wanted
+from vyos.utils.update_status import sync_cellular_firmware_check
 from vyos import ConfigError
 from vyos import airbag
 airbag.enable()
@@ -459,6 +461,11 @@ def get_config(config=None):
     # the result to wwan_on_demand_service() instead of opening a second
     # configuration session.
     wwan['_dial_on_demand_active'] = _dial_on_demand_active(conf, ifname, wwan)
+
+    # Same reasoning: decide from the proposed tree whether the cellular
+    # firmware check daemon should run (an enabled wwan interface exists and
+    # update checks are not disabled); apply() starts or stops it
+    wwan['_cellular_firmware_check'] = cellular_firmware_check_wanted(conf)
 
     # ── Live-tree intent flags ───────────────────────────────────────
     # get_interface_dict() merges XML <defaultValue> tags into the parsed
@@ -1268,6 +1275,10 @@ def apply(wwan):
     # Extract numeric interface index from wwanN
     match = re.search(r'(\d+)$', ifname)
     interface_number = int(match.group(1)) if match else 0
+
+    # Firmware update checks only make sense on a unit with a modem: run the
+    # check daemon while an enabled wwan interface is configured
+    sync_cellular_firmware_check(wwan.get('_cellular_firmware_check', False))
 
     if 'deleted' in wwan:
         # Interface node is gone from the CLI tree.  get_config() already
