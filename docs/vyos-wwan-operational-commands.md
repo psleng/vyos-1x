@@ -943,7 +943,9 @@ auto-flash.
 Every check records its result in `/run/vyos-cellular-firmware-status.json`.
 While that result is fresh (13 hours after a success, about an hour after a
 failure), `show interfaces wwan <wwanN> firmware` and the GUI use the cached,
-authenticated catalog instead of downloading it again.
+authenticated catalog instead of downloading it again. Use
+`show interfaces wwan <wwanN> firmware refresh` to download the catalog now
+(`show system updates refresh` does the same for image updates).
 
 `wall` broadcasts only when notice content changes. Removing `wall` leaves MOTD
 notices enabled. To disable cellular checks:

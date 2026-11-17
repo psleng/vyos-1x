@@ -353,8 +353,7 @@ non-functional. Left as is.
 A and B together fix the whole *class* of lock-ups — a slow `show`, a firmware
 check, or an image download no longer freezes the GUI — and close the
 GraphQL-vs-REST config race.
-*Remaining:* the narrowed reentrancy audit in §4 (process env, `vyos.*`
-globals, fixed temp paths) — no problems seen in testing.
+Reentrancy audit (2026-11-17): see §7 — no issues in vyos-1x; one Perle item.
 
 **C. Cache the update checks (remove internet from the request path).**
 *(Implemented 2026-11-17 — see "C — implementation and test results".)* Applies
@@ -399,9 +398,17 @@ file.
 - Unit tests: `src/tests/test_update_status.py`. Reference unit (ISO path,
   legacy backend): with the update host unreachable, `ShowUpdateSystem` took
   11.5 s live and 2.1 s from the cached error; with the host reachable, 1.5 s
-  cached. The remaining ~1.4 s is `src/op_mode/system.py` building a
+  cached. The remaining ~1.4 s was `src/op_mode/system.py` building a
   module-level `ConfigTreeQuery()` on every call (the module is re-executed
-  per GraphQL call) — a possible later optimisation (look up the URL lazily).
+  per GraphQL call); it now looks up only the URL with one
+  `cli-shell-api returnActiveValue` (`active_config_value()`; vyconf backend
+  keeps `ConfigTreeQuery`), and cached `ShowUpdateSystem` takes **0.1 s**.
+  `show_firmware` uses the same lookup for the catalog URL.
+- "Check now": `show system updates refresh` / `ShowUpdateSystem(refresh:
+  true)` and `show interfaces wwan <x> firmware refresh` /
+  `ShowFirmwareWwanFirmware(refresh: true)` bypass the cache and record the
+  new result (unit: 1.1 s live, status rewritten; the GraphQL field appears
+  when the schema is regenerated at image build).
   Daemon: status written with the error immediately when unreachable, and
   with the result once reachable.
 
@@ -472,7 +479,64 @@ Remaining:
 
 **D. Long-running ops → background.** Route genuinely long operations through the
 existing `BackgroundOpManager` (`background.py`) — enqueue + poll — instead of
-blocking a request.
+blocking a request. Not yet done: `BackgroundOpManager` is REST-only, so this
+needs a GraphQL "start job → id → poll" pattern plus GUI changes. Needed for
+image installs (E.2) and firmware flashes (§5.1 C.2 item 4).
+
+**E. Image download reliability (reported 2026-11-17).** A user reported that a
+GUI system image (ISO) download failed. Phase 1/2 do **not** fix this: they
+stop an install from freezing the rest of the API but change no timeouts. Two
+independent causes on the GUI path:
+
+GUI path: browser creates a job and polls it (no browser timeout) → Flask job
+thread (`flask/app/core/operation/software_management/software_update.py`)
+→ GraphQL `AddSystemImagePerleImageMutation` at `https://127.0.0.1:443`, i.e.
+**through nginx**, with no `requests` timeout → in the API process,
+`image_installer.add_image()` → `download_file()` →
+`vyos.remote.download()` → `HttpC.download()` (`python/vyos/remote.py`),
+then install.
+
+*E.1 No stall tolerance or resume in the downloader (CLI and GUI).*
+`HttpC.download()` opens the local file with `'wb'` (truncate), makes a single
+GET with no `Range` header and no retry, and uses `timeout=10.0`, which applies
+per read. Any stall over 10 s raises, the install fails, and the next attempt
+starts from byte 0. The current ISO is ~806 MB, so on a slow cellular link at
+least one >10 s stall is likely and the download fails every time.
+`download.perle.com` **supports resume** (verified: `Accept-Ranges: bytes`,
+a range request returns `206 Partial Content`); only the client lacks it.
+Browsers / `wget -c` / `curl -C -` would resume, which is what users expect
+for large files. CLI `add system image <url>` uses the same code, so it fails
+the same way (VRF downloads too, via `src/helpers/simple-download.py`).
+
+Proposed fix in `HttpC.download()` (covers CLI, GUI, VRF and other
+`vyos.remote` users such as config load and the modem firmware archive):
+- raise the per-read stall timeout from 10 s to ~60 s;
+- on a read error, reconnect and continue with
+  `Range: bytes=<bytes written>-`, appending to the file; several retries with
+  short backoff, retry count reset whenever progress is made;
+- if the server answers `200` instead of `206` (no range support), restart
+  from byte 0;
+- keep the existing pre-download space check and post-download signature
+  check. Note `vyos.remote` is upstream code (keep the change self-contained).
+
+*E.2 nginx 600 s limit on the GUI → API request (GUI only).* Download plus
+install must finish within one request through nginx's API location
+(`proxy_read_timeout 600`, `data/templates/https/nginx.default.j2`). An
+~806 MB ISO over a few Mbit/s takes longer even without stalls: nginx returns
+504, the GUI job shows **failed**, but the install continues in the API and
+**may succeed** — the user may later find the image installed. CLI is not
+affected (no proxy in the path).
+- Proper fix: fix D — the install runs as an API background job polled by
+  the GUI's job, so no single HTTP request spans the install.
+- Stop-gap: raise `proxy_read_timeout` on the API location (e.g. 1 h), or
+  have the GUI call the API's unix socket directly instead of going through
+  nginx.
+
+How to tell which cause hit a given failure: `/var/log/nginx/error.log`
+`upstream timed out` and a 504 / Gateway Time-out in the GUI job error, with
+the image later present in `show system image` → E.2; a read timeout /
+connection error in `journalctl -u vyos-http-api` → E.1. Retrying from the CLI
+also separates them: it succeeds where the GUI failed only for E.2.
 
 **Small, done with B:**
 - `mutations.py` returned the key `'errore'` instead of `'errors'`, so op-mode
@@ -550,6 +614,40 @@ GUI follow-ups from this trace:
 - **Set a timeout on the Flask→API `requests` call** consistent with the
   above (> 120 s wait + commit), so a hung API can't pin a greenlet forever.
 
+#### 5.2.2 To consider: process-wide output redirection in Perle GraphQL scripts (found 2026-11-17)
+
+`perle_image_mutation.add_system_image()`
+(`perle-graphql/vyos-custom-queries/usr/share/vyos-custom-queries/scripts/perle_image_mutation.py`,
+around line 406) wraps the image install in
+`contextlib.redirect_stdout()` / `redirect_stderr()` to capture the
+installer's output.
+
+- Those context managers swap `sys.stdout` / `sys.stderr` for the **whole
+  process**, not just the calling thread.
+- The script runs **in-process** inside the VyOS HTTP API (GraphQL op-mode),
+  and since fix B (§5.1) GraphQL resolvers run concurrently in the threadpool.
+- So during a multi-minute install, anything other API requests print goes
+  into this mutation's captured output instead of the API log, and the
+  install's output can pick up their text. Before fix B this could not happen
+  only because the install froze the whole API.
+- Impact is low: output and log text only, no config or state effect. But any
+  error message the mutation builds from the captured text can include
+  unrelated output.
+
+Options:
+1. Run the installer in a **subprocess** and capture its output there
+   (also isolates the API process from the install — see the in-process flash
+   concern in §5.1 C.2 item 4).
+2. Stop redirecting: log the installer's output normally and return a
+   structured result.
+3. Accept as is (document that captured text may contain unrelated lines).
+
+Option 1 is preferred, and fits fix D (long-running ops as background jobs).
+`wwan_query.show_all()` also uses `redirect_stdout`, but only for
+`raw=False`, which GraphQL never uses, so it is not affected. Any new
+in-process GraphQL script should avoid `redirect_stdout`/`redirect_stderr`,
+`os.chdir`, `os.umask`, and writes to `os.environ` for the same reason.
+
 ---
 
 ## 6. Evidence index
@@ -603,20 +701,33 @@ Paths under `src/services/api/` unless stated. Line numbers re-verified
 
 ## 7. Open items / decisions
 
+- **Image download reliability** (§5.1 E): implement resume/retry in
+  `vyos.remote.HttpC.download()` (E.1); decide the E.2 stop-gap (raise the API
+  location's `proxy_read_timeout`, or GUI → unix socket) until fix D.
 - ~~**Deferred HTTPS commit hand-off**~~ — **decided 2026-11-16:** acquire the
   lock in the background task only (§5.1 A); the short exposure window is
   accepted.
 - ~~**Torn reads of the shared session during a commit**~~ — **fixed
   2026-11-17:** root cause was `showConfig` diff output, not tearing; reads
   now use the committed config (§4 caveat).
-- **Reentrancy audit** (§4) — check the process env (`IN_COMMIT_CONFIRM`),
-  globals in the `vyos.*` modules the GUI's op-mode calls import, and fixed temp
-  paths. Decide whether commit-confirm should stop mutating the shared
-  `os.environ` (pass an env copy to the commit instead).
+- ~~**Reentrancy audit**~~ — **done 2026-11-17.** GraphQL-reachable code
+  (in-tree op-mode in `op-mode-standardized.json`, the GraphQL session, and
+  the Perle scripts) checked for process-wide state changes:
+  - `IN_COMMIT_CONFIRM` in the shared `os.environ`: only read by the
+    post-commit hook (`config_mgmt.py`), which runs inside commits that are
+    already serialized — harmless.
+  - `ConfigSourceSession.show_config()` writes edit-level vars into
+    `os.environ`: always the same root values — harmless.
+  - `os.umask()` / `ConfigSession(os.getpid())` in `config_mgmt.py`
+    (rollback/commit hooks) and the Perle onboarding CLI path: not reachable
+    over GraphQL (exposed `config_mgmt` functions are read-only `show_*`).
+  - `/tmp/config.file` in `/config-file`: serialized by the config lock.
+  - **To consider (Perle):** process-wide `redirect_stdout`/`redirect_stderr`
+    in `perle_image_mutation.add_system_image` — see §5.2.2.
 - ~~**Cache format/location**~~ — **decided 2026-11-17:** `/run` JSON files
   (cleared on reboot, the daemons re-check at boot), freshness 13 h after a
-  success / 65 min after a failure. Still open: a "refresh now" UX (background
-  op + poll) for users who want to bypass the cache.
+  success / 65 min after a failure. "Check now" added as a `refresh` option
+  (§5.1 C).
 - ~~**Cellular firmware check default-on mechanism**~~ — **decided
   2026-11-17:** conf_mode start/stop tied to wwan configuration, not a
   `vyos-build` hook (§5.1 C.2).
@@ -683,3 +794,13 @@ wwan interface (conf_mode start/stop, no image hook). The "torn reads" were
 root-caused to `showConfig` printing a diff while the shared session has
 staged changes; `/retrieve` and GraphQL `ShowConfig` now read the committed
 config.
+
+**2026-11-17 (small items)** — `system.py`/`show_firmware` look up only the
+URL (cached `ShowUpdateSystem` 1.5 s → 0.1 s); `refresh` option on both show
+commands and GraphQL queries; reentrancy audit done (one Perle follow-up).
+
+**2026-11-17 (image downloads)** — added §5.1 E after a user-reported GUI ISO
+download failure: the downloader has a 10 s per-read timeout with no retry or
+resume (CLI and GUI), although the Perle download server supports range
+requests; and the GUI's install request is capped by nginx's 600 s
+`proxy_read_timeout`. Neither is fixed by phases 1/2.
