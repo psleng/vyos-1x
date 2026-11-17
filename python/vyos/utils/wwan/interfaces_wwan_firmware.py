@@ -9,6 +9,7 @@ import base64
 import binascii
 import fcntl
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -18,6 +19,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import zipfile
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
@@ -36,6 +38,12 @@ MAX_MEMBERS = 10000
 MAX_MANIFEST_SIZE = 65536
 CHUNK_SIZE = 1024 * 1024
 DOWNLOAD_TIMEOUT = 30
+# Interrupted release downloads are kept here (per archive SHA-256) and resumed
+# by the next run; separate from the archive cache, which prunes .partial-*
+PARTIAL_DOWNLOAD_DIR = Path('/var/cache/vyos/wwan-firmware-downloads')
+PARTIAL_DOWNLOAD_KEEP_DAYS = 7
+# Consecutive download attempts without receiving data before giving up
+DOWNLOAD_RETRIES = 8
 DEFAULT_CACHE_ARCHIVES = 2
 DEFAULT_CACHE_BYTES = 512 * 1024**2
 STANDALONE_METADATA_URL = 'https://local.invalid/archive'
@@ -404,43 +412,99 @@ def space(path, needed):
         raise ValueError(f'Insufficient space in {path}: need {needed + RESERVE} bytes including reserve')
 
 
-def download_archive(url, destination):
-    """Check size before writing and bound streaming even without Content-Length."""
-    space(destination.parent, 0)
-    with urlopen(url, timeout=DOWNLOAD_TIMEOUT) as response:
-        if urlsplit(response.geturl()).scheme not in ('http', 'https'):
-            raise ValueError('Unsupported firmware redirect')
-        length = response.headers.get('Content-Length')
-        expected = int(length) if length is not None else None
-        if expected is not None:
-            if expected < 0 or expected > MAX_ARCHIVE:
-                raise ValueError('Firmware archive exceeds size limit')
-            space(destination.parent, expected)
-        total = 0
-        interactive = sys.stdout.isatty()
-        with ExitStack() as progress_context:
-            progress = None
-            if interactive and expected:
-                from vyos.progressbar import Progressbar
+def download_archive(url, destination, resume=False):
+    """Check size before writing and bound streaming even without Content-Length.
 
-                progress = progress_context.enter_context(Progressbar())
+    Firmware archives are usually fetched over the cellular link itself, so
+    a stall or dropped connection resumes with an HTTP Range request instead
+    of failing; the retry budget resets whenever data arrives. A server
+    without range support restarts the download. The archive's SHA-256 is
+    verified by the caller afterwards, so a resumed file is still checked
+    end to end.
+
+    resume=True continues an existing ``destination`` left by an earlier,
+    interrupted run instead of requiring a new file.
+    """
+    from urllib.error import HTTPError, URLError
+    from urllib.request import Request
+
+    space(destination.parent, 0)
+    start = destination.stat().st_size if resume and destination.is_file() else 0
+    total = start
+    expected = None
+    failures = 0
+    interactive = sys.stdout.isatty()
+    if start:
+        print(f'Resuming firmware download at {start / 1024**2:.1f} MiB', file=sys.stderr, flush=True)
+    with ExitStack() as progress_context, destination.open('r+b' if start else 'xb') as output:
+        output.seek(start)
+        output.truncate()
+        progress = None
+        while True:
+            received = 0
+            headers = {'Range': f'bytes={total}-'} if total else {}
             try:
-                with destination.open('xb') as output:
-                    while chunk := response.read(CHUNK_SIZE):
+                with urlopen(Request(url, headers=headers), timeout=DOWNLOAD_TIMEOUT) as response:
+                    if urlsplit(response.geturl()).scheme not in ('http', 'https'):
+                        raise ValueError('Unsupported firmware redirect')
+                    if total and response.status != 206:
+                        print('\nServer does not support resuming; restarting download.', file=sys.stderr)
+                        output.seek(0)
+                        output.truncate()
+                        total = 0
+                    if expected is None:
+                        length = response.headers.get('Content-Length')
+                        expected = int(length) if length is not None else None
+                        if expected is not None and total:
+                            # a resumed (206) response carries only the rest
+                            expected += total
+                        if expected is not None:
+                            if expected < 0 or expected > MAX_ARCHIVE:
+                                raise ValueError('Firmware archive exceeds size limit')
+                            space(destination.parent, expected - total)
+                        if interactive and expected:
+                            from vyos.progressbar import Progressbar
+
+                            progress = progress_context.enter_context(Progressbar())
+                    # read1 returns what has arrived instead of waiting for a
+                    # full chunk, so a stall loses no received data
+                    while chunk := response.read1(CHUNK_SIZE):
                         total += len(chunk)
+                        received += len(chunk)
                         if total > MAX_ARCHIVE:
                             raise ValueError('Firmware archive exceeds size limit')
                         space(destination.parent, len(chunk))
                         output.write(chunk)
                         if progress is not None:
-                            progress.progress(total, expected)
+                            progress.progress(min(total, expected), expected)
                         elif interactive:
                             print(f'\rDownloaded {total / 1024**2:.1f} MiB', end='', file=sys.stderr, flush=True)
-                if expected is not None and total != expected:
+                if expected is None or total == expected:
+                    break
+                if total > expected:
                     raise ValueError('Incomplete firmware download')
-            finally:
-                if interactive and (progress is None or total != expected):
-                    print(file=sys.stderr, flush=True)
+                raise ConnectionError(f'connection closed at {total} of {expected} bytes')
+            except (URLError, ConnectionError, TimeoutError, http.client.HTTPException) as error:
+                # Resuming a file that is already complete: the caller's
+                # SHA-256 check decides whether it is usable
+                if isinstance(error, HTTPError) and error.code == 416 and total:
+                    break
+                # Client errors (404, 403, ...) will not improve on retry
+                if isinstance(error, HTTPError) and error.code < 500:
+                    raise
+                failures = 0 if received else failures + 1
+                if failures > DOWNLOAD_RETRIES:
+                    raise
+                delay = min(2**failures, 30) if failures else 1
+                print(
+                    f'\nFirmware download interrupted ({error}); resuming at '
+                    f'{total / 1024**2:.1f} MiB in {delay} s (retry {max(failures, 1)}/{DOWNLOAD_RETRIES})',
+                    file=sys.stderr,
+                    flush=True,
+                )
+                time.sleep(delay)
+        if interactive and progress is None:
+            print(file=sys.stderr, flush=True)
 
 
 def safe_path(name):
@@ -782,6 +846,57 @@ class ArchiveCache:
             self._remove(legacy)
 
 
+def _partial_download_path(digest):
+    """Stable file for resuming the download of the archive with ``digest``.
+
+    Partials of other archives, and anything older than
+    PARTIAL_DOWNLOAD_KEEP_DAYS, are removed first. Returns None if the digest
+    is not a SHA-256 hex string (no resume then).
+    """
+    if not re.fullmatch(r'[0-9a-fA-F]{64}', digest or ''):
+        return None
+    PARTIAL_DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    target = PARTIAL_DOWNLOAD_DIR / f'{digest.lower()}.part'
+    cutoff = time.time() - PARTIAL_DOWNLOAD_KEEP_DAYS * 86400
+    for item in PARTIAL_DOWNLOAD_DIR.iterdir():
+        try:
+            if item != target or item.stat().st_mtime < cutoff:
+                item.unlink()
+        except OSError:
+            pass
+    return target
+
+
+def _download_release_archive(release, work):
+    """Download the release archive into ``work``, resuming across runs.
+
+    The download goes to a persistent per-archive file so that, after a
+    failure or interruption, the next run for the same release continues
+    where this one stopped. Only a file matching the catalog SHA-256 is
+    moved into ``work``; a mismatching one is deleted.
+    """
+    archive = work / 'download.archive'
+    partial = _partial_download_path(release['archive_sha256'])
+    if partial is None:
+        download_archive(release['url'], archive)
+        verify_archive(archive, release['archive_sha256'])
+        return archive
+    try:
+        download_archive(release['url'], partial, resume=True)
+    except BaseException:
+        if partial.is_file():
+            print(f'Partial firmware download kept ({partial.stat().st_size / 1024**2:.1f} MiB); '
+                  'run the same command again to resume.', file=sys.stderr, flush=True)
+        raise
+    try:
+        verify_archive(partial, release['archive_sha256'])
+    except BaseException:
+        partial.unlink(missing_ok=True)
+        raise
+    shutil.move(partial, archive)
+    return archive
+
+
 @contextmanager
 def prepare_release(root, vendor, modem, release, installer, pattern, cache=None):
     """Own exactly one transient release directory; always clean our files."""
@@ -798,9 +913,7 @@ def prepare_release(root, vendor, modem, release, installer, pattern, cache=None
             except OSError as error:
                 print(f'Firmware cache unavailable; downloading instead: {error}')
         if archive is None:
-            archive = work / 'download.archive'
-            download_archive(release['url'], archive)
-            verify_archive(archive, release['archive_sha256'])
+            archive = _download_release_archive(release, work)
         extracted = work / 'payload'
         extract_archive(archive, extracted)
         payload, manifest = validate_manifest(extracted, modem, release, installer, pattern)
