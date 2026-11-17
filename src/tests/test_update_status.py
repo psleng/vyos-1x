@@ -100,3 +100,35 @@ class TestUpdateStatus(TestCase):
                 )
             )
         )
+
+
+class TestActiveConfigValue(TestCase):
+    def test_legacy_backend_uses_single_lookup(self):
+        with (
+            patch('vyos.utils.backend.vyconf_backend', return_value=False),
+            patch('vyos.utils.boot.boot_configuration_complete', return_value=True),
+            patch('vyos.configquery.CliShellApiConfigQuery') as cli,
+            patch('vyos.configquery.ConfigTreeQuery') as tree,
+        ):
+            cli.return_value.value.return_value = 'https://x'
+            self.assertEqual(us.active_config_value(['a']), 'https://x')
+            tree.assert_not_called()
+
+    def test_missing_value_is_none(self):
+        from vyos.configquery import ConfigQueryError
+
+        with (
+            patch('vyos.utils.backend.vyconf_backend', return_value=False),
+            patch('vyos.utils.boot.boot_configuration_complete', return_value=True),
+            patch('vyos.configquery.CliShellApiConfigQuery') as cli,
+        ):
+            cli.return_value.value.side_effect = ConfigQueryError('none')
+            self.assertIsNone(us.active_config_value(['a']))
+
+    def test_vyconf_backend_uses_config_tree(self):
+        with (
+            patch('vyos.utils.backend.vyconf_backend', return_value=True),
+            patch('vyos.configquery.ConfigTreeQuery') as tree,
+        ):
+            tree.return_value.value.return_value = 'v'
+            self.assertEqual(us.active_config_value(['a']), 'v')

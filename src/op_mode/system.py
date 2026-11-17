@@ -16,13 +16,13 @@
 
 import sys
 
-from vyos.configquery import ConfigTreeQuery
+from vyos.utils.update_status import active_config_value
 from vyos.utils.update_status import cached_system_version
+from vyos.utils.update_status import check_system_version
 
 import vyos.opmode
 import vyos.version
 
-config = ConfigTreeQuery()
 base = ['system', 'update-check']
 
 
@@ -30,16 +30,21 @@ def _get_update_url():
     # An explicitly configured URL overrides the default baked into the image
     # at build time (/usr/share/vyos/version.json from the build flavor's
     # `update_url`).
-    url = config.value(base + ['url'])
+    # Single-value lookup: this module is re-executed on every GraphQL call,
+    # and loading the whole running config here dominated the response time
+    url = active_config_value(base + ['url'])
     if not url:
         url = vyos.version.get_version_data().get('update_url')
     return url
 
 
-def _compare_version_raw():
+def _compare_version_raw(url, refresh=False):
     # Answer from the update-check daemon's cached result when fresh, so
-    # `show system updates` and the GUI do not wait on the internet
-    return cached_system_version(_get_update_url())
+    # `show system updates` and the GUI do not wait on the internet;
+    # refresh=True always checks now (and updates the cache)
+    if refresh:
+        return check_system_version(url)
+    return cached_system_version(url)
 
 
 def _formatted_compare_version(data):
@@ -55,21 +60,17 @@ def _formatted_compare_version(data):
         return 'Update not found'
 
 
-def _verify():
+def show_update(raw: bool, refresh: bool = False):
     # The subsystem is usable when a URL can be resolved: either configured via
     # CLI or baked into the image at build time.
-    return bool(_get_update_url())
-
-
-def show_update(raw: bool):
-    if not _verify():
+    url = _get_update_url()
+    if not url:
         raise vyos.opmode.UnconfiguredSubsystem("system update-check not configured")
-    data = _compare_version_raw()
+    data = _compare_version_raw(url, refresh=refresh)
     if raw:
         return data
     else:
         return _formatted_compare_version(data)
-
 
 if __name__ == '__main__':
     try:

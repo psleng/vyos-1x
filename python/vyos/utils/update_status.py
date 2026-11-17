@@ -93,6 +93,29 @@ def read_last_status(path) -> dict | None:
         return None
 
 
+def active_config_value(path: list) -> str | None:
+    """One value from the running config, without loading the whole tree.
+
+    ConfigTreeQuery parses the full running config (~1.4 s on igOS hardware);
+    show commands that only need a URL use a single cli-shell-api lookup.
+    """
+    from vyos.utils.backend import vyconf_backend
+    from vyos.utils.boot import boot_configuration_complete
+
+    if vyconf_backend() or not boot_configuration_complete():
+        from vyos.configquery import ConfigTreeQuery
+
+        return ConfigTreeQuery().value(path)
+
+    from vyos.configquery import CliShellApiConfigQuery
+    from vyos.configquery import ConfigQueryError
+
+    try:
+        return CliShellApiConfigQuery().value(path) or None
+    except ConfigQueryError:
+        return None
+
+
 def next_retry(previous: int | None) -> int:
     """Backoff delay after a failed check: RETRY_MIN doubling up to RETRY_MAX."""
     if not previous:

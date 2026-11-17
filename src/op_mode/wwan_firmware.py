@@ -43,6 +43,7 @@ from vyos.utils.wwan.interfaces_wwan_firmware import (
 )
 from vyos.utils.update_status import CELLULAR_FIRMWARE_MOTD
 from vyos.utils.update_status import CELLULAR_FIRMWARE_STATUS
+from vyos.utils.update_status import active_config_value
 from vyos.utils.update_status import cellular_firmware_checks_disabled
 from vyos.utils.update_status import read_status
 from vyos.utils.update_status import write_status
@@ -289,38 +290,42 @@ def _display_firmware_details(
 
 
 def _catalog_url(config=None) -> str:
-    from vyos.configquery import ConfigTreeQuery
-
-    config = config or ConfigTreeQuery()
-    return config.value(FIRMWARE_CONFIG + ['url']) or get_version_data().get('wwan_firmware_map_url', '')
+    # Without a config object, use a single-value lookup: loading the whole
+    # running config dominated GraphQL show_firmware response time
+    url = config.value(FIRMWARE_CONFIG + ['url']) if config else active_config_value(FIRMWARE_CONFIG + ['url'])
+    return url or get_version_data().get('wwan_firmware_map_url', '')
 
 
 def _load_firmware_catalog(refresh: bool | None = True) -> list[dict[str, object]]:
     """Authenticate online or same-source cached catalogs before use.
 
-    refresh=None: use the cached catalog while the check daemon's last
-    attempt is fresh (vyos.utils.update_status), else download it.
+    refresh=False: cached catalog only. refresh=None: cached catalog while
+    the check daemon's last attempt is fresh (vyos.utils.update_status),
+    else download. refresh=True: download. Every download is recorded in
+    the status file.
     """
     from vyos.utils.wwan.interfaces_wwan_firmware import load_catalog
 
     url = _catalog_url()
     try:
-        if refresh is None:
-            if read_status(CELLULAR_FIRMWARE_STATUS, url) is not None:
-                try:
-                    return load_catalog(url, FIRMWARE_CATALOG_CACHE, parse_catalog, refresh=False)
-                except (OSError, ValueError, KeyError, TypeError):
-                    pass
-            cached_before = _mtime(FIRMWARE_CATALOG_CACHE)
+        if refresh is False:
+            return load_catalog(url, FIRMWARE_CATALOG_CACHE, parse_catalog, refresh=False)
+        if refresh is None and read_status(CELLULAR_FIRMWARE_STATUS, url) is not None:
+            try:
+                return load_catalog(url, FIRMWARE_CATALOG_CACHE, parse_catalog, refresh=False)
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+        cached_before = _mtime(FIRMWARE_CATALOG_CACHE)
+        try:
             entries = load_catalog(url, FIRMWARE_CATALOG_CACHE, parse_catalog, refresh=True)
-            # load_catalog() silently falls back to the cached copy on a
-            # download failure; only an updated cache counts as a fresh check
-            refreshed = _mtime(FIRMWARE_CATALOG_CACHE) != cached_before
-            write_status(
-                CELLULAR_FIRMWARE_STATUS, url, error=None if refreshed else 'catalog download failed'
-            )
-            return entries
-        return load_catalog(url, FIRMWARE_CATALOG_CACHE, parse_catalog, refresh=refresh)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            write_status(CELLULAR_FIRMWARE_STATUS, url, error=str(error))
+            raise
+        # load_catalog() silently falls back to the cached copy on a download
+        # failure; only an updated cache counts as a fresh check
+        refreshed = _mtime(FIRMWARE_CATALOG_CACHE) != cached_before
+        write_status(CELLULAR_FIRMWARE_STATUS, url, error=None if refreshed else 'catalog download failed')
+        return entries
     except (OSError, ValueError, KeyError, TypeError) as error:
         from urllib.error import HTTPError, URLError
 
@@ -633,7 +638,7 @@ def _running_version(compatible):
 
 
 def show_firmware(
-    raw: bool, interface: str, quiet: bool = False, downloaded_only: bool = False
+    raw: bool, interface: str, quiet: bool = False, downloaded_only: bool = False, refresh: bool = False
 ) -> dict[str, object] | None:
     """Show available releases, native firmware, dates, cache and running status.
 
@@ -643,7 +648,9 @@ def show_firmware(
     try:
         # quiet is completion help: cached catalog only; otherwise cached
         # while the check daemon's result is fresh
-        compatible = _get_compatible_firmware(interface, refresh_map=False if quiet else None)
+        # refresh downloads the catalog now (and updates the cache)
+        refresh_map = False if quiet else (True if refresh else None)
+        compatible = _get_compatible_firmware(interface, refresh_map=refresh_map)
     except (OSError, ValueError, vyos.opmode.Error):
         if quiet:
             return
