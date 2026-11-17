@@ -14,10 +14,10 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import jmespath
 import sys
 
 from vyos.configquery import ConfigTreeQuery
+from vyos.utils.update_status import cached_system_version
 
 import vyos.opmode
 import vyos.version
@@ -37,25 +37,9 @@ def _get_update_url():
 
 
 def _compare_version_raw():
-    url = _get_update_url()
-    local_data = vyos.version.get_full_version_data()
-    remote_data = vyos.version.get_remote_version(url)
-    if not remote_data:
-        return {"error": True,
-                "reason": "Unable to get remote version"}
-    if local_data.get('version') and remote_data:
-        local_version = local_data.get('version')
-        remote_version = jmespath.search('[0].version', remote_data)
-        image_url = jmespath.search('[0].url', remote_data)
-        if local_data.get('version') != remote_version:
-            return {"error": False,
-                    "update_available": True,
-                    "local_version": local_version,
-                    "remote_version": remote_version,
-                    "url": image_url}
-        return {"update_available": False,
-                "local_version": local_version,
-                "remote_version": remote_version}
+    # Answer from the update-check daemon's cached result when fresh, so
+    # `show system updates` and the GUI do not wait on the internet
+    return cached_system_version(_get_update_url())
 
 
 def _formatted_compare_version(data):
