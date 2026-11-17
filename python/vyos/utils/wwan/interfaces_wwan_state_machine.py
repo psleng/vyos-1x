@@ -7225,6 +7225,26 @@ class ModemStateMachine:
                 # Continue monitoring despite errors
                 await asyncio.sleep(poll_cadence)
 
+    @staticmethod
+    def _mm_active_slot_present(live_identity: bool, failed_reason, probed: dict) -> bool:
+        """SIM presence for the active slot when no SIM_DETECT line is known.
+
+        Order matters: a live identity read wins (some modems, e.g. Telit
+        LE910C4, report sim-missing while the card is readable); then
+        ModemManager's sim-missing / sim-error failure reasons; then the
+        slot's SimSlots entry. With no evidence, report absent: MODEM state
+        LOCKED is not used because some modems report it for a missing SIM.
+        """
+        if live_identity:
+            return True
+        if failed_reason == 2:  # MM_MODEM_STATE_FAILED_REASON_SIM_MISSING
+            return False
+        if failed_reason == 3:  # MM_MODEM_STATE_FAILED_REASON_SIM_ERROR: a card is there
+            return True
+        if 'present' in (probed or {}):
+            return bool(probed['present'])
+        return False
+
     async def _probe_sim_slot_info(self, slot_number: int) -> dict:
         """Read whatever SIM identity is available from a specific slot's D-Bus object.
 
@@ -14303,10 +14323,14 @@ class ModemStateMachine:
             pass  # Keep cached values
 
         # ── 3. Live SIM details (query D-Bus if modem present) ───────────
+        # Only a live read proves a card is in the active slot: the cached
+        # identity above survives SIM removal.
+        live_sim_identity = False
         try:
             if self.proxy:
                 live_sim = await self._get_sim_information()
                 if live_sim:
+                    live_sim_identity = bool(live_sim.get('imsi') or live_sim.get('sim_identifier'))
                     status['sim_imsi'] = live_sim.get('imsi', '') or status['sim_imsi']
                     status['sim_iccid'] = live_sim.get('sim_identifier', '') or status['sim_iccid']
                     status['sim_operator'] = live_sim.get('operator_name', '') or status['sim_operator']
@@ -15008,10 +15032,19 @@ class ModemStateMachine:
                     status[f"{prefix}_iccid"] = status.get('sim_iccid', cached.get('iccid', ''))
                     status[f"{prefix}_operator"] = status.get('sim_operator', cached.get('operator', ''))
                     status[f"{prefix}_mcc_mnc"] = status.get('sim_mcc_mnc', cached.get('mcc_mnc', ''))
-                    # GPIO SIM_DETECT wins; else assume present (the active slot
-                    # is muxed to the modem, which is how section 3 read identity).
-                    status[f"{prefix}_present"] = (
-                        gpio_present if gpio_present is not None else True)
+                    # GPIO SIM_DETECT wins. Without detect lines (or before
+                    # they are sampled) derive presence from ModemManager.
+                    if gpio_present is not None:
+                        status[f"{prefix}_present"] = gpio_present
+                    else:
+                        try:
+                            probed = await self._probe_sim_slot_info(slot_num)
+                        except Exception:
+                            probed = {}
+                        status[f"{prefix}_present"] = self._mm_active_slot_present(
+                            live_sim_identity,
+                            status.get('modem_state_failed_reason', 0),
+                            probed)
                 else:
                     # Inactive slot: try D-Bus probe, fall back to cache
                     try:

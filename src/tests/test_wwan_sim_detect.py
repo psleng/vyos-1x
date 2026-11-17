@@ -455,3 +455,29 @@ class TestActiveSimRemovalPolicy(IsolatedAsyncioTestCase):
 
         self.assertIs(fsm._active_sim_removal_watchdog_task, replacement)
         self.assertEqual(fsm._active_sim_removal_watchdog_slot, 2)
+
+
+class TestModemManagerActiveSlotPresence(TestCase):
+    """Active-slot SIM presence on boards without SIM_DETECT lines."""
+
+    present = staticmethod(ModemStateMachine._mm_active_slot_present)
+
+    def test_no_sim_at_boot_is_absent(self):
+        # ModemManager: FAILED / sim-missing, no SIM object, empty slot
+        self.assertFalse(self.present(False, 2, {'present': False}))
+        self.assertFalse(self.present(False, 2, {}))
+
+    def test_no_evidence_is_absent(self):
+        # Modem not found yet, or a single-slot modem without SimSlots
+        self.assertFalse(self.present(False, 0, {}))
+
+    def test_live_identity_is_present_even_if_mm_reports_missing(self):
+        # Telit LE910C4 SIMDET quirk: sim-missing while the card is readable
+        self.assertTrue(self.present(True, 2, {'present': False}))
+
+    def test_sim_error_means_a_card_is_inserted(self):
+        self.assertTrue(self.present(False, 3, {}))
+
+    def test_falls_back_to_sim_slots(self):
+        self.assertTrue(self.present(False, 0, {'present': True}))
+        self.assertFalse(self.present(False, 0, {'present': False}))
