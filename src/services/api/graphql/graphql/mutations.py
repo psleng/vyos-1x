@@ -33,17 +33,21 @@ from ..session.errors.op_mode_errors import op_mode_err_msg, op_mode_err_code
 
 mutation = ObjectType('Mutation')
 
+# Mutations that run long and never use the shared config session: system image
+# add/delete/rename/set-default (in-tree and Perle) and cellular modem firmware
+# flash/archive/cache/check (wwan_firmware.py). Holding the config lock for
+# them would block every API commit for minutes.
+_CONFIG_LOCK_EXEMPT = ('SystemImage', 'WwanFirmware')
+
 
 def uses_config_lock(class_name: str) -> bool:
     """Whether a mutation must hold the API config lock.
 
     Any mutation may stage or commit changes in the shared config session
     (op-mode scripts run in-process and can reach it via SessionState), so
-    the lock is the default. Image add/delete/rename/set-default (in-tree and
-    out-of-tree, e.g. AddSystemImagePerleImageMutation) can take minutes and
-    do not use the shared session; holding the lock would block all commits.
+    the lock is the default; see _CONFIG_LOCK_EXEMPT for the exceptions.
     """
-    return 'SystemImage' not in class_name
+    return not any(marker in class_name for marker in _CONFIG_LOCK_EXEMPT)
 
 
 def make_mutation_resolver(mutation_name, class_name, session_func):

@@ -604,9 +604,13 @@ def _running_version(compatible):
 
 
 def show_firmware(
-    interface: str, quiet: bool = False, downloaded_only: bool = False, raw: bool = False
+    raw: bool, interface: str, quiet: bool = False, downloaded_only: bool = False
 ) -> dict[str, object] | None:
-    """Show available releases, native firmware, dates, cache and running status."""
+    """Show available releases, native firmware, dates, cache and running status.
+
+    ``raw`` is first because the GraphQL op-mode resolver calls show functions
+    as ``func(True, **data)``.
+    """
     try:
         compatible = _get_compatible_firmware(interface, refresh_map=not quiet)
     except (OSError, ValueError, vyos.opmode.Error):
