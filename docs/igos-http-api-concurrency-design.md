@@ -315,11 +315,14 @@ Lock policy:
 - **mutations** → **the shared config lock from A by default**, acquired
   inside the worker thread. Default-on because in-process op-mode mutations can
   commit the shared session (Perle onboarding does, §4).
-- **exempt:** mutations whose name contains `SystemImage`
-  (`uses_config_lock()` in `mutations.py`) — `AddSystemImage`,
-  `DeleteSystemImage`, and the Perle `AddSystemImagePerleImageMutation`,
-  `RenameSystemImagePerleImageMutation`, `SetSystemImagePerleImageRenameMutation`
-  — long-running and not using the shared session.
+- **exempt:** mutations whose name contains `SystemImage` or `WwanFirmware`
+  (`_CONFIG_LOCK_EXEMPT` / `uses_config_lock()` in `mutations.py`) —
+  `AddSystemImage`, `DeleteSystemImage`, the Perle
+  `AddSystemImagePerleImageMutation`, `RenameSystemImagePerleImageMutation`,
+  `SetSystemImagePerleImageRenameMutation`, and the cellular firmware
+  mutations `SetFirmwareWwanFirmware`, `UpdateArchiveWwanFirmware`,
+  `DeleteFirmwareWwanFirmware`, `ExecuteCheckFirmwareWwanFirmware` (added
+  2026-11-17, §5.1 C.2) — long-running and not using the shared session.
 - `LoadConfigFile` (the only in-tree GraphQL commit, `session/session.py`)
   waits for another session's commit like REST (`wait_for_system_commit`).
 - Trade-off accepted: quick op-mode mutations (restart/reset) can now wait
@@ -346,17 +349,69 @@ GraphQL-vs-REST config race.
 *Remaining:* the narrowed reentrancy audit in §4 (process env, `vyos.*`
 globals, fixed temp paths) — no problems seen in testing.
 
-**C. Cache the update check (remove internet from the request path).** Have the
-standalone daemon (`src/system/vyos-system-update-check.py`) **always** write a
-machine-readable status file (e.g. `/run/vyos-update-status.json` with the
-remote/local versions, URL and a timestamp) after each poll — today it only
-writes MOTD when an update exists. Change `src/op_mode/system.py`
-`_compare_version_raw` to read that file when it is fresh, and otherwise do the
-live fetch **and write the file**, so the CLI keeps working when the daemon is
+**C. Cache the update checks (remove internet from the request path).** Applies
+to **both** the ISO update check and the cellular modem firmware check (C.2).
+Have each standalone daemon **always** write a machine-readable status file
+after each poll (e.g. `/run/vyos-update-status.json` and
+`/run/vyos-cellular-firmware-status.json`: local/remote versions, URL, a
+timestamp, and a "not checked yet / last error" state) — today both only write
+MOTD, and only when an update exists. Change the show functions
+(`src/op_mode/system.py` `_compare_version_raw`; `src/op_mode/wwan_firmware.py`
+`show_firmware`) to read that file when it is fresh, and otherwise do the live
+fetch **and write the file**, so the CLI keeps working when a daemon is
 disabled. The cache must be a file: an in-memory cache does not survive the
-per-call module reload (§3). Once B lands this no longer freezes the API; its
-remaining value is removing a ~9 s wait from the GUI's own (single gevent
-worker) request path.
+per-call module reload (§3). Once B lands a live fetch no longer freezes the
+API; the remaining value is removing the wait from the GUI's own (single gevent
+worker) request path — up to ~9 s for the ISO check and up to ~90 s for the
+modem check (three catalog fetches at 30 s timeout each).
+
+Daemon retry: both daemons check once at boot and then sleep 12 h. At boot the
+uplink (often the cellular bearer) is usually not up yet, so the check fails
+and nothing is retried for 12 h. On failure, retry after a short delay (e.g.
+5–10 min, backing off) and record the failure in the status file.
+
+**C.2 Cellular modem firmware check — parity with the ISO check** (merged from
+`psl-master` 2026-11-17: `src/system/vyos-wwan-firmware-check.py`,
+`src/systemd/vyos-wwan-firmware-check.service`, `src/op_mode/wwan_firmware.py`,
+`system update-check cellular-firmware …` in
+`src/conf_mode/system_update-check.py`). It is meant to behave like the ISO
+check. Comparison as merged:
+
+| | ISO check | Modem check |
+|---|---|---|
+| On by default | **yes** — `vyos-build` hook `18-enable-disable_services.chroot` enables `vyos-system-update.service` | **no** — only with `system update-check cellular-firmware auto-check` |
+| Turn off | `system update-check disable` | `cellular-firmware disable`; top-level `disable` does not stop it |
+| URL | baked `update_url`, override `url` | baked `wwan_firmware_map_url`, override `cellular-firmware url` |
+| Schedule | boot, then every 12 h | same |
+| Notice | MOTD + `wall` when an update exists | MOTD; `wall` only with the `wall` option and when the notice changes |
+| CLI | `show system updates` (live fetch) | `show interfaces wwan X firmware` (live fetch) |
+| GraphQL for the GUI | `ShowUpdateSystem`; GUI calls it at login | `ShowFirmwareWwanFirmware` (was broken — fixed, below); GUI does not call it yet |
+| Other GraphQL ops | none | `SetFirmware…`, `UpdateArchive…`, `DeleteFirmware…`, `ExecuteCheckFirmware…` mutations |
+
+Done 2026-11-17:
+- **GraphQL query fixed.** The op-mode GraphQL resolver calls show functions
+  as `func(True, **data)` (convention: `raw` first); `show_firmware` had `raw`
+  last, so `True` bound to `interface` and every call raised `TypeError`.
+  `raw` is now the first parameter. CLI callers pass keywords and
+  `vyos.opmode.run` supplies `raw=False`, so the CLI is unaffected.
+- **Firmware mutations exempt from the config lock** (§5.1 B) — a flash takes
+  minutes and would otherwise block every API commit.
+
+Remaining (with C):
+1. **On by default, and top-level `system update-check disable` turns off both
+   checks.** Either enable `vyos-wwan-firmware-check` in the `vyos-build` hook
+   (matching the ISO check) or make `system_update-check.py` opt-out — decide
+   which, and whether `auto-check` stays as a no-op/compat node.
+2. **Status file + retry** as described in C above.
+3. **GUI:** show modem firmware status the same way as ISO status — read the
+   cached status via `ShowFirmwareWwanFirmware`, never live-fetch on login
+   (see §5.2).
+4. **Perle owner to weigh:** firmware flash via GraphQL
+   (`SetFirmwareWwanFirmware`, `UpdateArchiveWwanFirmware`) runs **inside the
+   API process** — it stops ModemManager, and an API restart mid-flash kills
+   the flash; without `noPrompt` it calls `ask_yes_no()` on the service's
+   stdin. Consider running it as a background op in a separate process
+   (fix D), or not exposing flash over GraphQL.
 
 **D. Long-running ops → background.** Route genuinely long operations through the
 existing `BackgroundOpManager` (`background.py`) — enqueue + poll — instead of
@@ -374,7 +429,8 @@ blocking a request.
   (`gevent.spawn` / the existing scheduler job) and **emit the result over
   Socket.IO when ready**; the connect handler must not block on the network.
 - **Prefer reading a cached status** over triggering a live fetch on every page
-  open.
+  open — for both the ISO update status and the cellular firmware status
+  (§5.1 C.2).
 - **Consider `--workers > 1`** (or ensure all blocking calls are gevent-
   cooperative) so a single blocking greenlet can't freeze the whole GUI. Note
   the GUI already uses `from gevent import subprocess` in places (PAM) — apply
@@ -503,8 +559,11 @@ Paths under `src/services/api/` unless stated. Line numbers re-verified
   globals in the `vyos.*` modules the GUI's op-mode calls import, and fixed temp
   paths. Decide whether commit-confirm should stop mutating the shared
   `os.environ` (pass an env copy to the commit instead).
-- **Cache format/location** for the update status (`/run/...` vs a persistent
-  path), freshness window, and the "refresh now" UX (background op + poll).
+- **Cache format/location** for the update status files — ISO and cellular
+  (`/run/...` vs a persistent path), freshness window, and the "refresh now" UX
+  (background op + poll).
+- **Cellular firmware check default-on mechanism** (§5.1 C.2 item 1):
+  `vyos-build` hook vs. opt-out in `system_update-check.py`.
 - ~~**Out-of-tree GraphQL resolvers**~~ — **checked 2026-11-16:** the Perle
   `vyos-custom-queries` package installs op-mode scripts, so its operations go
   through the standard op-mode resolver factories and inherit B. Perle
