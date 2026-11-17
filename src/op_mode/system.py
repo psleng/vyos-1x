@@ -53,7 +53,7 @@ def _formatted_compare_version(data):
     url = data.get('url')
     if {'update_available','local_version', 'remote_version', 'url'} <= set(data):
         return f'Current version: {local_version}\n\nUpdate available: {remote_version}\nUpdate URL: {url}'
-    elif local_version == remote_version and remote_version is not None:
+    elif data.get('update_available') is False and remote_version is not None:
         return f'No available updates for your system \n' \
                f'current version: {local_version}\nremote version: {remote_version}'
     else:

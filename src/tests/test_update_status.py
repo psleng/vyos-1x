@@ -132,3 +132,40 @@ class TestActiveConfigValue(TestCase):
         ):
             tree.return_value.value.return_value = 'v'
             self.assertEqual(us.active_config_value(['a']), 'v')
+
+
+class TestNewerOnly(TestCase):
+    def test_build_version_ordering(self):
+        from vyos.version import compare_build_versions as cmp
+
+        self.assertEqual(cmp('1.5-rolling-202611160734', '999.202611171841'), -1)
+        self.assertEqual(cmp('999.202611171841', '999.202611171841'), 0)
+        self.assertEqual(cmp('1.5-rolling-202611180000', '999.202611171841'), 1)
+        self.assertIsNone(cmp('1.5.0', '999.202611171841'))
+
+    def check(self, local, remote):
+        import vyos.version
+
+        with (
+            patch.object(
+                vyos.version, 'get_full_version_data', return_value={'version': local}
+            ),
+            patch.object(
+                vyos.version,
+                'get_remote_version',
+                return_value=[{'version': remote, 'url': 'https://x/image.iso'}],
+            ),
+        ):
+            return us.compare_system_version('https://x/list.json')
+
+    def test_older_release_is_not_an_update(self):
+        result = self.check('999.202611171841', '1.5-rolling-202611160734')
+        self.assertFalse(result['update_available'])
+
+    def test_newer_release_is_an_update(self):
+        result = self.check('999.202611151919', '1.5-rolling-202611160734')
+        self.assertTrue(result['update_available'])
+
+    def test_unorderable_versions_fall_back_to_different(self):
+        self.assertTrue(self.check('1.4.0', '1.4.1')['update_available'])
+        self.assertFalse(self.check('1.4.1', '1.4.1')['update_available'])

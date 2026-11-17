@@ -10,6 +10,10 @@ import xml.etree.ElementTree as ET
 ROOT = Path(__file__).resolve().parents[2]
 
 
+class _IncorrectValue(Exception):
+    """Stand-in for vyos.opmode.IncorrectValue (not a ValueError)."""
+
+
 class TestForceReinstall(unittest.TestCase):
     def handler(self, name):
         tree = ast.parse((ROOT/'src/op_mode/wwan_firmware.py').read_text())
@@ -39,6 +43,34 @@ class TestForceReinstall(unittest.TestCase):
                     self.assertEqual(ns['_install_firmware_payload'].call_count, int(force))
                     if force:
                         self.assertFalse(ns['_install_firmware_payload'].call_args.kwargs['no_prompt'])
+
+    def downgrade_handler(self, answer):
+        ns = self.handler('set_firmware')
+        ns['_running_version'] = Mock(return_value='2.0')
+        ns['_get_compatible_firmware'].return_value['releases'] = {'1.0': {}, '2.0': {}}
+        ns['ask_yes_no'] = Mock(return_value=answer)
+        ns['vyos'].opmode.IncorrectValue = _IncorrectValue
+        return ns
+
+    def test_downgrade_asks_before_downloading(self):
+        for answer in (False, True):
+            with self.subTest(answer=answer):
+                ns = self.downgrade_handler(answer)
+                ns['set_firmware']('1.0', 'wwan0')
+                ns['ask_yes_no'].assert_called_once()
+                self.assertEqual(ns['prepare_release'].call_count, int(answer))
+
+    def test_downgrade_without_prompt_requires_force(self):
+        ns = self.downgrade_handler(True)
+        with self.assertRaises(_IncorrectValue):
+            ns['set_firmware']('1.0', 'wwan0', no_prompt=True)
+        ns['prepare_release'].assert_not_called()
+        ns['ask_yes_no'].assert_not_called()
+
+        ns = self.downgrade_handler(True)
+        ns['set_firmware']('1.0', 'wwan0', no_prompt=True, force=True)
+        ns['prepare_release'].assert_called_once()
+        ns['ask_yes_no'].assert_not_called()
 
     def test_archive_force_keeps_authentication_and_confirmation(self):
         for force in (False, True):

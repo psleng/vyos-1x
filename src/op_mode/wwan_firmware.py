@@ -742,7 +742,16 @@ def set_firmware(version: str, interface: str, no_prompt: bool = False, force: b
             if running is None:
                 print('Running firmware is not in the catalog; version ordering is unknown.')
             elif version_key(version) < version_key(running):
-                print(f'WARNING: downgrading firmware from {running} to {version}.')
+                # Ask before downloading anything; without a prompt, only an
+                # explicit force downgrades
+                print(f'WARNING: firmware {version} is older than the running {running}.')
+                if no_prompt and not force:
+                    raise vyos.opmode.IncorrectValue(
+                        f'Not downgrading firmware from {running} to {version} without confirmation; use force'
+                    )
+                if not no_prompt and not ask_yes_no(f'Download and install older firmware {version}?', default=False):
+                    print('Firmware update cancelled.')
+                    return
             print('Preparing authenticated firmware archive...')
             cache = _get_archive_cache(retention_only=True)
             with prepare_release(
@@ -878,7 +887,18 @@ def execute_check_firmware(notify: bool = False):
         )
         subprocess.run(['wall', '-n'], input=broadcast, text=True, check=False)
 
+def _interrupt_on_signal(signum, frame):
+    # A dropped SSH session (SIGHUP) or a stop (SIGTERM) would otherwise kill
+    # the handler without running cleanup: the transient release directory
+    # would be left behind and block a retry of that version
+    raise KeyboardInterrupt
+
+
 if __name__ == '__main__':
+    import signal
+
+    signal.signal(signal.SIGHUP, _interrupt_on_signal)
+    signal.signal(signal.SIGTERM, _interrupt_on_signal)
     if hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(line_buffering=True)
     try:

@@ -63,6 +63,31 @@ def get_version_data(fname=version_file):
     return read_json(fname, {})
 
 
+def build_timestamp(version: str) -> str | None:
+    """Return the trailing YYYYMMDDHHMM build stamp of an image version.
+
+    Release and development versions use different schemes
+    (``1.5-rolling-202611160734`` vs ``999.202611171841``) and cannot be
+    ordered as version numbers, but both end in the build time.
+    """
+    import re
+
+    match = re.search(r'(?:^|[.-])(\d{12})$', version or '')
+    return match.group(1) if match else None
+
+
+def compare_build_versions(a: str, b: str) -> int | None:
+    """Order two image versions by build time: -1, 0 or 1 (a vs b).
+
+    Returns None when either version has no build stamp, so callers can
+    fall back to treating them as merely different.
+    """
+    ta, tb = build_timestamp(a), build_timestamp(b)
+    if ta is None or tb is None:
+        return None
+    return (ta > tb) - (ta < tb)
+
+
 def get_version(fname=version_file):
     """
     Get the version number, or an empty string if it could not be determined

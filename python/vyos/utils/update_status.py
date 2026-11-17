@@ -141,7 +141,12 @@ def compare_system_version(url) -> dict | None:
         return None
     remote_version = jmespath.search('[0].version', remote_data)
     image_url = jmespath.search('[0].url', remote_data)
-    if local_version != remote_version:
+    # Only a newer image is an update; a development or newer build must not
+    # be told to "update" to an older release. Versions without a build stamp
+    # cannot be ordered and keep the plain "different" check.
+    order = vyos.version.compare_build_versions(remote_version or '', local_version)
+    newer = (order > 0) if order is not None else (local_version != remote_version)
+    if newer:
         return {
             'error': False,
             'update_available': True,
