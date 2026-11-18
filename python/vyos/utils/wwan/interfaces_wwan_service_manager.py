@@ -476,7 +476,8 @@ class ConfigServiceManager:
                        extra={'interface_number': interface_number})
 
             # Create FSM without configuration - will be set via D-Bus SetConfiguration
-            fsm = ModemStateMachine(interface_number, self.bus, alert_emitter=self.emit_alert)
+            fsm = ModemStateMachine(
+                interface_number, self.bus, alert_emitter=self.emit_alert)
             logger.info("State machine created without configuration - awaiting D-Bus SetConfiguration",
                        extra={'interface_number': interface_number})
 

@@ -63,6 +63,12 @@ CRACKLIB_ERROR_MSG: str = (
 )
 
 
+PASSWORD_POLICY_DEFAULT_MINIMUM_LENGTH = 9
+PASSWORD_POLICY_DEFAULT_MINIMUM_DIGIT = 1
+PASSWORD_POLICY_DEFAULT_MINIMUM_UPPERCASE = 1
+PASSWORD_POLICY_DEFAULT_MINIMUM_SPECIAL = 1
+
+
 class EPasswdStrength(StrEnum):
     WEAK = 'Weak'
     DECENT = 'Decent'
@@ -134,6 +140,86 @@ def make_password_hash(password, fips=False):
     method = 'sha512crypt' if fips else 'yescrypt'
     mkpassword = f'mkpasswd --method={method} --stdin'
     return cmd(mkpassword, input=password, timeout=5)
+
+
+def password_policy_check(
+    password: str,
+    minlen: int = PASSWORD_POLICY_DEFAULT_MINIMUM_LENGTH,
+    ucredit: int = -PASSWORD_POLICY_DEFAULT_MINIMUM_UPPERCASE,
+    dcredit: int = -PASSWORD_POLICY_DEFAULT_MINIMUM_DIGIT,
+    ocredit: int = -PASSWORD_POLICY_DEFAULT_MINIMUM_SPECIAL,
+) -> str | None:
+    """
+        PERLE: Validate a password against enhanced policy requirements.
+    """
+
+    errors = []
+    uppercase_count = sum(1 for character in password if character.isupper())
+    digit_count = sum(1 for character in password if character.isdigit())
+    other_count = sum(1 for character in password if not character.isalnum())
+
+    if ucredit < 0 and uppercase_count < abs(ucredit):
+        errors.append(
+            f'Password must contain at least {abs(ucredit)} uppercase letter(s).'
+        )
+
+    if dcredit < 0 and digit_count < abs(dcredit):
+        errors.append(
+            f'Password must contain at least {abs(dcredit)} digit(s).'
+        )
+
+    if ocredit < 0 and other_count < abs(ocredit):
+        errors.append(
+            f'Password must contain at least {abs(ocredit)} special character(s).'
+        )
+
+    credited_length = len(password)
+    if ucredit > 0:
+        credited_length += min(uppercase_count, ucredit)
+    if dcredit > 0:
+        credited_length += min(digit_count, dcredit)
+    if ocredit > 0:
+        credited_length += min(other_count, ocredit)
+
+    if credited_length < minlen:
+        errors.append(
+            f'Password length score is {credited_length}; '
+            f'it must be at least {minlen}.'
+        )
+
+    return '\n'.join(errors) if errors else None
+
+
+def hash_password(password):
+    """Use the same host Linux password-hashing defaults as system login."""
+    from passlib.hosts import linux_context
+
+    return linux_context.hash(password)
+
+
+def validate_password_hash(password_hash):
+    """Accept complete SHA-256/SHA-512 crypt credentials for the SMS gateway."""
+    from passlib.hash import sha256_crypt, sha512_crypt
+
+    if not isinstance(password_hash, str):  # noqa: TRY004 - CLI validation uses ValueError
+        raise ValueError('SMS password hash must be a complete SHA-256 or SHA-512 crypt hash')
+    for scheme in (sha256_crypt, sha512_crypt):
+        if scheme.identify(password_hash):
+            parsed = scheme.from_string(password_hash)
+            if parsed.salt and parsed.checksum:
+                return
+    raise ValueError('SMS password hash must be a complete SHA-256 or SHA-512 crypt hash')
+
+
+def verify_password(password, password_hash):
+    """Reject malformed or unsupported credentials without authenticating."""
+    from passlib.hosts import linux_context
+
+    try:
+        validate_password_hash(password_hash)
+        return linux_context.verify(password, password_hash)
+    except (ValueError, TypeError):
+        return False
 
 
 def split_ssh_public_key(key_string, defaultname=""):
