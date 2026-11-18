@@ -630,7 +630,10 @@ class InterfaceConfig(ServiceInterface):
                 debug_cfg = {
                     k: self._extract_variant_value(v)
                     for k, v in dbus_config.items()
+                    if k != 'sms_command'
                 }
+                if 'sms_command' in dbus_config:
+                    debug_cfg['sms_command'] = 'credential values omitted'
                 logger.info(
                     f"Apply-restored offending config: {debug_cfg}",
                     extra={'interface_number': self.interface_number})
@@ -710,10 +713,20 @@ class InterfaceConfig(ServiceInterface):
                     else:
                         cfg[key] = current_cfg.get(key, self.DEFAULT_CONFIG[key])
 
+            if 'sms_command' in config:
+                from vyos.utils.wwan.sms_command import runtime_config
+                # This subtree is a complete replacement: omission disables
+                # commands, and credentials must already be hashed by the CLI.
+                cfg['sms_command'] = runtime_config(
+                    self._extract_variant_value(config['sms_command']))
+
             # Validate the built configuration with Python values
             self._validate_configuration(cfg)
 
             # Apply configuration to FSM
+            if cfg.get('sms_command'):
+                from vyos.utils.wwan.sms_command import attach_sms_commands
+                attach_sms_commands(self.fsm)
             self.fsm.apply_config(cfg)
 
             # Save configuration for crash recovery

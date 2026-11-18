@@ -1,0 +1,10 @@
+{
+  "verbs": {
+    "show": {"wrapper_verb": "show", "tier": "read-only"},
+    "renew": {"wrapper_verb": "renew", "tier": "privileged"},
+    "reset": {"wrapper_verb": "reset", "tier": "privileged"},
+    "generate": {"wrapper_verb": "generate", "tier": "privileged"},
+    "reboot": {"wrapper_verb": "reboot", "tier": "privileged"},
+    "poweroff": {"wrapper_verb": "poweroff", "tier": "privileged"}
+  }
+}

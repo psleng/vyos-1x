@@ -29,6 +29,7 @@
         </properties>
         <children>
           <!-- ── VyOS infrastructure nodes (retained) ────────────── -->
+          #include <include/interface/wwan-sms-command.xml.i>
           #include <include/generic-description.xml.i>
           #include <include/interface/disable.xml.i>
           #include <include/interface/mtu-68-1500.xml.i>

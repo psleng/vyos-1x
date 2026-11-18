@@ -847,6 +847,12 @@
             </properties>
             <command>journalctl --no-hostname --boot --unit radvd.service</command>
           </leafNode>
+          <leafNode name="sms-command">
+            <properties>
+              <help>Show SMS listener, command gateway and reply logs</help>
+            </properties>
+            <command>journalctl --no-hostname --boot --unit igos-wwan-manager.service --grep='(?i)SMS'</command>
+          </leafNode>
           <leafNode name="snmp">
             <properties>
               <help>Show log for Simple Network Monitoring Protocol (SNMP)</help>
