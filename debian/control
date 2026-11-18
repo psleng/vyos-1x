@@ -480,6 +480,12 @@ Recommends:
 # Depends on vyos-custom-queries.
   flask-react-web,
   igos-cli-onboarding,
+# Validated OpenSSL 3.1.2 FIPS 140-3 provider (CMVP #4985) used by
+# 'set system option fips'. A soft dep like the igOS packages above: inert until
+# FIPS mode is enabled, and system_option.py verify() rejects FIPS mode without
+# it. Pulled onto the igOS images by explicit listing in the vyos-build flavor
+# fragments (live-build runs with --apt-recommends false).
+  igos-openssl-fips-provider,
 Description: VyOS configuration scripts and data
  VyOS configuration scripts, interface definitions, and everything
 
