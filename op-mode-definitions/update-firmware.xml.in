@@ -7,7 +7,7 @@
     <children>
       <node name="firmware">
         <properties>
-          <help>Update boot firmware on disk</help>
+          <help>Update boot or modem firmware</help>
         </properties>
         <children>
           <node name="uboot">

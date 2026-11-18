@@ -1,0 +1,13 @@
+[Unit]
+Description=Cellular firmware update notifications (never auto-flashes)
+After=network.target vyos-router.service igos-wwan-manager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/libexec/vyos/system/vyos-wwan-firmware-check.py
+Restart=on-failure
+RestartSec=60
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target
