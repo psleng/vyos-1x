@@ -107,7 +107,11 @@ Depends:
   sudo,
   systemd,
   bsdmainutils,
-  openssl,
+# igOS OpenSSL 3.5 base (scripts/package-build-iGOS/openssl-3.5 in vyos-build);
+# the FIPS 140-3 work (validated 3.1.2 provider, system-wide TLS policy) is
+# built and verified against it, not Debian bookworm's 3.0.x.
+  openssl (>= 3.5.0),
+  libssl3 (>= 3.5.0),
   curl,
   dbus,
   file,

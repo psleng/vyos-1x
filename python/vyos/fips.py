@@ -206,3 +206,129 @@ def default(leaf: str, policy: dict = None):
         return None
     value = entry.get('default')
     return list(value) if value is not None else None
+
+
+# --- Validated provider identity ---------------------------------------------
+#
+# OpenSSL resolves the "fips" provider to <MODULESDIR>/fips.so and fipsinstall
+# self-tests whatever file is there, so neither proves the active module is the
+# validated build. igos-openssl-fips-provider ships an identity manifest (the
+# provider version + SHA-256 of the exact fips.so it installs); FIPS mode is
+# only enabled when the on-disk module matches it and the provider OpenSSL
+# actually loads self-reports that version.
+
+_multiarch_map = {
+    'x86_64': 'x86_64-linux-gnu',
+    'aarch64': 'aarch64-linux-gnu',
+}
+
+fipsmodule_config = '/run/ssl/fipsmodule.cnf'
+
+
+def multiarch():
+    """Debian multiarch triplet for this machine, or None if unsupported."""
+    import platform
+
+    return _multiarch_map.get(platform.machine())
+
+
+def provider_module_path(triplet: str = None):
+    triplet = triplet or multiarch()
+    return f'/usr/lib/{triplet}/ossl-modules/fips.so' if triplet else None
+
+
+def provider_manifest_path(triplet: str = None):
+    triplet = triplet or multiarch()
+    if not triplet:
+        return None
+    return f'/usr/lib/{triplet}/igos-openssl-fips-provider/fips.so.manifest'
+
+
+def read_provider_manifest(path: str = None):
+    """Parse the provider identity manifest into a dict, or None if absent."""
+    path = path or provider_manifest_path()
+    if not path or not os.path.exists(path):
+        return None
+    manifest = {}
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#') or '=' not in line:
+                continue
+            key, value = line.split('=', 1)
+            manifest[key.strip()] = value.strip()
+    return manifest
+
+
+def _sha256(path: str) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(1 << 20), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def verify_provider_module(module: str = None, manifest_path: str = None) -> list:
+    """Errors proving the on-disk fips.so is NOT the validated build ([] if OK)."""
+    module = module or provider_module_path()
+    manifest_path = manifest_path or provider_manifest_path()
+    if not module:
+        return ['FIPS mode is not supported on this architecture']
+    if not os.path.exists(module):
+        return [f'OpenSSL FIPS module not found: {module}. '
+                'The igos-openssl-fips-provider package must be installed.']
+    manifest = read_provider_manifest(manifest_path)
+    if manifest is None:
+        return [f'FIPS provider identity manifest not found: {manifest_path}. '
+                'The igos-openssl-fips-provider package must be installed.']
+    if not manifest.get('sha256') or not manifest.get('version'):
+        return [f'FIPS provider identity manifest {manifest_path} is incomplete']
+    actual = _sha256(module)
+    if actual != manifest['sha256'].lower():
+        return [f'{module} is not the validated FIPS provider build '
+                f'(sha256 {actual}, expected {manifest["sha256"]})']
+    return []
+
+
+def parse_providers(output: str) -> dict:
+    """Parse 'openssl list -providers' output into {name: {field: value}}."""
+    providers = {}
+    current = None
+    for line in output.splitlines():
+        if line.startswith('    ') and current is not None and ':' in line:
+            key, value = line.strip().split(':', 1)
+            providers[current][key.strip()] = value.strip()
+        elif line.startswith('  ') and not line.startswith('   '):
+            current = line.strip()
+            providers[current] = {}
+        else:
+            current = None
+    return providers
+
+
+def loaded_provider_version(fipsmodule: str = fipsmodule_config):
+    """Version self-reported by the fips provider OpenSSL loads with the given
+    fipsmodule.cnf -- the same '.include' + 'fips = fips_sect' activation that
+    openssl.cnf.j2 renders, so it resolves exactly the module the system uses.
+    """
+    import tempfile
+
+    from vyos.utils.process import rc_cmd
+
+    with tempfile.NamedTemporaryFile('w', suffix='.cnf') as cnf:
+        cnf.write(
+            'openssl_conf = openssl_init\n'
+            f'.include {fipsmodule}\n'
+            '[openssl_init]\n'
+            'providers = provider_sect\n'
+            '[provider_sect]\n'
+            'fips = fips_sect\n'
+        )
+        cnf.flush()
+        rc, out = rc_cmd('openssl list -providers',
+                         env={**os.environ, 'OPENSSL_CONF': cnf.name})
+    if rc != 0:
+        return None
+    return parse_providers(out).get('fips', {}).get('version')

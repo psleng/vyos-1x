@@ -41,6 +41,8 @@ CRYPTO_UNITS="ssh.service ssh@.service ssh-tpm-service.service strongswan.servic
 
 fail_closed() {
     reason="$1"
+    # Never leave a module config behind for a module that was not verified.
+    rm -f "${FIPSMODULE_CNF}" 2>/dev/null || true
     printf '%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "${FAIL_MARKER}" 2>/dev/null
 
     msg="FIPS 140-3 MODULE SELF-TEST FAILED: ${reason}. The system is NOT operating in FIPS mode; network crypto services have been disabled. Recover via the console."
@@ -71,17 +73,47 @@ if ! grep -q 'fipsmodule.cnf' "${OPENSSL_CNF}" 2>/dev/null; then
     exit 0
 fi
 
-# Locate the validated provider (arch-agnostic).
-FIPS_SO=$(ls /usr/lib/*/ossl-modules/fips.so 2>/dev/null | head -n1)
-if [ -z "${FIPS_SO}" ]; then
+# Locate the validated provider and its identity manifest (arch-agnostic). The
+# manifest is shipped by igos-openssl-fips-provider; OpenSSL loads whatever is
+# at ossl-modules/fips.so, so prove that file is the validated build before
+# self-testing it.
+MANIFEST=$(ls /usr/lib/*/igos-openssl-fips-provider/fips.so.manifest 2>/dev/null | head -n1)
+if [ -z "${MANIFEST}" ]; then
+    fail_closed "validated provider identity manifest is missing"
+fi
+FIPS_SO="$(dirname "$(dirname "${MANIFEST}")")/ossl-modules/fips.so"
+if [ ! -f "${FIPS_SO}" ]; then
     fail_closed "validated provider module (fips.so) is missing"
+fi
+EXPECTED_SHA=$(sed -n 's/^sha256=//p' "${MANIFEST}")
+EXPECTED_VERSION=$(sed -n 's/^version=//p' "${MANIFEST}")
+ACTUAL_SHA=$(sha256sum "${FIPS_SO}" | cut -d' ' -f1)
+if [ -z "${EXPECTED_SHA}" ] || [ "${ACTUAL_SHA}" != "${EXPECTED_SHA}" ]; then
+    fail_closed "${FIPS_SO} is not the validated provider build (sha256 ${ACTUAL_SHA}, expected ${EXPECTED_SHA:-<none>})"
 fi
 
 mkdir -p "$(dirname "${FIPSMODULE_CNF}")"
 
 if ! OPENSSL_CONF=/dev/null openssl fipsinstall -module "${FIPS_SO}" -out "${FIPSMODULE_CNF}" >/dev/null 2>&1; then
-    rm -f "${FIPSMODULE_CNF}" 2>/dev/null || true
     fail_closed "fipsinstall self-test did not pass for ${FIPS_SO}"
+fi
+
+# Confirm the provider OpenSSL actually resolves through the same activation
+# openssl.cnf uses is the validated version (not merely a file that self-tests).
+CHECK_CNF=$(mktemp /run/ssl/fips-check.XXXXXX)
+cat > "${CHECK_CNF}" <<EOF
+openssl_conf = openssl_init
+.include ${FIPSMODULE_CNF}
+[openssl_init]
+providers = provider_sect
+[provider_sect]
+fips = fips_sect
+EOF
+LOADED_VERSION=$(OPENSSL_CONF="${CHECK_CNF}" openssl list -providers 2>/dev/null \
+    | awk '/^  fips$/ {f = 1; next} f && /^  [^ ]/ {f = 0} f && $1 == "version:" {print $2; exit}')
+rm -f "${CHECK_CNF}"
+if [ -z "${EXPECTED_VERSION}" ] || [ "${LOADED_VERSION}" != "${EXPECTED_VERSION}" ]; then
+    fail_closed "loaded FIPS provider reports version ${LOADED_VERSION:-<not loaded>}, expected validated ${EXPECTED_VERSION:-<none>}"
 fi
 
 # Success: clear any stale failure marker from a previous boot attempt, and
