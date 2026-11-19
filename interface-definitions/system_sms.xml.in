@@ -1,0 +1,53 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<interfaceDefinition>
+  <node name="system">
+    <children>
+      <node name="sms" owner="${vyos_conf_scripts_dir}/system_sms.py">
+        <properties>
+          <help>System SMS notification settings</help>
+          <priority>1000</priority>
+        </properties>
+        <children>
+          <leafNode name="active-profile">
+            <properties>
+              <help>Active SMS profile</help>
+            </properties>
+          </leafNode>
+          <tagNode name="profile">
+            <properties>
+              <help>SMS modem profile</help>
+            </properties>
+            <children>
+              <leafNode name="interface">
+                <properties>
+                  <help>Configured WWAN modem interface</help>
+                  <completionHelp>
+                    <path>interfaces wwan</path>
+                  </completionHelp>
+                </properties>
+              </leafNode>
+            </children>
+          </tagNode>
+          <tagNode name="recipient">
+            <properties>
+              <help>SMS recipient</help>
+            </properties>
+            <children>
+              <leafNode name="number">
+                <properties>
+                  <help>International mobile number beginning with +</help>
+                </properties>
+              </leafNode>
+              <leafNode name="enable">
+                <properties>
+                  <help>Enable recipient</help>
+                  <valueless/>
+                </properties>
+              </leafNode>
+            </children>
+          </tagNode>
+        </children>
+      </node>
+    </children>
+  </node>
+</interfaceDefinition>
