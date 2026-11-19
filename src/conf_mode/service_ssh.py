@@ -19,6 +19,8 @@ import os
 from sys import exit
 from syslog import syslog
 from syslog import LOG_INFO
+from time import monotonic
+from time import sleep
 
 from vyos.config import Config
 from vyos.configdep import set_dependents
@@ -29,6 +31,7 @@ from vyos.configverify import verify_pki_openssh_key
 from vyos.defaults import config_files
 from vyos import fips
 from vyos.utils.process import call
+from vyos.utils.process import cmd
 from vyos.utils.process import rc_cmd
 from vyos.template import render
 from vyos import ConfigError
@@ -38,8 +41,7 @@ from vyos.pki import load_openssh_public_key
 from vyos.utils.dict import dict_search_recursive
 from vyos.utils.file import write_file
 from vyos.utils.serial import serial_ssh_server_configured
-# PERLE - access tpm allowed checking
-from vyos.tpm import tpm_allowed
+from vyos.tpm import tpm_enabled
 
 airbag.enable()
 
@@ -55,6 +57,8 @@ key_ecdsa = '/etc/ssh/ssh_host_ecdsa_key'
 tpm_key_rsa = '/etc/ssh/ssh_tpm_host_rsa_key.tpm'
 tpm_key_ecdsa = '/etc/ssh/ssh_tpm_host_ecdsa_key.tpm'
 tpm_agent_cfile_name = '/etc/ssh/sshd_config.d/10-ssh-tpm-agent'
+tpm_device = '/dev/tpmrm0'
+tpm_ready_timeout = 30
 
 trusted_user_ca = config_files['sshd_user_ca']
 
@@ -157,6 +161,31 @@ def verify(ssh):
     return None
 
 
+def prepare_tpm_host_keys():
+    deadline = monotonic() + tpm_ready_timeout
+    while not os.path.exists(tpm_device):
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise ConfigError(f'TPM-backed SSH is enabled but {tpm_device} did not appear '
+                              f'within {tpm_ready_timeout} seconds')
+        sleep(min(0.25, remaining))
+
+    key_files = tuple(path for key in (tpm_key_rsa, tpm_key_ecdsa)
+                      for path in (key, f'{key.removesuffix(".tpm")}.pub'))
+    if not all(os.path.isfile(path) for path in key_files):
+        cmd('ssh-tpm-keygen -A', raising=ConfigError,
+            message='Could not generate TPM-backed SSH host keys')
+        missing = [path for path in key_files if not os.path.isfile(path)]
+        if missing:
+            raise ConfigError(f'TPM-backed SSH host key files missing: {", ".join(missing)}')
+
+    if os.path.isfile(f'{tpm_agent_cfile_name}.tpm'):
+        os.replace(f'{tpm_agent_cfile_name}.tpm', f'{tpm_agent_cfile_name}.conf')
+    elif not os.path.isfile(f'{tpm_agent_cfile_name}.conf'):
+        cmd('ssh-tpm-hostkeys --install-sshd-config', raising=ConfigError,
+            message='Could not configure the TPM-backed SSH host keys')
+
+
 def generate(ssh):
     if not ssh:
         if os.path.isfile(config_file):
@@ -164,48 +193,30 @@ def generate(ssh):
 
         return None
 
-    # PERLE check if tpm allowed before generating RSA server host key text files
-    # PERLE for some reason vyos is not generating ECDSA server host key text files
-    # PERLE else if tpm is allowed, remove old rsa/ecdsa files, then create tpm backed rsa  ecdsa keys
+    ssh['tpm_host_keys'] = 'fips' not in ssh and tpm_enabled()
+    if not ssh['tpm_host_keys'] and os.path.isfile(f'{tpm_agent_cfile_name}.conf'):
+        os.replace(f'{tpm_agent_cfile_name}.conf', f'{tpm_agent_cfile_name}.tpm')
+
     if 'fips' in ssh:
         # FIPS 140-3: the (uncertified fTPM) TPM host-key path is not approved,
         # so disable the TPM agent drop-in and present approved RSA + ECDSA text
         # host keys. ed25519/DSA are not FIPS-approvable and are not referenced
         # by the FIPS sshd_config, so they are not (re)generated here -- their
         # keygen would also fail under the active FIPS provider.
-        if os.path.isfile(f'{tpm_agent_cfile_name}.conf'):
-            call(f'sudo mv {tpm_agent_cfile_name}.conf {tpm_agent_cfile_name}.tpm')
         if not os.path.isfile(key_rsa):
             syslog(LOG_INFO, 'FIPS: generating approved SSH RSA host key!')
             call(f'ssh-keygen -q -N "" -t rsa -b 3072 -f {key_rsa}')
         if not os.path.isfile(key_ecdsa):
             syslog(LOG_INFO, 'FIPS: generating approved SSH ECDSA host key!')
             call(f'ssh-keygen -q -N "" -t ecdsa -b 384 -f {key_ecdsa}')
-    elif not tpm_allowed():
+    elif not ssh['tpm_host_keys']:
         # This usually happens only once on a fresh system, SSH keys need to be
         # freshly generated, one per every system!
         if not os.path.isfile(key_rsa):
             syslog(LOG_INFO, 'SSH RSA host key not found, generating new key!')
             call(f'ssh-keygen -q -N "" -t rsa -f {key_rsa}')
-        # move the config file that loads tpm socket and tpm back rsa/ecdsa host key
-        call(f'sudo mv {tpm_agent_cfile_name}.conf {tpm_agent_cfile_name}.tpm')
     else:
-        if os.path.isfile(key_rsa):
-            syslog(LOG_INFO, 'SSH RSA host key found, removing text key file')
-            call(f'sudo rm {key_rsa}*')
-        if os.path.isfile(key_ecdsa):
-            syslog(LOG_INFO, 'SSH ECDSA host key found, removing text key file!')
-            call(f'sudo rm {key_ecdsa}*')
-        if not os.path.isfile(tpm_key_rsa):
-            syslog(LOG_INFO, 'Generating missing SSH tpm backed RSA host key!')
-            call(f'ssh-tpm-keygen -A')
-            call(f'ssh-tpm-hostkeys --install-system-units')
-        if not os.path.isfile(tpm_key_ecdsa):
-            syslog(LOG_INFO, 'Generating missing SSH tpm backed ECDSA host key!')
-            call(f'ssh-tpm-keygen -A')
-            call(f'ssh-tpm-hostkeys --install-system-units')
-        # restore the config file that loads tpm socket and tpm back rsa/ecdsa host key
-        call(f'sudo mv {tpm_agent_cfile_name}.tpm {tpm_agent_cfile_name}.conf')
+        prepare_tpm_host_keys()
 
     if 'fips' not in ssh:
         if not os.path.isfile(key_ed25519):
@@ -239,10 +250,7 @@ def apply(ssh):
         # SSH access is removed in the commit
         call('systemctl stop ssh@*.service')
         call(f'systemctl stop {systemd_service_sshguard}')
-        # PERLE add check to restart ssh-tpm-agent
-        if tpm_allowed():
-            call(f'systemctl stop ssh-tpm-service')
-            call(f'systemctl stop ssh-tpm-service.socket')
+        cmd('systemctl stop ssh-tpm-agent.socket ssh-tpm-agent.service', raising=ConfigError)
         return None
 
     # Verify generated sshd configuration is correct
@@ -263,11 +271,11 @@ def apply(ssh):
         call('systemctl stop ssh@*.service')
         systemd_action = 'restart'
 
-    # PERLE add check to restart ssh-tpm-agent
-    if tpm_allowed():
-        # call(f'systemctl enable --now ssh-tpm-agent.socket')
-        call(f'systemctl {systemd_action} ssh-tpm-agent')
-        call(f'systemctl {systemd_action} ssh-tpm-agent.socket')
+    if ssh['tpm_host_keys']:
+        cmd(f'systemctl {systemd_action} ssh-tpm-agent.service', raising=ConfigError,
+            message='Could not start the SSH TPM agent')
+    else:
+        cmd('systemctl stop ssh-tpm-agent.socket ssh-tpm-agent.service', raising=ConfigError)
 
     for vrf in ssh['vrf']:
         call(f'systemctl {systemd_action} ssh@{vrf}.service')
