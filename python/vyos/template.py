@@ -482,8 +482,20 @@ def get_first_ike_dh_group(ike_group):
                 return 'dh-group' + proposal['dh_group']
     return 'dh-group2' # Fallback on dh-group2
 
-@register_filter('get_esp_ike_cipher')
-def get_esp_ike_cipher(group_config, ike_group=None):
+def _get_esp_ike_cipher(group_config, ike_group=None, esn=True):
+    """Render strongSwan proposal strings.
+
+    esn=True  : ESP/CHILD_SA proposals, where ESN transforms are meaningful
+    esn=False : IKE_SA proposals. ESN is a CHILD_SA transform (RFC 7296
+                section 3.3.2, Transform Type 5) and has no meaning in an
+                IKE_SA proposal. Emitting it there breaks interoperability
+                with implementations that reject the malformed payload
+                without replying at all (observed with Cisco FTD, T9254).
+
+    Not registered as a filter directly: callers must go through
+    get_esp_cipher() or get_ike_cipher() so esn can't be left at its
+    default where an IKE cipher is needed.
+    """
     pfs_lut = {
         'dh-group1'  : 'modp768',
         'dh-group2'  : 'modp1024',
@@ -506,7 +518,10 @@ def get_esp_ike_cipher(group_config, ike_group=None):
         'dh-group29' : 'ecp384bp',
         'dh-group30' : 'ecp512bp',
         'dh-group31' : 'curve25519',
-        'dh-group32' : 'curve448'
+        'dh-group32' : 'curve448',
+        'dh-group33' : 'mlkem512',
+        'dh-group34' : 'mlkem768',
+        'dh-group35' : 'mlkem1024',
     }
 
     ciphers = []
@@ -529,6 +544,23 @@ def get_esp_ike_cipher(group_config, ike_group=None):
 
             ciphers.append(tmp)
     return ciphers
+
+
+@register_filter('get_esp_cipher')
+def get_esp_cipher(group_config, ike_group=None):
+    """ESP/CHILD_SA proposals, where ESN transforms are meaningful."""
+    return _get_esp_ike_cipher(group_config, ike_group=ike_group, esn=True)
+
+
+@register_filter('get_ike_cipher')
+def get_ike_cipher(group_config):
+    """IKE_SA proposals. ESN is a CHILD_SA transform (RFC 7296 section
+    3.3.2, Transform Type 5) and has no meaning in an IKE_SA proposal.
+    Emitting it there breaks interoperability with implementations that
+    reject the malformed payload without replying at all (observed with
+    Cisco FTD, T9254).
+    """
+    return _get_esp_ike_cipher(group_config, esn=False)
 
 @register_filter('get_uuid')
 def get_uuid(seed):
