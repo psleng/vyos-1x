@@ -138,8 +138,10 @@ igos@igos:~$ show interfaces wwan wwan0 status
 | | Connection mode | `always-on`, `connect-on-demand`, `dial-on-demand` |
 | | Power state | Modem power state (e.g. `on`, `low`, `off`) |
 | | Access technology | Active RAT (e.g. `lte`, `5gnr`, `umts`) |
-| | Operator | Network operator name |
-| | Operator code | MCC/MNC code |
+| | Operator | Name of the registered network.  While roaming this is the visited network (read over QMI), not the SIM's home provider |
+| | Operator code | MCC/MNC of the registered network |
+| | Registration | 3GPP registration state (`home`, `roaming`, `searching`, `denied`, ...) |
+| | Home network | SIM's home provider and MCC/MNC; shown only while roaming |
 | | APN | Connected APN name |
 | | Requested APN | APN requested by configuration (shown with Negotiated APN) |
 | | Negotiated APN | APN the carrier actually activated |

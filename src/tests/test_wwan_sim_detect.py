@@ -481,3 +481,114 @@ class TestModemManagerActiveSlotPresence(TestCase):
     def test_falls_back_to_sim_slots(self):
         self.assertTrue(self.present(False, 0, {'present': True}))
         self.assertFalse(self.present(False, 0, {'present': False}))
+
+
+class TestSimHomeMccMnc(IsolatedAsyncioTestCase):
+    """APN lookup must key on the SIM's home MCC/MNC, not a 6-digit IMSI slice."""
+
+    TELSTRA_IMSI = '505012345678901'
+
+    def _make_fsm(self, sim_props):
+        async def sim_call_get(_iface, prop):
+            if prop not in sim_props:
+                raise RuntimeError(f'no {prop}')
+            return SimpleNamespace(value=sim_props[prop])
+
+        sim_iface = Mock(call_get=AsyncMock(side_effect=sim_call_get))
+        modem_iface = Mock(call_get=AsyncMock(
+            return_value=SimpleNamespace(value='/org/freedesktop/ModemManager1/SIM/0')))
+
+        fsm = ModemStateMachine.__new__(ModemStateMachine)
+        fsm.interface_number = 0
+        fsm.proxy = Mock(get_interface=Mock(return_value=modem_iface))
+        fsm.bus = Mock(
+            introspect=AsyncMock(return_value=None),
+            get_proxy_object=Mock(return_value=Mock(
+                get_interface=Mock(return_value=sim_iface))),
+        )
+        return fsm
+
+    async def test_uses_modemmanager_operator_identifier(self):
+        fsm = self._make_fsm({
+            'Imsi': self.TELSTRA_IMSI, 'OperatorName': 'Telstra',
+            'SimIdentifier': '8961', 'OperatorIdentifier': '50501',
+        })
+        info = await fsm._get_sim_information()
+        self.assertEqual(info['mcc_mnc'], '50501')
+        self.assertEqual(info['plmn'], '50501')
+        self.assertEqual(info['mnc'], '01')
+
+    async def test_imsi_fallback_respects_two_digit_mnc(self):
+        fsm = self._make_fsm({
+            'Imsi': self.TELSTRA_IMSI, 'OperatorName': 'Telstra',
+            'SimIdentifier': '8961',
+        })
+        info = await fsm._get_sim_information()
+        self.assertEqual(info['mcc_mnc'], '50501')
+
+    async def test_imsi_fallback_keeps_three_digit_mnc(self):
+        fsm = self._make_fsm({
+            'Imsi': '310260123456789', 'OperatorName': 'T-Mobile',
+            'SimIdentifier': '8901', 'OperatorIdentifier': '',
+        })
+        info = await fsm._get_sim_information()
+        self.assertEqual(info['mcc_mnc'], '310260')
+
+
+class TestRoamingNetworkName(IsolatedAsyncioTestCase):
+    """While roaming, MM reports the SIM's SPN; the visited name comes from QMI."""
+
+    MODEM_PROPS = {'Ports': [('cdc-wdm0', 6)]}
+    SERVING_SYSTEM = (
+        "[/dev/cdc-wdm0] Successfully got serving system:\n"
+        "\tRoaming status: 'on'\n"
+        "\tCurrent PLMN:\n"
+        "\t\tMCC: '302'\n"
+        "\t\tMNC: '220'\n"
+        "\t\tDescription: 'TELUS'\n"
+    )
+    OPERATOR_NAME = (
+        "[/dev/cdc-wdm0] Successfully got operator name data\n"
+        "Service Provider Name\n"
+        "\tName             : 'Telstra'\n"
+        "NITZ information:\n"
+        "\tLong Name:  'Rogers'\n"
+        "\tShort Name: 'Rogers'\n"
+    )
+
+    def _fsm(self):
+        fsm = ModemStateMachine.__new__(ModemStateMachine)
+        fsm.interface_number = 0
+        fsm._serving_network_cache = ('', '')
+        return fsm
+
+    def _qmicli(self, outputs):
+        calls = []
+
+        async def fake_exec(*args, **_kwargs):
+            calls.append(args[-1])
+            return SimpleNamespace(
+                returncode=0,
+                communicate=AsyncMock(return_value=(outputs[args[-1]].encode(), b'')))
+        return calls, patch.object(state_machine.asyncio, 'create_subprocess_exec',
+                                   side_effect=fake_exec)
+
+    async def test_reads_visited_network_and_caches_per_operator_code(self):
+        fsm = self._fsm()
+        calls, exec_patch = self._qmicli({'--nas-get-serving-system': self.SERVING_SYSTEM})
+        with patch.object(state_machine.shutil, 'which', return_value='/usr/bin/qmicli'), exec_patch:
+            self.assertEqual(
+                await fsm._qmi_get_serving_network_name(self.MODEM_PROPS, '302220'), 'TELUS')
+            self.assertEqual(
+                await fsm._qmi_get_serving_network_name(self.MODEM_PROPS, '302220'), 'TELUS')
+        self.assertEqual(calls, ['--nas-get-serving-system'])
+
+    async def test_plmn_mismatch_falls_back_to_nitz_name(self):
+        fsm = self._fsm()
+        _calls, exec_patch = self._qmicli({
+            '--nas-get-serving-system': self.SERVING_SYSTEM,
+            '--nas-get-operator-name': self.OPERATOR_NAME,
+        })
+        with patch.object(state_machine.shutil, 'which', return_value='/usr/bin/qmicli'), exec_patch:
+            self.assertEqual(
+                await fsm._qmi_get_serving_network_name(self.MODEM_PROPS, '302720'), 'Rogers')
