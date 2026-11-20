@@ -292,7 +292,10 @@ configd-inspect/test clean):**
     see the **HTTP-API boot race** note below, which that addition exposed.)
   - **p3-ipsec (verify half)** — [`vpn_ipsec.py`](../src/conf_mode/vpn_ipsec.py)
     `verify()` fails closed on explicitly-set non-approved IKE/ESP
-    encryption/hash/dh-group and ESP `pfs`.
+    encryption/hash/dh-group and ESP `pfs`, and on remote-access
+    `authentication client-mode eap-mschapv2` (MD4/DES; also the grammar
+    default, so an unset `client-mode` is rejected too). Approved client modes
+    are `x509` and `eap-tls`; `eap-radius` stays out until RadSec exists.
   - **p3-ipsec (openssl-plugin half)** — under FIPS,
     [`vpn_ipsec.py`](../src/conf_mode/vpn_ipsec.py) renders
     [`fips_plugins.conf.j2`](../data/templates/ipsec/fips_plugins.conf.j2) to
