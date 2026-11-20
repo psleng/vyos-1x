@@ -21,6 +21,7 @@ import ssl
 import stat
 import sys
 import tempfile
+import time
 import urllib.parse
 import gzip
 
@@ -42,6 +43,8 @@ from ftplib import _GLOBAL_DEFAULT_TIMEOUT
 from ftplib import error_reply
 from ftplib import parse150
 from requests import Session
+from requests import exceptions as requests_exceptions
+from urllib3 import exceptions as urllib3_exceptions
 from requests.adapters import HTTPAdapter
 from urllib.parse import urlsplit
 from urllib.parse import urlunsplit
@@ -60,6 +63,61 @@ from vyos.base import Warning
 from vyos.defaults import directories
 
 CHUNK_SIZE = 8192
+
+# HTTP downloads: consecutive attempts without receiving any data before
+# giving up (the count resets whenever data arrives)
+DOWNLOAD_RETRIES = 8
+
+# Transport failures worth resuming after (not local file errors such as a
+# full disk, which are plain OSErrors and propagate)
+RESUMABLE_ERRORS = (
+    requests_exceptions.RequestException,
+    urllib3_exceptions.HTTPError,
+    ConnectionError,
+    TimeoutError,
+)
+
+
+def _resume_record(location):
+    return f'{location}.resume'
+
+
+def _resumable_offset(location, url, size, validator):
+    """Bytes of ``location`` that can be kept for a resumed download, else 0.
+
+    A partial file is only reused when its resume record is for the same URL,
+    size and validator; anything else starts from the beginning.
+    """
+    import json
+
+    try:
+        with open(_resume_record(location)) as f:
+            record = json.load(f)
+        have = os.path.getsize(location)
+    except (OSError, ValueError):
+        return 0
+    if record != {'url': url, 'size': size, 'validator': validator}:
+        return 0
+    if size is not None and have > size:
+        return 0
+    return have
+
+
+def _write_resume_record(location, url, size, validator):
+    import json
+
+    with open(_resume_record(location), 'w') as f:
+        json.dump({'url': url, 'size': size, 'validator': validator}, f)
+
+
+@contextmanager
+def _optional_progressbar(enabled):
+    """A Progressbar when ``enabled`` is truthy, else None."""
+    if enabled:
+        with Progressbar() as progress:
+            yield progress
+    else:
+        yield None
 
 class InteractivePolicy(MissingHostKeyPolicy):
     """
@@ -407,7 +465,17 @@ class HttpC:
             session.auth = self.username, self.password
         return session
 
-    def download(self, location: str):
+    def download(self, location: str, resume: bool = False):
+        """Download to ``location``.
+
+        resume=True keeps the file across runs: ``location`` is accompanied
+        by a ``<location>.resume`` record (URL, size, validator), and the next
+        call with the same URL continues from the end of the file, or returns
+        at once if it is already complete. If-Range makes the server send the
+        whole file again if it changed in between, so pieces of different
+        files are never joined. The caller removes the file and its record
+        when done.
+        """
         with self._establish() as s:
             # We ask for uncompressed downloads so that we don't have to deal with decoding.
             # Not only would it potentially mess up with the progress bar but
@@ -428,18 +496,84 @@ class HttpC:
                 # In case the server does not supply the header.
                 except KeyError:
                     size = None
+                # If-Range needs a strong ETag or a date
+                etag = r.headers.get('ETag', '')
+                validator = etag if etag and not etag.startswith('W/') \
+                    else r.headers.get('Last-Modified', '')
+            start = _resumable_offset(location, self.urlstring, size, validator) if resume else 0
+            if size is not None and start == size:
+                print_error('Using the already downloaded file.')
+                return
             if self.check_space:
-                check_storage(location, size)
-            with s.get(final_urlstring, stream=True,
-                       timeout=self.timeout) as r, open(location, 'wb') as f:
-                if self.progressbar and size:
-                    with Progressbar(CHUNK_SIZE / size) as p:
-                        for chunk in iter(lambda: begin(p.increment(), r.raw.read(CHUNK_SIZE)), b''):
+                check_storage(location, size - start if size else size)
+            if resume:
+                _write_resume_record(location, self.urlstring, size, validator)
+            if start:
+                print_error(f'Resuming download at {start / 1024**2:.1f} MiB'
+                            + (f' of {size / 1024**2:.1f} MiB' if size else ''))
+            with _optional_progressbar(self.progressbar and size) as progress:
+                self._download_resuming(s, final_urlstring, location, size, progress,
+                                        start=start, validator=validator)
+
+    def _download_resuming(self, session, url, location, size, progress,
+                           start=0, validator=''):
+        """Stream ``url`` to ``location``, resuming after stalls and drops.
+
+        Large images over slow or cellular links regularly stall for longer
+        than the read timeout or lose the connection. Instead of failing (and
+        starting from byte 0 next time), reconnect and continue with an HTTP
+        Range request. The retry budget resets whenever data arrives, so a
+        slow but progressing link never gives up; a server without range
+        support makes the next attempt restart from the beginning.
+        """
+        written = start
+        failures = 0
+        with open(location, 'r+b' if start else 'wb') as f:
+            f.seek(start)
+            f.truncate()
+            while True:
+                headers = {}
+                if written:
+                    headers['Range'] = f'bytes={written}-'
+                    if validator:
+                        # Changed on the server: get the whole new file
+                        headers['If-Range'] = validator
+                received = 0
+                try:
+                    with session.get(url, stream=True, timeout=self.timeout,
+                                     headers=headers) as r:
+                        if written and r.status_code == 416 and size == written:
+                            return
+                        r.raise_for_status()
+                        if written and r.status_code != 206:
+                            # No range support, or the file changed: start over
+                            print_error('Cannot resume (server does not support it or the '
+                                        'file changed); restarting download.')
+                            f.seek(0)
+                            f.truncate()
+                            written = 0
+                        while chunk := r.raw.read(CHUNK_SIZE):
                             f.write(chunk)
-                else:
-                    # We'll try to stream the download directly with `copyfileobj()` so that large
-                    #  files (like entire VyOS images) don't occupy much memory.
-                    shutil.copyfileobj(r.raw, f)
+                            written += len(chunk)
+                            received += len(chunk)
+                            if progress:
+                                progress.progress(min(written, size), size)
+                    if size is None or written >= size:
+                        return
+                    raise ConnectionError(f'connection closed at {written} of {size} bytes')
+                except RESUMABLE_ERRORS as err:
+                    # Client errors (404, 403, ...) will not improve on retry
+                    if isinstance(err, requests_exceptions.HTTPError) and (
+                            err.response is None or err.response.status_code < 500):
+                        raise
+                    failures = 0 if received else failures + 1
+                    if failures > DOWNLOAD_RETRIES:
+                        raise
+                    delay = min(2 ** failures, 30) if failures else 1
+                    print_error(f'\nDownload interrupted ({err}); resuming at '
+                                f'{written / 1024**2:.1f} MiB in {delay} s '
+                                f'(retry {max(failures, 1)}/{DOWNLOAD_RETRIES})')
+                    time.sleep(delay)
 
     def upload(self, location: str):
         # Does not yet support progressbars.
@@ -597,10 +731,16 @@ def urlc(urlstring, *args, **kwargs):
         raise ValueError(f'Unsupported URL scheme: "{scheme}"')
 
 def download(local_path, urlstring, progressbar=False, check_space=False,
-             source_host='', source_port=0, timeout=10.0, raise_error=False):
+             source_host='', source_port=0, timeout=10.0, raise_error=False,
+             resume=False):
+    """resume=True: keep partial HTTP(S) downloads across calls (HttpC only)."""
     try:
         progressbar = progressbar and is_interactive()
-        urlc(urlstring, progressbar, check_space, source_host, source_port, timeout).download(local_path)
+        client = urlc(urlstring, progressbar, check_space, source_host, source_port, timeout)
+        if resume and isinstance(client, HttpC):
+            client.download(local_path, resume=True)
+        else:
+            client.download(local_path)
     except Exception as err:
         if raise_error:
             raise

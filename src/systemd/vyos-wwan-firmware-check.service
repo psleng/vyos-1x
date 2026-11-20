@@ -1,6 +1,12 @@
 [Unit]
 Description=Cellular firmware update notifications (never auto-flashes)
-After=network.target vyos-router.service igos-wwan-manager.service
+After=network.target igos-wwan-manager.service
+
+# No [Install] section: like igos-wwan-manager, this is started only by
+# conf_mode (interfaces_wwan.py, system_update-check.py) while an enabled wwan
+# interface is configured, so units without a modem never run it. For the same
+# reason do NOT add After=vyos-router.service: conf_mode runs inside
+# vyos-router at boot, so that ordering would deadlock or be ignored.
 
 [Service]
 Type=simple
@@ -8,6 +14,3 @@ ExecStart=/usr/bin/python3 /usr/libexec/vyos/system/vyos-wwan-firmware-check.py
 Restart=on-failure
 RestartSec=60
 KillMode=control-group
-
-[Install]
-WantedBy=multi-user.target

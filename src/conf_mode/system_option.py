@@ -256,12 +256,12 @@ def verify(options):
                 f'FIPS mode is not supported on this architecture '
                 f'({platform.machine()})'
             )
-        fips_module = f'/usr/lib/{arch}/ossl-modules/fips.so'
-        if not os.path.exists(fips_module):
-            raise ConfigError(
-                f'OpenSSL FIPS module not found: {fips_module}. '
-                f'The FIPS provider package must be installed.'
-            )
+        # Only the exact validated build may be activated: anything else at
+        # ossl-modules/fips.so (e.g. Debian's unvalidated 3.5 provider) would
+        # pass fipsinstall just as happily.
+        module_errors = fips.verify_provider_module()
+        if module_errors:
+            raise ConfigError('\n'.join(module_errors))
         rejected = options.get('fips_rejected_features')
         if rejected:
             raise ConfigError(
@@ -378,12 +378,19 @@ def generate(options):
     # /run/ssl/fipsmodule.cnf exists.
     if 'fips' in options:
         os.makedirs(os.path.dirname(openssl_fipsmodule_config), exist_ok=True)
-        fips_module = f'/usr/lib/{arch}/ossl-modules/fips.so'
+        fips_module = fips.provider_module_path()
         cmd(
             f'openssl fipsinstall -module {fips_module} '
             f'-out {openssl_fipsmodule_config}',
             env={**os.environ, 'OPENSSL_CONF': '/dev/null'},
         )
+        expected = fips.read_provider_manifest()['version']
+        loaded = fips.loaded_provider_version(openssl_fipsmodule_config)
+        if loaded != expected:
+            raise ConfigError(
+                f'The FIPS provider OpenSSL loads reports version {loaded}, '
+                f'expected the validated {expected}; refusing to enable FIPS mode'
+            )
     else:
         if os.path.exists(openssl_fipsmodule_config):
             os.remove(openssl_fipsmodule_config)

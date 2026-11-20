@@ -234,6 +234,39 @@ def normalize_pdp_type(pdp_type: str) -> str:
     return pdp_mappings.get(pdp_type, 'ipv4')
 
 # ============================================================================
+# SIM IDENTITY UTILITIES
+# ============================================================================
+
+# MCCs whose operators use 3-digit MNCs (North America, Caribbean, parts of
+# Latin America and India).  Only consulted when the SIM itself does not
+# report its home MCC/MNC.
+_THREE_DIGIT_MNC_MCCS = frozenset({
+    '302', '310', '311', '312', '313', '314', '315', '316', '334', '338',
+    '342', '344', '346', '348', '352', '354', '356', '358', '360', '365',
+    '376', '405', '708', '722', '732',
+})
+
+
+def sim_home_mcc_mnc(operator_identifier: Any, imsi: Any) -> str:
+    """Return the SIM's home-network MCC+MNC.
+
+    The MNC length (2 or 3 digits) cannot be derived from the IMSI digits
+    alone; the SIM records it in EF_AD and ModemManager exposes the result as
+    the SIM ``OperatorIdentifier``.  Prefer that, and fall back to an
+    MCC-based guess only when it is unavailable.
+    """
+    operator_identifier = str(operator_identifier or '').strip()
+    if operator_identifier.isdigit() and len(operator_identifier) in (5, 6):
+        return operator_identifier
+
+    imsi = str(imsi or '').strip()
+    if len(imsi) < 5 or not imsi[:5].isdigit():
+        return ''
+    if imsi[:3] in _THREE_DIGIT_MNC_MCCS and len(imsi) >= 6 and imsi[5].isdigit():
+        return imsi[:6]
+    return imsi[:5]
+
+# ============================================================================
 # MODULE TESTING
 # ============================================================================
 

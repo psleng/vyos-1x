@@ -138,8 +138,10 @@ igos@igos:~$ show interfaces wwan wwan0 status
 | | Connection mode | `always-on`, `connect-on-demand`, `dial-on-demand` |
 | | Power state | Modem power state (e.g. `on`, `low`, `off`) |
 | | Access technology | Active RAT (e.g. `lte`, `5gnr`, `umts`) |
-| | Operator | Network operator name |
-| | Operator code | MCC/MNC code |
+| | Operator | Name of the registered network.  While roaming this is the visited network (read over QMI), not the SIM's home provider |
+| | Operator code | MCC/MNC of the registered network |
+| | Registration | 3GPP registration state (`home`, `roaming`, `searching`, `denied`, ...) |
+| | Home network | SIM's home provider and MCC/MNC; shown only while roaming |
 | | APN | Connected APN name |
 | | Requested APN | APN requested by configuration (shown with Negotiated APN) |
 | | Negotiated APN | APN the carrier actually activated |
@@ -732,9 +734,18 @@ The updater:
 1. Reads the modem identity, authenticates the catalog, and selects the matching
    hardware track. It uses the release's full archive URL directly.
 2. Returns without flashing if that igOS release is already installed. A lower
-   target label prints a downgrade warning; an unmapped running revision prints
-   an unknown-ordering warning.
+   target label is a downgrade: it prints a warning and asks
+   "Download and install older firmware …?" (default no) **before**
+   downloading anything. With `now` (`--no-prompt`) a downgrade is refused
+   unless `force` is also given (`... <version> force now`). An unmapped
+   running revision prints an unknown-ordering warning.
 3. Downloads only the selected archive, or reuses an eligible cached copy.
+   Stalls and dropped connections resume automatically. If the download
+   still fails (for example a long loss of coverage), the partial file is
+   kept in `/var/cache/vyos/wwan-firmware-downloads/` and running the same
+   command again continues where it stopped; it is only used if the result
+   matches the catalog SHA-256, and is discarded after 7 days or when
+   another release is downloaded.
    Checks free space and the catalog's `archive_sha256` before extraction.
    Extraction rejects absolute/traversal paths, symbolic/hard links, and special
    device entries. Storage checks preserve a 32 MiB free-space reserve.
@@ -902,48 +913,73 @@ remove cataloged cached releases.
 
 ### Automatic checks and notifications
 
-Enable notification-only checks, optionally broadcasting changed notices:
+Notification-only checks run by default on any unit with a modem: whenever an
+enabled `interfaces wwan` interface is configured, the `interfaces wwan`
+configuration starts `vyos-wwan-firmware-check.service` (the unit has no
+`[Install]` section, so units without a modem never run it). This matches the
+system image update check, which is also on by default. To also broadcast
+changed notices to logged-in users:
 
 ```text
 configure
-set system update-check cellular-firmware auto-check
 set system update-check cellular-firmware wall
 commit
 save
 exit
 ```
 
-`vyos-cellular-firmware-check.service` runs an immediate check when started and
-then every 12 hours, with a 180-second timeout per check. It uses the same FSM
-identity, authenticated catalog, revision matching, and running-version mapping
-as the operational handler. It checks present configured WWAN interfaces and
-aggregates newer-release notices into `/run/motd.d/11-vyos-cellular-firmware`.
-Each notice names the interface, available igOS label, and exact update command.
+The service runs an immediate check when started and then every 12 hours, with
+a 180-second timeout per check. If a check fails -- typically at boot, before
+the modem or uplink is up -- it retries after 5 minutes, doubling up to once an
+hour, until a check succeeds. It uses the same FSM identity, authenticated
+catalog, revision matching, and running-version mapping as the operational
+handler. It checks present configured WWAN interfaces and writes
+newer-release notices to `/run/motd.d/11-vyos-cellular-firmware`, shown at login
+right after the image update notice and in the same layout:
+
+```text
+---
+Current cellular firmware (wwan0): 2.0
+Cellular firmware update available: 2.1
+---
+```
+
+As with the image update notice, a failed or incomplete check leaves any
+existing notice in place. A successful check that finds nothing newer clears it
+(a modem flash does not reboot the unit, so the notice would otherwise stay).
 Unknown running versions are not guessed to be upgrades. Unavailable modems are
-skipped; checks never stop the manager, download firmware archives, or auto-flash.
+skipped; checks never stop the manager, download firmware archives, or
+auto-flash.
+
+Every check records its result in `/run/vyos-cellular-firmware-status.json`.
+While that result is fresh (13 hours after a success, about an hour after a
+failure), `show interfaces wwan <wwanN> firmware` and the GUI use the cached,
+authenticated catalog instead of downloading it again. Use
+`show interfaces wwan <wwanN> firmware refresh` to download the catalog now
+(`show system updates refresh` does the same for image updates).
 
 `wall` broadcasts only when notice content changes. Removing `wall` leaves MOTD
-notices enabled. To disable cellular checks explicitly:
+notices enabled. To disable cellular checks:
 
 ```text
 configure
-delete system update-check cellular-firmware auto-check
 set system update-check cellular-firmware disable
 commit
 save
 exit
 ```
 
-`auto-check` and `disable` cannot coexist. Removing `auto-check`, or setting
-`disable`, stops/disables the cellular service and clears its MOTD fragment.
-Delete `disable` before enabling `auto-check` again. These cellular toggles are
-independent of the parent image-update notification toggle.
+`set system update-check disable` also disables cellular checks, along with
+image update checks. Disabling stops the cellular service and clears its MOTD
+fragment. `auto-check` is still accepted for compatibility but is no longer
+needed; it cannot be combined with `disable`.
 
 For diagnostics from the router shell:
 
 ```bash
-systemctl status vyos-cellular-firmware-check.service
-journalctl -u vyos-cellular-firmware-check.service
+systemctl status vyos-wwan-firmware-check.service
+journalctl -u vyos-wwan-firmware-check.service
+cat /run/vyos-cellular-firmware-status.json
 ```
 
 ### Firmware build and signing workflow

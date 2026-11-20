@@ -348,9 +348,13 @@ class ConfigSession(object):
         else:
             out, _ = self._vyconf_session.discard()
 
-    def show_config(self, path, format='raw'):
+    def show_config(self, path, format='raw', effective=False):
+        # Without --show-active-only/--show-working-only, showConfig prints a
+        # diff with +/- markers whenever the session has uncommitted changes,
+        # which ConfigTree cannot parse
         if self._vyconf_session is None:
-            config_data = self.__run_command(SHOW_CONFIG + path)
+            flags = ['--show-active-only'] if effective else []
+            config_data = self.__run_command(SHOW_CONFIG + flags + path)
         else:
             config_data, _ = self._vyconf_session.show_config(path)
 

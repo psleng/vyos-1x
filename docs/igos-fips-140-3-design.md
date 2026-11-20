@@ -31,6 +31,19 @@ kernel.
 
 ---
 
+## Implementation status (checkpoint: 2026-11-18 — OpenSSL 3.5.7 base: validated-provider identity enforced)
+
+The OpenSSL 3.5.7 base (Debian 3.5.7-1~deb13u2 rebuilt for bookworm) also builds
+`openssl-provider-fips`, an **unvalidated 3.5 `fips.so` at the same path** as the
+validated 3.1.2 module, and nothing verified which module was actually active
+(§0.2, §7.5). Fixed in vyos-build (`igos-openssl-fips-provider` 3.1.2-1igos2:
+`Conflicts`/`Replaces`/`Provides: openssl-provider-fips`, unstripped module,
+build-time version gate, identity manifest) and vyos-1x (`Depends: openssl/libssl3
+(>= 3.5.0)`; commit + boot + op-mode + smoketest verify the module SHA-256 and the
+loaded provider version against the manifest, fail-closed on mismatch). Validated
+on arm64 against the real 3.1.2 and 3.5.7 modules; **pending an on-target image
+run**.
+
 ## Implementation status (checkpoint: 2026-11-09 — audit round 3: on-target failure list worked through)
 
 **Checkpoint 2026-11-09 (session summary):** an on-target audit run (operator test
@@ -705,10 +718,14 @@ Two relevant facts:
 - **`vyos-build` (fork):** igOS builds its **own OpenSSL 3.5** package
   (`scripts/package-build-iGOS/openssl-3.5/`) from Debian's packaging
   (`salsa.debian.org/debian/openssl` @ `c8211578…`), rebased from trixie naming
-  (`libssl3t64` → `libssl3`) via `bookworm-packaging.patch`. **That build does
-  not enable the FIPS provider** — there is no `enable-fips` and no FIPS-module
-  patch (unlike upstream VyOS's T9040 `0001-Enable-FIPS-module.patch`). So the
-  current igOS image ships **no `fips.so` at all**.
+  (`libssl3t64` → `libssl3`) via `bookworm-packaging.patch`. **Correction
+  (2026-11-18):** Debian's 3.5 packaging (3.5.7-1~deb13u2) configures with
+  `enable-fips` and emits a separate **`openssl-provider-fips`** binary package
+  — an **unvalidated 3.5 `fips.so`** at the same `ossl-modules/fips.so` path the
+  validated provider uses. The psleng mirror publishes it. It is not pulled in
+  by `libssl3`/`openssl` (only `openssl-provider-legacy` is), but nothing stopped
+  it co-installing with — or silently replacing — the validated module. See §7.5
+  for how that path is now owned and verified.
 
 Consequence: igOS must (a) port the T8529 CLI/config layer, and (b) make the
 3.5 build ship the **validated** FIPS provider (§0.4, §8.1) — *not* simply
@@ -720,8 +737,9 @@ OpenSSL 3.x splits crypto into **providers**. FIPS mode means configuring the
 library so applications use the **FIPS provider** (`fips.so`) by default instead
 of the default provider:
 
-1. A FIPS provider `fips.so` must be **present**. It is *not* in Debian's stock
-   build (nor in the current igOS 3.5 build). Critically, the provider is
+1. A FIPS provider `fips.so` must be **present**. Debian's 3.5 packaging ships
+   one (`openssl-provider-fips`), but it is the **unvalidated 3.5** build and
+   must never be the one loaded (§7.5). Critically, the provider is
    **version-decoupled from the base library** (§0.4): the **validated 3.1.2
    provider** is designed to load against a 3.0–3.5 base, so igOS keeps its 3.5
    `libssl` and adds the validated provider — rather than building 3.5's own
@@ -1598,17 +1616,46 @@ Concrete layout (`scripts/package-build-iGOS/openssl-fips-provider/`):
   commit, `./Configure enable-fips && make`, stages `providers/fips.so` into
   `fips/<arch>/`, records `fips/SHA256SUMS`. Idempotent / pre-stage aware.
 - `debian/` — thin binary package `igos-openssl-fips-provider`
-  (`Depends: libssl3 (>= 3.0)`, `Multi-Arch: same`, `Architecture: any`) that
-  installs only `/usr/lib/${DEB_HOST_MULTIARCH}/ossl-modules/fips.so` and
-  refuses to ship a placeholder (ELF + SHA checks in `debian/rules`).
+  (`Depends: libssl3 (>= 3.0)`, `Conflicts`/`Replaces`/`Provides:
+  openssl-provider-fips`, `Multi-Arch: same`, `Architecture: any`) that installs
+  `/usr/lib/${DEB_HOST_MULTIARCH}/ossl-modules/fips.so` **byte-for-byte as built**
+  (`dh_strip`/`dh_dwz` disabled — 3.1.2-1igos1 shipped a stripped module with an
+  added `.gnu_debuglink`) plus an identity manifest
+  `/usr/lib/${DEB_HOST_MULTIARCH}/igos-openssl-fips-provider/fips.so.manifest`
+  (`version=`, `sha256=`). `debian/rules` refuses a placeholder (ELF + SHA
+  checks) and runs `check-fips-provider.sh`, which self-tests the module and
+  fails the build unless it self-reports the pinned version.
 - `fips/<arch>/` — build output (or hand-staged vendor binary) + `SHA256SUMS`.
 
 Packaging notes:
-- The base openssl package owns the shared `ossl-modules/` dir (it ships
-  `legacy.so`); adding `fips.so` there is a different filename → **no `Conflicts`
-  needed**.
+- **`Conflicts` IS needed (corrected 2026-11-18).** Debian's 3.5 source also
+  builds `openssl-provider-fips`, which installs its own (unvalidated) `fips.so`
+  at the **same path**. The provider package `Conflicts`/`Replaces`/`Provides`
+  it so only the validated module can occupy `ossl-modules/fips.so`. (In 3.5,
+  `legacy.so` moved to its own `openssl-provider-legacy` package as well.)
+- vyos-1x `Depends: openssl (>= 3.5.0), libssl3 (>= 3.5.0)` so an image cannot
+  silently fall back to Debian bookworm's 3.0.x base.
 - Register the binary package name in each FIPS-capable build flavor's
-  `packages = [...]` (live-build only installs *referenced* local debs).
+  `packages = [...]` (mirror packages are only installed when referenced; note
+  that *every* `.deb` dropped into `vyos-build/packages/` is installed regardless).
+
+**Proving the active module is the validated build.** OpenSSL resolves the
+`fips` provider to `ossl-modules/fips.so`, and `fipsinstall` self-tests (and
+MACs) whatever module is there — an unvalidated 3.5 `fips.so` passes just as
+well. So vyos-1x checks identity explicitly, via `vyos.fips`
+(`verify_provider_module()`, `loaded_provider_version()`):
+- **commit** (`system_option.py`): `verify()` rejects FIPS unless the on-disk
+  module's SHA-256 equals the manifest; `generate()` runs `fipsinstall`, loads the
+  provider through the same `.include fipsmodule.cnf` + `fips = fips_sect`
+  activation `openssl.cnf` uses, and rejects unless it reports the manifest
+  `version` (as README-FIPS.md's "check that the correct FIPS provider is being
+  used" step).
+- **boot** (`fips-regenerate.sh`): the same two checks before/after
+  `fipsinstall`; any mismatch takes the §7.2 fail-closed path (and removes
+  `fipsmodule.cnf`).
+- **op-mode**: `show system fips` reports the loaded provider version against the
+  validated version and whether the module matches the manifest.
+- **smoketest**: `test_fips` asserts both.
 - Do **not** ship a prebuilt `fipsmodule.cnf` — its integrity MAC is computed over
   the exact `fips.so`; the T8529 layer runs `openssl fipsinstall` on-box to
   generate it for the shipped binary (§0.3).

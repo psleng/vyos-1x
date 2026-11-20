@@ -12,7 +12,10 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import hashlib
+import os
 import re
+import tempfile
 
 from unittest import TestCase
 
@@ -227,3 +230,58 @@ class TestFipsPolicy(TestCase):
             self.assertEqual(
                 drift, [],
                 f"policy '{leaf}' has tokens not in grammar {path}: {drift}")
+
+
+class TestFipsProviderIdentity(TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.module = os.path.join(self._tmp.name, 'fips.so')
+        self.manifest = os.path.join(self._tmp.name, 'fips.so.manifest')
+        with open(self.module, 'wb') as f:
+            f.write(b'validated provider build')
+        self.sha = hashlib.sha256(b'validated provider build').hexdigest()
+        self._write_manifest(f'# comment\nversion=3.1.2\nsha256={self.sha}\n')
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _write_manifest(self, text):
+        with open(self.manifest, 'w') as f:
+            f.write(text)
+
+    def test_matching_module_verifies(self):
+        self.assertEqual(fips.verify_provider_module(self.module, self.manifest), [])
+        self.assertEqual(fips.read_provider_manifest(self.manifest),
+                         {'version': '3.1.2', 'sha256': self.sha})
+
+    def test_substituted_module_rejected(self):
+        with open(self.module, 'wb') as f:
+            f.write(b'unvalidated 3.5 provider')
+        errors = fips.verify_provider_module(self.module, self.manifest)
+        self.assertEqual(len(errors), 1)
+        self.assertIn('not the validated FIPS provider build', errors[0])
+
+    def test_missing_or_incomplete_manifest_rejected(self):
+        missing = os.path.join(self._tmp.name, 'absent.manifest')
+        self.assertIn('manifest not found',
+                      fips.verify_provider_module(self.module, missing)[0])
+        self._write_manifest('version=3.1.2\n')
+        self.assertIn('incomplete',
+                      fips.verify_provider_module(self.module, self.manifest)[0])
+
+    def test_parse_providers(self):
+        out = (
+            'Providers:\n'
+            '  base\n'
+            '    name: OpenSSL Base Provider\n'
+            '    version: 3.5.7\n'
+            '    status: active\n'
+            '  fips\n'
+            '    name: OpenSSL FIPS Provider\n'
+            '    version: 3.1.2\n'
+            '    status: active\n'
+        )
+        providers = fips.parse_providers(out)
+        self.assertEqual(providers['fips']['version'], '3.1.2')
+        self.assertEqual(providers['fips']['status'], 'active')
+        self.assertEqual(providers['base']['version'], '3.5.7')

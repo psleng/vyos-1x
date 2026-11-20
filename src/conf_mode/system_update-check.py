@@ -23,6 +23,8 @@ from sys import exit
 from vyos.base import Warning
 from vyos.config import Config
 from vyos.utils.process import call
+from vyos.utils.update_status import cellular_firmware_check_wanted
+from vyos.utils.update_status import sync_cellular_firmware_check
 from vyos import ConfigError
 from vyos import airbag
 airbag.enable()
@@ -31,8 +33,6 @@ base = ['system', 'update-check']
 service_name = 'vyos-system-update'
 service_conf = Path(f'/run/{service_name}.conf')
 motd_file = Path('/run/motd.d/10-vyos-update')
-cellular_service = 'vyos-wwan-firmware-check'
-cellular_motd = Path('/run/motd.d/11-vyos-cellular-firmware')
 
 
 def get_config(config=None):
@@ -41,18 +41,24 @@ def get_config(config=None):
     else:
         conf = Config()
 
+    # Decided here, from this script's Config: whether an enabled wwan
+    # interface exists and cellular checks are not disabled
+    cellular_wanted = cellular_firmware_check_wanted(conf)
+
     if not conf.exists(base):
-        return None
+        # removal from running config
+        return {'_deleted': True, '_cellular_firmware_check': cellular_wanted}
 
     config = conf.get_config_dict(base, key_mangling=('-', '_'),
                                   get_first_key=True, no_tag_node_value_mangle=True)
+    config['_cellular_firmware_check'] = cellular_wanted
 
     return config
 
 
 def verify(config):
     # bail out early - looks like removal from running config
-    if config is None:
+    if '_deleted' in config:
         return
 
     cellular = config.get('cellular_firmware', {})
@@ -88,33 +94,31 @@ def verify(config):
 def generate(config):
     # Remove the override config (reverting to the baked-in default URL) and
     # any stale MOTD when the node is removed or update checks are disabled.
-    if config is None or 'disable' in config:
+    if '_deleted' in config or 'disable' in config:
         service_conf.unlink(missing_ok=True)
         # MOTD used in /run/motd.d/10-update
         motd_file.unlink(missing_ok=True)
         return None
 
     # Write configuration file
-    conf_json = json.dumps(config, indent=4)
-    service_conf.write_text(conf_json)
+    conf = {k: v for k, v in config.items() if not k.startswith('_')}
+    service_conf.write_text(json.dumps(conf, indent=4))
 
     return None
 
 
 def apply(config):
-    cellular = (config or {}).get('cellular_firmware', {})
-    if 'auto_check' in cellular and 'disable' not in cellular:
-        call(f'systemctl enable {cellular_service}.service')
-        call(f'systemctl restart {cellular_service}.service')
-    else:
-        call(f'systemctl disable --now {cellular_service}.service')
-        cellular_motd.unlink(missing_ok=True)
+    # The cellular firmware check runs whenever an enabled wwan interface is
+    # configured (see interfaces_wwan.py), unless update checks are disabled;
+    # restart so a changed URL or re-enable is checked right away
+    sync_cellular_firmware_check(config['_cellular_firmware_check'], restart=True)
+
     # Update-check notifications are enabled by default in the image (the
     # service uses the URL baked into /usr/share/vyos/version.json when nothing
     # is configured). `system update-check disable` turns them off persistently;
     # otherwise ensure the service is enabled and (re)started so any change here
     # (e.g. an overridden URL) takes effect, or it reverts to the baked default.
-    if config is not None and 'disable' in config:
+    if 'disable' in config:
         call(f'systemctl disable --now {service_name}.service')
     else:
         call(f'systemctl enable {service_name}.service')
