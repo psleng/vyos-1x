@@ -20,7 +20,7 @@
 
 import sys
 import ast
-import shutil
+import os
 import textwrap
 import typing
 
@@ -247,6 +247,28 @@ def _kv(label: str, value, width: int = 24) -> str:
     return f'  {label:<{width}} {value}'
 
 
+def _terminal_columns(default: int = 80) -> int:
+    """Return the user's terminal width.
+
+    ``show`` output is piped to the pager, so stdout is not a TTY; fall back
+    to stderr/stdin, which are still attached to the user's terminal.
+    """
+    try:
+        cols = int(os.environ.get('COLUMNS', ''))
+        if cols > 0:
+            return cols
+    except ValueError:
+        pass
+    for stream in (sys.stdout, sys.stderr, sys.stdin):
+        try:
+            cols = os.get_terminal_size(stream.fileno()).columns
+        except (AttributeError, OSError, ValueError):
+            continue
+        if cols > 0:
+            return cols
+    return default
+
+
 def _kv_wrapped(label: str, value: str, width: int = 24) -> list[str]:
     """Render a key/value pair with wrapped continuation lines.
 
@@ -256,7 +278,7 @@ def _kv_wrapped(label: str, value: str, width: int = 24) -> list[str]:
         return []
 
     text = str(value)
-    cols = shutil.get_terminal_size((120, 20)).columns
+    cols = _terminal_columns()
     available = max(20, cols - (2 + width + 1))
     chunks = textwrap.wrap(text, width=available, break_long_words=False, break_on_hyphens=False)
 
