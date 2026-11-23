@@ -16155,6 +16155,9 @@ class ModemStateMachine:
           * live lease -> take ownership; connect if not up/connecting.
           * no live lease, lease-owned, CONNECTED, no operator request ->
             idle down after a small grace (ENTER_IDLE -> REGISTERED_IDLE).
+            The idle sets the same hold as an explicit disconnect_bearer(), so
+            auto-recovery (resting-state watchdog, stale-REGISTERED handler,
+            failed-retry, SIM failover) does not redial it without new demand.
 
         A demand that cannot be satisfied is retried by the existing
         failed-state retry loop (connect-retry profile), not by clients.
@@ -16204,6 +16207,10 @@ class ModemStateMachine:
         elif now >= self._lease_idle_deadline:
             self._lease_idle_deadline = None
             self._lease_owns_bearer = False
+            # Without this, dial-on-demand's resting-state "desired UP" policy
+            # reconnects the idled bearer within one watchdog tick.  A later
+            # lease acquire or connect_bearer() clears the hold.
+            self.user_disconnected = True
             self.transition(ModemEvent.ENTER_IDLE)
 
     async def shutdown(self):

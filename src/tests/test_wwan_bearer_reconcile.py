@@ -245,6 +245,31 @@ class TestLeaseSweepLoop(IsolatedAsyncioTestCase):
         fsm.transition.assert_not_called()
 
 
+class TestLeaseIdleStaysDown(IsolatedAsyncioTestCase):
+    """A lease-lapse idle must not be redialled by the resting-state watchdog
+    (dial-on-demand's resting policy is "desired UP")."""
+
+    async def test_watchdog_does_not_redial_after_lease_expiry(self):
+        clock = _Clock()
+        fsm = _make_fsm(clock, mode='dial-on-demand', state=IDLE)
+        fsm._read_mm_state_bounded = AsyncMock(return_value=8)  # REGISTERED
+        fsm._resting_divergence_count = 0
+        with patch.object(state_machine.time, 'monotonic', clock):
+            fsm.bearer_leases.acquire(0, 'dod-traffic', ttl=15)
+            fsm._reconcile_bearer_demand()
+            fsm.machine.current_state = CONNECTED
+            clock.advance(16)      # lease lapsed; arm grace
+            fsm._reconcile_bearer_demand()
+            clock.advance(6)       # grace elapsed -> idle
+            fsm._reconcile_bearer_demand()
+        self.assertEqual(fsm.transition.call_args.args[0], ModemEvent.ENTER_IDLE)
+
+        fsm.machine.current_state = IDLE
+        fsm.transition.reset_mock()
+        await fsm._reconcile_resting_state(IDLE)
+        fsm.transition.assert_not_called()
+
+
 class TestLeaseAwareDisconnectBearer(IsolatedAsyncioTestCase):
     def _iface(self, fsm):
         return SimpleNamespace(fsm=fsm, interface_number=0,
