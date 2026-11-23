@@ -16,13 +16,15 @@
 
 import argparse
 import json
-import jmespath
 
 from pathlib import Path
 from sys import exit
 from time import sleep
 
 from vyos.utils.process import call
+from vyos.utils.update_status import CHECK_INTERVAL
+from vyos.utils.update_status import check_system_version
+from vyos.utils.update_status import next_retry
 
 import vyos.version
 
@@ -66,21 +68,24 @@ if __name__ == '__main__':
         print('No update-check URL configured or baked into the image; exiting.')
         exit(0)
 
-    local_data = vyos.version.get_full_version_data()
-    local_version = local_data.get('version')
-
+    retry = None
     while True:
-        remote_data = vyos.version.get_remote_version(url_json)
-        if remote_data:
-            url = jmespath.search('[0].url', remote_data)
-            remote_version = jmespath.search('[0].version', remote_data)
-            if local_version != remote_version and remote_version:
-                call(f'wall -n "Update available: {remote_version} \nUpdate URL: {url}"')
-                # MOTD used in /run/motd.d/10-vyos-update
-                motd_file.parent.mkdir(exist_ok=True)
-                motd_file.write_text(f'---\n'
-                                     f'Current version: {local_version}\n'
-                                     f'Update available: \033[1;34m{remote_version}\033[0m\n'
-                                     f'---\n')
-        # Check every 12 hours
-        sleep(43200)
+        result = check_system_version(url_json)
+        if result and result.get('update_available') and result.get('remote_version'):
+            local_version = result['local_version']
+            remote_version = result['remote_version']
+            call(f'wall -n "Update available: {remote_version} \nUpdate URL: {result.get("url")}"')
+            # MOTD used in /run/motd.d/10-vyos-update
+            motd_file.parent.mkdir(exist_ok=True)
+            motd_file.write_text(f'---\n'
+                                 f'Current version: {local_version}\n'
+                                 f'Update available: \033[1;34m{remote_version}\033[0m\n'
+                                 f'---\n')
+        if result and result.get('error'):
+            # The uplink is often not up yet at boot: retry soon instead of
+            # waiting a full interval
+            retry = next_retry(retry)
+            sleep(retry)
+        else:
+            retry = None
+            sleep(CHECK_INTERVAL)

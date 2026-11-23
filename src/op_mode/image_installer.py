@@ -181,6 +181,13 @@ FILE_INITRD_SRC: str = f'{DIR_LIVE_MEDIUM}/live/initrd.img'
 # builds; the initrd signature is FILE_INITRD_SRC + '.sig'.
 FILE_KERNEL_SIG_SRC: str = f'{DIR_LIVE_MEDIUM}/live/vmlinuz.sig'
 ISO_DOWNLOAD_PATH: str = ''
+# True once the ISO is fully downloaded; until then a partial file is kept
+# for resuming instead of being cleaned up
+ISO_DOWNLOAD_COMPLETE: bool = False
+# Downloaded images, kept across runs so an interrupted download resumes.
+# Only the partial for the most recent URL is kept, and only for a week.
+IMAGE_DOWNLOAD_DIR: str = '/var/cache/vyos/image-downloads'
+IMAGE_DOWNLOAD_KEEP_DAYS: int = 7
 
 external_download_script: str = f'{base_dir}/simple-download.py'
 external_latest_image_url_script: str = f'{base_dir}/latest-image-url.py'
@@ -740,16 +747,48 @@ def validate_signature(file_path: str, sign_type: str) -> None:
         print('Signature is valid')
 
 def download_file(local_file: str, remote_path: str, vrf: str,
-                  progressbar: bool = False, check_space: bool = False):
+                  progressbar: bool = False, check_space: bool = False,
+                  resume: bool = False):
     # Server credentials are implicitly passed in environment variables
     # that are set by add_image
     if vrf is None:
         download(local_file, remote_path, progressbar=progressbar,
-                 check_space=check_space, raise_error=True)
+                 check_space=check_space, raise_error=True, resume=resume)
     else:
         vrf_cmd = f'ip vrf exec {vrf} {external_download_script} \
                     --local-file {local_file} --remote-path {remote_path}'
+        if resume:
+            vrf_cmd += ' --resume'
         cmd(vrf_cmd, env=environ)
+
+
+def _image_download_path(url: str) -> str:
+    """Stable download path for ``url`` so a later run can resume it.
+
+    Partial downloads for other URLs (e.g. an older "latest") and anything
+    older than IMAGE_DOWNLOAD_KEEP_DAYS are removed first.
+    """
+    import hashlib
+    import time
+
+    directory = Path(IMAGE_DOWNLOAD_DIR)
+    directory.mkdir(parents=True, exist_ok=True)
+    name = hashlib.sha256(url.encode()).hexdigest()[:16]
+    cutoff = time.time() - IMAGE_DOWNLOAD_KEEP_DAYS * 86400
+    for item in directory.iterdir():
+        try:
+            if not item.name.startswith(name) or item.stat().st_mtime < cutoff:
+                item.unlink()
+        except OSError:
+            pass
+    return str(directory / f'{name}.iso')
+
+
+def _print_resume_hint() -> None:
+    if ISO_DOWNLOAD_PATH and not ISO_DOWNLOAD_COMPLETE and Path(ISO_DOWNLOAD_PATH).exists():
+        size = Path(ISO_DOWNLOAD_PATH).stat().st_size
+        print(f'Partial download kept ({size / 1024**2:.1f} MiB); '
+              'run the same command again to resume.')
 
 def image_fetch(image_path: str, vrf: str = None,
                 no_prompt: bool = False) -> Path:
@@ -761,10 +800,8 @@ def image_fetch(image_path: str, vrf: str = None,
     Returns:
         Path: a path to a local file
     """
-    import os.path
-    from uuid import uuid4
-
     global ISO_DOWNLOAD_PATH
+    global ISO_DOWNLOAD_COMPLETE
 
     # Latest version gets url from configured "system update-check url"
     if image_path == 'latest':
@@ -775,15 +812,25 @@ def image_fetch(image_path: str, vrf: str = None,
         if code:
             print(output)
             exit(MSG_INFO_INSTALL_EXIT)
-        image_path = output if output else image_path
+        lines = output.splitlines()
+        image_path = lines[0].strip() if lines and lines[0].strip() else image_path
+        latest_version = lines[1].strip() if len(lines) > 1 else ''
+        if not _confirm_latest_version(latest_version, no_prompt):
+            exit(MSG_INFO_INSTALL_EXIT)
 
     try:
         # check a type of path
         if urlparse(image_path).scheme:
-            # Download the image file
-            ISO_DOWNLOAD_PATH = os.path.join(os.path.expanduser("~"), '{0}.iso'.format(uuid4()))
-            download_file(ISO_DOWNLOAD_PATH, image_path, vrf,
-                          progressbar=True, check_space=True)
+            # Download the image file; an interrupted download is kept and
+            # resumed by the next run for the same URL
+            ISO_DOWNLOAD_PATH = _image_download_path(image_path)
+            try:
+                download_file(ISO_DOWNLOAD_PATH, image_path, vrf,
+                              progressbar=True, check_space=True, resume=True)
+            except BaseException:
+                _print_resume_hint()
+                raise
+            ISO_DOWNLOAD_COMPLETE = True
 
             # Download the image signature
             # VyOS only supports minisign signatures at the moment,
@@ -816,7 +863,42 @@ def image_fetch(image_path: str, vrf: str = None,
                 raise FileNotFoundError
     except Exception as e:
         print(f'The image cannot be fetched from: {image_path} {e}')
+        # A complete download that failed later (e.g. its signature) is
+        # useless; an incomplete one is kept for resuming
+        if ISO_DOWNLOAD_COMPLETE:
+            _remove_downloaded_image()
         exit(1)
+
+
+def _remove_downloaded_image() -> None:
+    """Delete the downloaded ISO with its signature and resume record."""
+    if not ISO_DOWNLOAD_PATH:
+        return
+    for suffix in ('', '.minisig', '.resume'):
+        Path(f'{ISO_DOWNLOAD_PATH}{suffix}').unlink(missing_ok=True)
+
+
+def _confirm_latest_version(latest_version: str, no_prompt: bool) -> bool:
+    """Warn before downloading a "latest" release that is not newer.
+
+    The latest release on the download site can be older than the running
+    image (e.g. a development build); ask before downloading it. Without a
+    prompt, decline. Versions that cannot be ordered proceed as before.
+    """
+    from vyos.version import compare_build_versions
+    from vyos.version import get_version
+
+    running = get_version()
+    order = compare_build_versions(latest_version, running)
+    if order is None or order > 0:
+        return True
+    relation = 'older than' if order < 0 else 'the same as'
+    print(f'The latest release ({latest_version}) is {relation} '
+          f'the running image ({running}).')
+    if no_prompt:
+        print('Not downloading it without confirmation.')
+        return False
+    return ask_yes_no('Download and install it anyway?', default=False)
 
 
 def migrate_config() -> bool:
@@ -919,10 +1001,12 @@ def cleanup(mounts: list[str] = [], remove_items: list[str] = []) -> None:
     # add installation dir to cleanup list
     if DIR_INSTALLATION not in remove_items:
         remove_items.append(DIR_INSTALLATION)
-    # also delete an ISO file
-    if Path(ISO_DOWNLOAD_PATH).exists(
-    ) and ISO_DOWNLOAD_PATH not in remove_items:
-        remove_items.append(ISO_DOWNLOAD_PATH)
+    # also delete a downloaded ISO; an incomplete one is kept for resuming
+    if ISO_DOWNLOAD_PATH:
+        if ISO_DOWNLOAD_COMPLETE:
+            _remove_downloaded_image()
+        else:
+            _print_resume_hint()
 
     if mounts:
         print('Unmounting target filesystems')
@@ -1646,7 +1730,18 @@ def parse_arguments() -> Namespace:
     return args
 
 
+def _interrupt_on_signal(signum, frame):
+    # A dropped SSH session (SIGHUP) or a stop (SIGTERM) would otherwise kill
+    # the installer without cleanup, leaving a partial ISO behind; take the
+    # Ctrl+C path instead
+    raise KeyboardInterrupt
+
+
 if __name__ == '__main__':
+    import signal
+
+    signal.signal(signal.SIGHUP, _interrupt_on_signal)
+    signal.signal(signal.SIGTERM, _interrupt_on_signal)
     try:
         args: Namespace = parse_arguments()
         if args.action == 'install':

@@ -19,12 +19,10 @@
 # pylint: disable=broad-exception-caught
 
 import requests
-import asyncio
 import json
 import copy
 import logging
 import traceback
-from threading import Lock
 from typing import Union
 from typing import Callable
 from typing import TYPE_CHECKING
@@ -53,6 +51,8 @@ from vyos.configsession import ConfigSessionError
 
 from ..background import BackgroundOpManager
 from ..background import BackgroundOpError
+from ..config_lock import config_lock
+from ..config_lock import wait_for_system_commit
 from ..session import SessionState
 from .models import success
 from .models import error
@@ -86,10 +86,6 @@ if TYPE_CHECKING:
 
 
 LOG = logging.getLogger('http_api.routers')
-
-lock = Lock()
-
-asynclock = asyncio.Lock()
 
 
 def check_auth(key_list, key):
@@ -309,6 +305,7 @@ background_op_manager = BackgroundOpManager()
 
 def call_commit(s: SessionState):
     try:
+        wait_for_system_commit()
         s.session.commit()
     except ConfigSessionError as e:
         s.session.discard()
@@ -322,6 +319,7 @@ def call_commit_confirm(s: SessionState):
     env = s.session.get_session_env()
     env['IN_COMMIT_CONFIRM'] = 't'
     try:
+        wait_for_system_commit()
         s.session.commit()
         s.session.commit_confirm(minutes=s.confirm_time)
     except ConfigSessionError as e:
@@ -334,8 +332,22 @@ def call_commit_confirm(s: SessionState):
         del env['IN_COMMIT_CONFIRM']
 
 
+# Deferred commits run as BackgroundTasks after the response, outside the
+# request that staged the changes, so they take the config lock themselves.
+# call_commit/call_commit_confirm stay lock-free for callers already holding it.
+def deferred_commit(s: SessionState):
+    with config_lock:
+        call_commit(s)
+
+
+def deferred_commit_confirm(s: SessionState):
+    with config_lock:
+        call_commit_confirm(s)
+
+
 def run_commit(s: SessionState):
     try:
+        wait_for_system_commit()
         out = s.session.commit()
         return out, None
     except Exception as e:
@@ -346,6 +358,7 @@ def run_commit_confirm(s: SessionState):
     env = s.session.get_session_env()
     env['IN_COMMIT_CONFIRM'] = 't'
     try:
+        wait_for_system_commit()
         out_c = s.session.commit()
         out_cc = s.session.commit_confirm(minutes=s.confirm_time)
         out = out_c + '\n' + out_cc
@@ -392,7 +405,7 @@ def _execute_configure_op(
     # We don't want multiple people/apps to be able to commit at once,
     # or modify the shared session while someone else is doing the same,
     # so the lock is really global
-    lock.acquire()
+    config_lock.acquire()
 
     config = Config(session_env=env)
 
@@ -486,9 +499,9 @@ def _execute_configure_op(
             else:
                 # Otherwise schedule the commit to run after the HTTP response
                 if confirm_time:
-                    background_tasks.add_task(call_commit_confirm, state)
+                    background_tasks.add_task(deferred_commit_confirm, state)
                 else:
-                    background_tasks.add_task(call_commit, state)
+                    background_tasks.add_task(deferred_commit, state)
 
             out = self_ref_msg
             msg = msg + out if msg else out
@@ -510,7 +523,7 @@ def _execute_configure_op(
     finally:
         if 'IN_COMMIT_CONFIRM' in env:
             del env['IN_COMMIT_CONFIRM']
-        lock.release()
+        config_lock.release()
 
     # Background jobs return raw success text or raise on failure;
     # the API wrapper formats HTTP responses and returns it
@@ -607,19 +620,23 @@ async def retrieve_op(data: RetrieveModel):
     op = data.op
     path = ' '.join(data.path)
 
+    # Read the committed config, not the shared session: every API config op
+    # commits or discards under the config lock, so between requests the two
+    # are equal, and during one the session holds another client's
+    # uncommitted changes
     try:
         if op == 'returnValue':
-            res = config.return_value(path)
+            res = config.return_effective_value(path)
         elif op == 'returnValues':
-            res = config.return_values(path)
+            res = config.return_effective_values(path)
         elif op == 'exists':
-            res = config.exists(path)
+            res = config.exists_effective(path)
         elif op == 'showConfig':
             config_format = 'json'
             if data.configFormat:
                 config_format = data.configFormat
 
-            res = session.show_config(path=data.path)
+            res = session.show_config(path=data.path, effective=True)
 
             config_tree = ConfigTree(res)
             if data.withDefaults:
@@ -667,7 +684,7 @@ async def retrieve_background_operations(
 
 
 @router.post('/config-file')
-async def config_file_op(data: ConfigFileModel, background_tasks: BackgroundTasks):
+def config_file_op(data: ConfigFileModel, background_tasks: BackgroundTasks):
     state = SessionState()
     session = state.session
     env = session.get_session_env()
@@ -677,8 +694,9 @@ async def config_file_op(data: ConfigFileModel, background_tasks: BackgroundTask
     # A non-zero confirm_time will start commit-confirm timer on commit
     confirm_time = data.confirm_time
 
-    # Serialize config operations without blocking the event loop
-    async with asynclock:
+    # Runs in the threadpool (plain def endpoint), so the blocking config lock
+    # and the load/merge/save/commit work never block the event loop
+    with config_lock:
         try:
             if op == 'save':
                 path = data.file or '/config/config.boot'
@@ -707,18 +725,18 @@ async def config_file_op(data: ConfigFileModel, background_tasks: BackgroundTask
 
                 if not d.is_node_changed(['service', 'https']):
                     if confirm_time:
-                        out, err = await run_in_threadpool(run_commit_confirm, state)
+                        out, err = run_commit_confirm(state)
                     else:
-                        out, err = await run_in_threadpool(run_commit, state)
+                        out, err = run_commit(state)
 
                     if err:
                         raise err
                     msg = (msg or '') + (out or '')
                 else:
                     if confirm_time:
-                        background_tasks.add_task(call_commit_confirm, state)
+                        background_tasks.add_task(deferred_commit_confirm, state)
                     else:
-                        background_tasks.add_task(call_commit, state)
+                        background_tasks.add_task(deferred_commit, state)
                     out = self_ref_msg
                     msg = (msg or '') + (out or '')
             elif op == 'confirm':
@@ -920,7 +938,7 @@ def import_pki(data: ImportPkiModel):
     op = data.op
     path = data.path
 
-    lock.acquire()
+    config_lock.acquire()
 
     try:
         if op == 'import-pki':
@@ -937,6 +955,7 @@ def import_pki(data: ImportPkiModel):
             if not res[0].isdigit():
                 return error(400, res)
             # commit changes
+            wait_for_system_commit()
             session.commit()
             res = res.split('. ')[0]
         else:
@@ -947,7 +966,7 @@ def import_pki(data: ImportPkiModel):
         LOG.critical(traceback.format_exc())
         return error(500, 'An internal error occurred. Check the logs for details.')
     finally:
-        lock.release()
+        config_lock.release()
 
     return success(res)
 
@@ -996,6 +1015,11 @@ def traceroute_op(data: TracerouteModel):
     return success(res)
 
 
+def _https_port(env) -> str:
+    config = Config(session_env=env)
+    return config.return_value('service https port') or '443'
+
+
 @router.post('/auth')
 async def auth_op(data: AuthModel):
     op = data.op
@@ -1005,12 +1029,8 @@ async def auth_op(data: AuthModel):
     session = state.session
     env = session.get_session_env()
 
-    lock.acquire()
-    try:
-        config = Config(session_env=env)
-        port = config.return_value('service https port') or '443'
-    finally:
-        lock.release()
+    # Read-only lookup: no config lock, and off the event loop
+    port = await run_in_threadpool(_https_port, env)
 
     if service == 'saml':
         base_url = f'https://127.0.0.1:{port}/sso/saml/v2'

@@ -51,7 +51,7 @@ except ImportError:
 
 from vyos.utils.wwan.wwan_utilities import (
     extract_apn_field, convert_android_auth_type,
-    convert_android_apns
+    convert_android_apns, sim_home_mcc_mnc
 )
 from vyos.utils.wwan.wwan_configuration import ConfigurationLoader
 from vyos.utils.wwan.apn_discovery import APNDiscovery
@@ -76,6 +76,10 @@ MESSAGING_INTERFACE = "org.freedesktop.ModemManager1.Modem.Messaging"
 SMS_INTERFACE = "org.freedesktop.ModemManager1.Sms"
 
 BEARER_PATH_PREFIX = "/org/freedesktop/ModemManager1/Bearer/"
+
+# MMModem3gppRegistrationState values meaning "registered on a visited network"
+# (roaming, roaming-sms-only, roaming-csfb-not-preferred).
+ROAMING_REGISTRATION_STATES = frozenset({5, 7, 10})
 
 
 def is_valid_bearer_path(path):
@@ -545,6 +549,7 @@ class ModemStateMachine:
         self.connected_apn = self._restore_connected_apn()   # Last successful APN (persisted across service restarts, cleared on reboot)
         self.requested_apn = ''             # APN name we asked MM to connect with (this session)
         self.negotiated_apn = ''            # APN the carrier actually activated (read over QMI)
+        self._serving_network_cache = ('', '')  # (operator code, visited network name read over QMI)
         self.current_sim_path = None        # Last observed Modem.Sim object path
         # Debounce noisy Sim path churn during modem reboot/re-enumeration.
         # This is intentionally narrow: it only suppresses rapid duplicate
@@ -7225,6 +7230,26 @@ class ModemStateMachine:
                 # Continue monitoring despite errors
                 await asyncio.sleep(poll_cadence)
 
+    @staticmethod
+    def _mm_active_slot_present(live_identity: bool, failed_reason, probed: dict) -> bool:
+        """SIM presence for the active slot when no SIM_DETECT line is known.
+
+        Order matters: a live identity read wins (some modems, e.g. Telit
+        LE910C4, report sim-missing while the card is readable); then
+        ModemManager's sim-missing / sim-error failure reasons; then the
+        slot's SimSlots entry. With no evidence, report absent: MODEM state
+        LOCKED is not used because some modems report it for a missing SIM.
+        """
+        if live_identity:
+            return True
+        if failed_reason == 2:  # MM_MODEM_STATE_FAILED_REASON_SIM_MISSING
+            return False
+        if failed_reason == 3:  # MM_MODEM_STATE_FAILED_REASON_SIM_ERROR: a card is there
+            return True
+        if 'present' in (probed or {}):
+            return bool(probed['present'])
+        return False
+
     async def _probe_sim_slot_info(self, slot_number: int) -> dict:
         """Read whatever SIM identity is available from a specific slot's D-Bus object.
 
@@ -7259,20 +7284,23 @@ class ModemStateMachine:
             sim_props = sim_proxy.get_interface("org.freedesktop.DBus.Properties")
             SIM_INTERFACE = "org.freedesktop.ModemManager1.Sim"
 
+            operator_identifier = ''
             for prop, key in [("Imsi", "imsi"), ("SimIdentifier", "iccid"),
-                              ("OperatorName", "operator")]:
+                              ("OperatorName", "operator"),
+                              ("OperatorIdentifier", None)]:
                 try:
                     v = await sim_props.call_get(SIM_INTERFACE, prop)
                     val = v.value if v else ""
-                    if val:
+                    if key is None:
+                        operator_identifier = val or ''
+                    elif val:
                         info[key] = val
                 except Exception:
                     pass
 
-            # Derive MCC/MNC from IMSI if available
-            imsi = info.get('imsi', '')
-            if imsi and len(imsi) >= 5:
-                info['mcc_mnc'] = imsi[:6] if len(imsi) >= 6 and imsi[5].isdigit() else imsi[:5]
+            mcc_mnc = sim_home_mcc_mnc(operator_identifier, info.get('imsi', ''))
+            if mcc_mnc:
+                info['mcc_mnc'] = mcc_mnc
 
         except Exception as e:
             logger.debug(f"Could not probe SIM slot {slot_number}: {e}",
@@ -10668,6 +10696,73 @@ class ModemStateMachine:
                                'error': str(e)})
         return info
 
+    async def _qmi_get_serving_network_name(self, modem_props, operator_code) -> str:
+        """Name of the network the modem is registered on, read over QMI.
+
+        While roaming, ModemManager's Modem3gpp ``OperatorName`` follows the
+        SIM's SPN display rules and reports the *home* provider (a Telstra SIM
+        roaming on TELUS shows "Telstra"), so the visited network is invisible.
+        QMI NAS ``Get Serving System`` reports the registered PLMN's own name;
+        the NITZ long name from ``Get Operator Name`` is used when that is
+        empty.  Cached per operator code.  Read-only over MM's ``qmi-proxy``.
+        Never raises; returns ``''`` when unavailable.
+        """
+        operator_code = str(operator_code or '')
+        cached_code, cached_name = self._serving_network_cache
+        if operator_code and operator_code == cached_code and cached_name:
+            return cached_name
+
+        name = ''
+        try:
+            device = self._qmi_control_device(modem_props)
+            if not device or not shutil.which('qmicli'):
+                return ''
+
+            async def _qmicli(*args):
+                proc = None
+                try:
+                    proc = await asyncio.create_subprocess_exec(
+                        'qmicli', '-d', device, '-p', *args,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    out, _err = await asyncio.wait_for(proc.communicate(), timeout=8)
+                except asyncio.TimeoutError:
+                    try:
+                        proc.kill()
+                        await proc.wait()
+                    except Exception:
+                        pass
+                    return ''
+                return out.decode(errors='replace') if proc.returncode == 0 else ''
+
+            serving = await _qmicli('--nas-get-serving-system')
+            m = re.search(r"Current PLMN:\s*MCC:\s*'(\d+)'\s*MNC:\s*'(\d+)'\s*"
+                          r"Description:\s*'([^'\r\n]*)'", serving, re.IGNORECASE)
+            # qmicli prints the MNC as an integer ('01' -> '1'), so compare
+            # numerically against ModemManager's operator code.
+            if m and (not operator_code or (
+                    operator_code[:3] == m.group(1)
+                    and operator_code[3:].isdigit()
+                    and int(operator_code[3:]) == int(m.group(2)))):
+                name = m.group(3).strip()
+
+            if not name:
+                operator_info = await _qmicli('--nas-get-operator-name')
+                m = re.search(r"NITZ information:.*?Long Name:\s*'([^'\r\n]*)'",
+                              operator_info, re.IGNORECASE | re.DOTALL)
+                if m:
+                    name = m.group(1).strip()
+        except Exception as e:
+            logger.info("Serving network name not readable over QMI",
+                        extra={'interface_number': self.interface_number,
+                               'error': str(e)})
+            return ''
+
+        if name:
+            self._serving_network_cache = (operator_code, name)
+        return name
+
     async def _qmi_get_current_apn(self, modem_props=None) -> str:
         """Read the carrier-negotiated APN of the live session via ``qmicli``.
 
@@ -11607,13 +11702,14 @@ class ModemStateMachine:
             except Exception:
                 pass
 
-            # Extract MCC/MNC from IMSI
-            mcc_mnc = None
-            if imsi and len(imsi) >= 5:
-                if len(imsi) >= 6 and imsi[5].isdigit():
-                    mcc_mnc = imsi[:6]  # 6-digit MCC+MNC
-                else:
-                    mcc_mnc = imsi[:5]  # 5-digit MCC+MNC
+            operator_identifier = ""
+            try:
+                operator_id_variant = await sim_props.call_get(sim_interface, "OperatorIdentifier")
+                operator_identifier = (operator_id_variant.value if hasattr(operator_id_variant, 'value') else operator_id_variant) or ""
+            except Exception:
+                pass
+
+            mcc_mnc = sim_home_mcc_mnc(operator_identifier, imsi) or None
 
             sim_info = {
                 'imsi': imsi,
@@ -14303,10 +14399,14 @@ class ModemStateMachine:
             pass  # Keep cached values
 
         # ── 3. Live SIM details (query D-Bus if modem present) ───────────
+        # Only a live read proves a card is in the active slot: the cached
+        # identity above survives SIM removal.
+        live_sim_identity = False
         try:
             if self.proxy:
                 live_sim = await self._get_sim_information()
                 if live_sim:
+                    live_sim_identity = bool(live_sim.get('imsi') or live_sim.get('sim_identifier'))
                     status['sim_imsi'] = live_sim.get('imsi', '') or status['sim_imsi']
                     status['sim_iccid'] = live_sim.get('sim_identifier', '') or status['sim_iccid']
                     status['sim_operator'] = live_sim.get('operator_name', '') or status['sim_operator']
@@ -14421,10 +14521,15 @@ class ModemStateMachine:
                     status['operator_name'] = gpp_props.get('OperatorName', '')
                     status['registration_state'] = gpp_props.get('RegistrationState', 0)
                     status['operator_code'] = gpp_props.get('OperatorCode', '')
+                    status['serving_network_name'] = ''
+                    if status['registration_state'] in ROAMING_REGISTRATION_STATES:
+                        status['serving_network_name'] = await self._qmi_get_serving_network_name(
+                            modem_props, status['operator_code'])
                 except Exception:
                     status.setdefault('operator_name', '')
                     status.setdefault('registration_state', 0)
                     status.setdefault('operator_code', '')
+                    status.setdefault('serving_network_name', '')
         except Exception:
             for k in ('modem_manufacturer', 'modem_model', 'modem_imei',
                       'modem_firmware', 'modem_device',
@@ -14436,6 +14541,7 @@ class ModemStateMachine:
             for k in ('modem_state', 'access_technologies',
                       'access_technology_name', 'operator_name',
                       'registration_state', 'operator_code',
+                      'serving_network_name',
                       'modem_state_failed_reason_name'):
                 status.setdefault(k, '')
             status.setdefault('modem_state_failed_reason', 0)
@@ -15008,10 +15114,19 @@ class ModemStateMachine:
                     status[f"{prefix}_iccid"] = status.get('sim_iccid', cached.get('iccid', ''))
                     status[f"{prefix}_operator"] = status.get('sim_operator', cached.get('operator', ''))
                     status[f"{prefix}_mcc_mnc"] = status.get('sim_mcc_mnc', cached.get('mcc_mnc', ''))
-                    # GPIO SIM_DETECT wins; else assume present (the active slot
-                    # is muxed to the modem, which is how section 3 read identity).
-                    status[f"{prefix}_present"] = (
-                        gpio_present if gpio_present is not None else True)
+                    # GPIO SIM_DETECT wins. Without detect lines (or before
+                    # they are sampled) derive presence from ModemManager.
+                    if gpio_present is not None:
+                        status[f"{prefix}_present"] = gpio_present
+                    else:
+                        try:
+                            probed = await self._probe_sim_slot_info(slot_num)
+                        except Exception:
+                            probed = {}
+                        status[f"{prefix}_present"] = self._mm_active_slot_present(
+                            live_sim_identity,
+                            status.get('modem_state_failed_reason', 0),
+                            probed)
                 else:
                     # Inactive slot: try D-Bus probe, fall back to cache
                     try:

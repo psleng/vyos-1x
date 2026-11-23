@@ -23,6 +23,7 @@ from vyos.configtree import ConfigTree
 from vyos.defaults import directories
 from vyos.opmode import Error as OpModeError
 
+from api.config_lock import wait_for_system_commit
 from api.graphql.libs.op_mode import load_op_mode_as_module, split_compound_op_mode_name
 from api.graphql.libs.op_mode import normalize_output
 
@@ -84,7 +85,9 @@ class Session:
         out = ''
 
         try:
-            out = session.show_config(data['path'])
+            # committed config: the shared session may hold another
+            # request's uncommitted changes (see rest retrieve_op)
+            out = session.show_config(data['path'], effective=True)
             if data.get('config_format', '') == 'json':
                 config_tree = ConfigTree(out)
                 out = json.loads(config_tree.to_json())
@@ -110,6 +113,7 @@ class Session:
 
         try:
             session.load_config(data['file_name'])
+            wait_for_system_commit()
             session.commit()
         except Exception as error:
             raise error

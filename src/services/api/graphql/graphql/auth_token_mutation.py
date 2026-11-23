@@ -17,6 +17,7 @@ import datetime
 from typing import Any
 from typing import Dict
 from ariadne import ObjectType
+from fastapi.concurrency import run_in_threadpool
 from graphql import GraphQLResolveInfo
 
 from ..libs.token_auth import generate_token
@@ -27,7 +28,7 @@ auth_token_mutation = ObjectType('Mutation')
 
 
 @auth_token_mutation.field('AuthToken')
-def auth_token_resolver(obj: Any, info: GraphQLResolveInfo, data: Dict):
+async def auth_token_resolver(obj: Any, info: GraphQLResolveInfo, data: Dict):
     # non-nullable fields
     user = data['username']
     passwd = data['password']
@@ -40,9 +41,11 @@ def auth_token_resolver(obj: Any, info: GraphQLResolveInfo, data: Dict):
         seconds=exp_interval
     )
 
-    res = generate_token(user, passwd, secret, expiration)
+    # PAM (possibly RADIUS/TACACS+) and the config read can block; keep them
+    # off the event loop
+    res = await run_in_threadpool(generate_token, user, passwd, secret, expiration)
     try:
-        res |= get_user_info(user)
+        res |= await run_in_threadpool(get_user_info, user)
     except ValueError:
         # non-existent user already caught
         pass

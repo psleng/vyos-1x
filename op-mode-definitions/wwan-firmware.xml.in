@@ -115,11 +115,11 @@
                 <command>sudo ${vyos_op_scripts_dir}/wwan_firmware.py set_firmware --interface="$4" --version="$5"</command>
                 <children>
                   <node name="force">
-                    <properties><help>Reinstall even when the same firmware version is running</help></properties>
+                    <properties><help>Reinstall the running version or allow a downgrade</help></properties>
                     <command>sudo ${vyos_op_scripts_dir}/wwan_firmware.py set_firmware --interface="$4" --version="$5" --force</command>
                     <children>
                       <leafNode name="now">
-                        <properties><help>Reinstall without confirmation</help></properties>
+                        <properties><help>Reinstall or downgrade without confirmation</help></properties>
                         <command>sudo ${vyos_op_scripts_dir}/wwan_firmware.py set_firmware --interface="$4" --version="$5" --force --no-prompt</command>
                       </leafNode>
                     </children>

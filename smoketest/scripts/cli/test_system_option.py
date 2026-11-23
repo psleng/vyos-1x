@@ -15,11 +15,11 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import os
-import platform
 import unittest
 
 from base_vyostest_shim import VyOSUnitTestSHIM
 
+from vyos import fips
 from vyos.configsession import ConfigSessionError
 from vyos.utils.cpu import get_cpus
 from vyos.utils.file import read_file
@@ -147,17 +147,15 @@ class TestSystemOption(VyOSUnitTestSHIM.TestCase):
     def test_fips(self):
         openssl_config = '/etc/ssl/openssl.cnf'
         fipsmodule_config = '/run/ssl/fipsmodule.cnf'
-        arch_map = {
-            'x86_64': 'x86_64-linux-gnu',
-            'aarch64': 'aarch64-linux-gnu',
-        }
-        arch = arch_map.get(platform.machine())
-        fips_module = f'/usr/lib/{arch}/ossl-modules/fips.so'
+        fips_module = fips.provider_module_path()
 
         # The validated provider is shipped by a separate package; skip when it
         # is not present in the test image.
-        if arch is None or not os.path.exists(fips_module):
+        if fips_module is None or not os.path.exists(fips_module):
             self.skipTest('OpenSSL FIPS provider module not installed')
+
+        # The installed module must be the exact validated build.
+        self.assertEqual(fips.verify_provider_module(), [])
 
         self.cli_set(base_path + ['fips'])
         self.cli_commit()
@@ -172,6 +170,10 @@ class TestSystemOption(VyOSUnitTestSHIM.TestCase):
 
         # fipsinstall must have produced the module config (self-test passed).
         self.assertTrue(os.path.exists(fipsmodule_config))
+
+        # The provider OpenSSL loads must self-report the validated version.
+        self.assertEqual(fips.loaded_provider_version(fipsmodule_config),
+                         fips.read_provider_manifest()['version'])
 
         # The kernel cmdline must gain fips=1 (approved-mode; inert unless the
         # kernel is built with CONFIG_CRYPTO_FIPS).

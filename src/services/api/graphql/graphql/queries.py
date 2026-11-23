@@ -20,6 +20,7 @@ from typing import Any, Dict, Optional  # pylint: disable=W0611 # noqa: F401
 from graphql import GraphQLResolveInfo  # pylint: disable=W0611 # noqa: F401
 
 from ariadne import ObjectType, convert_camel_case_to_snake
+from fastapi.concurrency import run_in_threadpool
 from makefun import with_signature
 
 from vyos.opmode import Error as OpModeError
@@ -95,9 +96,14 @@ def make_query_resolver(query_name, class_name, session_func):
                 # otherwise, dynamically generate subclass to invoke subclass
                 # name based functions
                 klass = type(class_name, (Session,), {})
-            k = klass(session, data)
-            method = getattr(k, session_func)
-            result = method()
+
+            # Queries are read-only: run them in the threadpool without the
+            # config lock so a slow command never blocks the event loop
+            def execute():
+                k = klass(session, data)
+                return getattr(k, session_func)()
+
+            result = await run_in_threadpool(execute)
             data['result'] = result
 
             return {'success': True, 'data': data}

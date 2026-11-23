@@ -41,6 +41,12 @@ from vyos.utils.wwan.interfaces_wwan_firmware import (
     revision_rank,
     version_key,
 )
+from vyos.utils.update_status import CELLULAR_FIRMWARE_MOTD
+from vyos.utils.update_status import CELLULAR_FIRMWARE_STATUS
+from vyos.utils.update_status import active_config_value
+from vyos.utils.update_status import cellular_firmware_checks_disabled
+from vyos.utils.update_status import read_status
+from vyos.utils.update_status import write_status
 from vyos.version import get_version_data
 
 MANAGER_UNIT = 'igos-wwan-manager.service'
@@ -50,7 +56,7 @@ FIRMWARE_CATALOG_JSON_NAME = 'modem-firmware.json'
 FIRMWARE_CATALOG_CACHE = Path('/var/cache/vyos') / FIRMWARE_CATALOG_JSON_NAME
 FIRMWARE_ARCHIVE_CACHE = Path('/var/cache/vyos/wwan-firmware')
 FIRMWARE_LOCK = Path('/run/lock/igos-wwan-firmware.lock')
-FIRMWARE_MOTD = Path('/run/motd.d/11-vyos-cellular-firmware')
+FIRMWARE_MOTD = CELLULAR_FIRMWARE_MOTD
 FIRMWARE_CONFIG = ['system', 'update-check', 'cellular-firmware']
 SYSFS_NET = Path('/sys/class/net')
 SYSFS_USB = Path('/sys/bus/usb/devices')
@@ -283,15 +289,43 @@ def _display_firmware_details(
     print()
 
 
-def _load_firmware_catalog(refresh: bool = True) -> list[dict[str, object]]:
-    """Authenticate online or same-source cached catalogs before use."""
-    from vyos.configquery import ConfigTreeQuery
+def _catalog_url(config=None) -> str:
+    # Without a config object, use a single-value lookup: loading the whole
+    # running config dominated GraphQL show_firmware response time
+    url = config.value(FIRMWARE_CONFIG + ['url']) if config else active_config_value(FIRMWARE_CONFIG + ['url'])
+    return url or get_version_data().get('wwan_firmware_map_url', '')
+
+
+def _load_firmware_catalog(refresh: bool | None = True) -> list[dict[str, object]]:
+    """Authenticate online or same-source cached catalogs before use.
+
+    refresh=False: cached catalog only. refresh=None: cached catalog while
+    the check daemon's last attempt is fresh (vyos.utils.update_status),
+    else download. refresh=True: download. Every download is recorded in
+    the status file.
+    """
     from vyos.utils.wwan.interfaces_wwan_firmware import load_catalog
 
-    config = ConfigTreeQuery()
-    url = config.value(FIRMWARE_CONFIG + ['url']) or get_version_data().get('wwan_firmware_map_url', '')
+    url = _catalog_url()
     try:
-        return load_catalog(url, FIRMWARE_CATALOG_CACHE, parse_catalog, refresh=refresh)
+        if refresh is False:
+            return load_catalog(url, FIRMWARE_CATALOG_CACHE, parse_catalog, refresh=False)
+        if refresh is None and read_status(CELLULAR_FIRMWARE_STATUS, url) is not None:
+            try:
+                return load_catalog(url, FIRMWARE_CATALOG_CACHE, parse_catalog, refresh=False)
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+        cached_before = _mtime(FIRMWARE_CATALOG_CACHE)
+        try:
+            entries = load_catalog(url, FIRMWARE_CATALOG_CACHE, parse_catalog, refresh=True)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            write_status(CELLULAR_FIRMWARE_STATUS, url, error=str(error))
+            raise
+        # load_catalog() silently falls back to the cached copy on a download
+        # failure; only an updated cache counts as a fresh check
+        refreshed = _mtime(FIRMWARE_CATALOG_CACHE) != cached_before
+        write_status(CELLULAR_FIRMWARE_STATUS, url, error=None if refreshed else 'catalog download failed')
+        return entries
     except (OSError, ValueError, KeyError, TypeError) as error:
         from urllib.error import HTTPError, URLError
 
@@ -359,7 +393,7 @@ def _get_modem_identity(interface: str) -> dict[str, str]:
 
 
 def _get_compatible_firmware(
-    interface: str, show_progress: bool = False, refresh_map: bool = True, catalog_entries=None
+    interface: str, show_progress: bool = False, refresh_map: bool | None = True, catalog_entries=None
 ) -> dict[str, object]:
     """Return compatible versions from the remote JSON firmware map."""
     if show_progress:
@@ -604,11 +638,19 @@ def _running_version(compatible):
 
 
 def show_firmware(
-    interface: str, quiet: bool = False, downloaded_only: bool = False, raw: bool = False
+    raw: bool, interface: str, quiet: bool = False, downloaded_only: bool = False, refresh: bool = False
 ) -> dict[str, object] | None:
-    """Show available releases, native firmware, dates, cache and running status."""
+    """Show available releases, native firmware, dates, cache and running status.
+
+    ``raw`` is first because the GraphQL op-mode resolver calls show functions
+    as ``func(True, **data)``.
+    """
     try:
-        compatible = _get_compatible_firmware(interface, refresh_map=not quiet)
+        # quiet is completion help: cached catalog only; otherwise cached
+        # while the check daemon's result is fresh
+        # refresh downloads the catalog now (and updates the cache)
+        refresh_map = False if quiet else (True if refresh else None)
+        compatible = _get_compatible_firmware(interface, refresh_map=refresh_map)
     except (OSError, ValueError, vyos.opmode.Error):
         if quiet:
             return
@@ -700,7 +742,16 @@ def set_firmware(version: str, interface: str, no_prompt: bool = False, force: b
             if running is None:
                 print('Running firmware is not in the catalog; version ordering is unknown.')
             elif version_key(version) < version_key(running):
-                print(f'WARNING: downgrading firmware from {running} to {version}.')
+                # Ask before downloading anything; without a prompt, only an
+                # explicit force downgrades
+                print(f'WARNING: firmware {version} is older than the running {running}.')
+                if no_prompt and not force:
+                    raise vyos.opmode.IncorrectValue(
+                        f'Not downgrading firmware from {running} to {version} without confirmation; use force'
+                    )
+                if not no_prompt and not ask_yes_no(f'Download and install older firmware {version}?', default=False):
+                    print('Firmware update cancelled.')
+                    return
             print('Preparing authenticated firmware archive...')
             cache = _get_archive_cache(retention_only=True)
             with prepare_release(
@@ -740,6 +791,13 @@ def update_archive(interface: str, archive: str, no_prompt: bool = False, force_
         raise vyos.opmode.DataUnavailable(f'Unable to install firmware archive: {error}') from error
 
 
+def _mtime(path: Path) -> float | None:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return None
+
+
 def execute_check_firmware(notify: bool = False):
     """Check present configured modems; notify only, never flash or stop services."""
     from vyos.configquery import ConfigTreeQuery
@@ -747,19 +805,31 @@ def execute_check_firmware(notify: bool = False):
     config = ConfigTreeQuery()
     base = FIRMWARE_CONFIG
     motd = FIRMWARE_MOTD
-    if notify and (not config.exists(base + ['auto-check']) or config.exists(base + ['disable'])):
+    # Checks run by default on units with a modem (`auto-check` is accepted
+    # but no longer needed); `system update-check disable` or
+    # `... cellular-firmware disable` turns them off
+    if notify and cellular_firmware_checks_disabled(config):
         motd.unlink(missing_ok=True)
         return
     interfaces = [name for name in _get_wwan_interfaces() if config.exists(['interfaces', 'wwan', name])]
+    url = _catalog_url(config)
     notices = []
+    # Every attempt is recorded so show commands can answer from the cache and
+    # the check daemon can retry soon after a failure (e.g. modem not up yet)
+    errors = []
     if interfaces:
+        cached_before = _mtime(FIRMWARE_CATALOG_CACHE)
         try:
             entries = _load_firmware_catalog()
         except vyos.opmode.Error as error:
             print(f'Cellular firmware check unavailable: {error}')
-            if notify:
-                motd.unlink(missing_ok=True)
+            write_status(CELLULAR_FIRMWARE_STATUS, url, error=str(error))
+            # Like the image update check, a failed check leaves any existing
+            # notice in place
             return
+        if _mtime(FIRMWARE_CATALOG_CACHE) == cached_before:
+            # load_catalog() silently falls back to the cached copy
+            errors.append('catalog download failed; used the cached catalog')
         for interface in interfaces:
             try:
                 compatible = _get_compatible_firmware(interface, catalog_entries=entries)
@@ -767,38 +837,68 @@ def execute_check_firmware(notify: bool = False):
                 current = _running_version(compatible)
                 # Unknown native firmware cannot be ordered safely.
                 if current is not None and version_key(latest) > version_key(current):
-                    notices.append(
-                        f'{interface}: firmware {latest} available (running {current}). '
-                        f'Run: update firmware wwan {interface} {latest}'
-                    )
+                    notices.append((interface, current, latest))
             except (OSError, ValueError, vyos.opmode.Error) as error:
                 print(f'Skipping {interface}: {error}')
-    message = '\n'.join(notices)
-    if notify:
-        previous = motd.read_text() if motd.exists() else ''
-        if message:
-            content = 'Cellular firmware updates:\n' + message + '\n'
-            motd.parent.mkdir(parents=True, exist_ok=True)
-            with tempfile.NamedTemporaryFile(dir=motd.parent, mode='w', delete=False) as stream:
-                temporary = Path(stream.name)
-                try:
-                    stream.write(content)
-                    stream.flush()
-                    temporary.chmod(0o644)
-                    temporary.replace(motd)
-                finally:
-                    temporary.unlink(missing_ok=True)
-            if content != previous and config.exists(base + ['wall']):
-                subprocess.run(['wall', '-n'], input=content, text=True, check=False)
-        else:
-            motd.unlink(missing_ok=True)
-    elif message:
-        print(message)
-    else:
-        print('No newer mapped cellular firmware found.')
+                errors.append(f'{interface}: {error}')
+    elif config.exists(['interfaces', 'wwan']):
+        errors.append('no configured WWAN interface is present yet')
+    write_status(CELLULAR_FIRMWARE_STATUS, url, error='; '.join(errors) or None)
+    plain = '\n'.join(
+        f'{interface}: firmware {latest} available (running {current}). '
+        f'Run: update firmware wwan {interface} {latest}'
+        for interface, current, latest in notices
+    )
+    if not notify:
+        print(plain or 'No newer mapped cellular firmware found.')
+        return
+    if errors:
+        # Like the image update check, an incomplete check leaves any existing
+        # notice in place; the daemon retries shortly
+        return
+    if not notices:
+        # Unlike an image upgrade, a modem flash does not reboot the unit, so
+        # a check that finds nothing newer must clear an earlier notice
+        motd.unlink(missing_ok=True)
+        return
+    # Same layout as the image update notice (/run/motd.d/10-vyos-update)
+    content = ''.join(
+        f'---\n'
+        f'Current cellular firmware ({interface}): {current}\n'
+        f'Cellular firmware update available: \033[1;34m{latest}\033[0m\n'
+        for interface, current, latest in notices
+    ) + '---\n'
+    previous = motd.read_text() if motd.exists() else ''
+    motd.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=motd.parent, mode='w', delete=False) as stream:
+        temporary = Path(stream.name)
+        try:
+            stream.write(content)
+            stream.flush()
+            temporary.chmod(0o644)
+            temporary.replace(motd)
+        finally:
+            temporary.unlink(missing_ok=True)
+    if content != previous and config.exists(base + ['wall']):
+        # plain text, like the image update broadcast
+        broadcast = ''.join(
+            f'Cellular firmware update available ({interface}): {latest} (running {current})\n'
+            for interface, current, latest in notices
+        )
+        subprocess.run(['wall', '-n'], input=broadcast, text=True, check=False)
+
+def _interrupt_on_signal(signum, frame):
+    # A dropped SSH session (SIGHUP) or a stop (SIGTERM) would otherwise kill
+    # the handler without running cleanup: the transient release directory
+    # would be left behind and block a retry of that version
+    raise KeyboardInterrupt
 
 
 if __name__ == '__main__':
+    import signal
+
+    signal.signal(signal.SIGHUP, _interrupt_on_signal)
+    signal.signal(signal.SIGTERM, _interrupt_on_signal)
     if hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(line_buffering=True)
     try:

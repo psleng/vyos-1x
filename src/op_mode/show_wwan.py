@@ -20,7 +20,7 @@
 
 import sys
 import ast
-import shutil
+import os
 import textwrap
 import typing
 
@@ -104,7 +104,24 @@ def _normalize_list_field(value) -> list[str]:
 
 # ── Raw data helpers (return dicts for JSON mode) ───────────────────────
 
+# ModemManager MMModem3gppRegistrationState values.
+_REGISTRATION_STATES = {
+    0: 'idle', 1: 'home', 2: 'searching', 3: 'denied', 4: 'unknown',
+    5: 'roaming', 6: 'home (SMS only)', 7: 'roaming (SMS only)',
+    8: 'emergency services only', 9: 'home', 10: 'roaming',
+    11: 'attached (RLOS)',
+}
+_ROAMING_REGISTRATION_STATES = {5, 7, 10}
+
+
+def _registration_state(value) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
 def _raw_status(status: dict) -> dict:
+    reg_state = _registration_state(status.get('registration_state'))
     return {
         'interface': status.get('interface_name', ''),
         'state': status.get('fsm_state', ''),
@@ -116,6 +133,11 @@ def _raw_status(status: dict) -> dict:
         'operator': status.get('operator_name', ''),
         'operator_code': status.get('operator_code', ''),
         'registration_state': status.get('registration_state', ''),
+        'registration': _REGISTRATION_STATES.get(reg_state, ''),
+        'roaming': reg_state in _ROAMING_REGISTRATION_STATES,
+        'serving_network': status.get('serving_network_name', ''),
+        'home_network': status.get('sim_operator', ''),
+        'home_network_code': status.get('sim_mcc_mnc', ''),
         'apn': status.get('connected_apn', ''),
         'requested_apn': status.get('requested_apn', ''),
         'negotiated_apn': status.get('negotiated_apn', ''),
@@ -225,6 +247,28 @@ def _kv(label: str, value, width: int = 24) -> str:
     return f'  {label:<{width}} {value}'
 
 
+def _terminal_columns(default: int = 80) -> int:
+    """Return the user's terminal width.
+
+    ``show`` output is piped to the pager, so stdout is not a TTY; fall back
+    to stderr/stdin, which are still attached to the user's terminal.
+    """
+    try:
+        cols = int(os.environ.get('COLUMNS', ''))
+        if cols > 0:
+            return cols
+    except ValueError:
+        pass
+    for stream in (sys.stdout, sys.stderr, sys.stdin):
+        try:
+            cols = os.get_terminal_size(stream.fileno()).columns
+        except (AttributeError, OSError, ValueError):
+            continue
+        if cols > 0:
+            return cols
+    return default
+
+
 def _kv_wrapped(label: str, value: str, width: int = 24) -> list[str]:
     """Render a key/value pair with wrapped continuation lines.
 
@@ -234,7 +278,7 @@ def _kv_wrapped(label: str, value: str, width: int = 24) -> list[str]:
         return []
 
     text = str(value)
-    cols = shutil.get_terminal_size((120, 20)).columns
+    cols = _terminal_columns()
     available = max(20, cols - (2 + width + 1))
     chunks = textwrap.wrap(text, width=available, break_long_words=False, break_on_hyphens=False)
 
@@ -261,8 +305,17 @@ def _format_status(status: dict, interface: str) -> str:
         lines.append(_kv('Airplane mode:', 'active (RF off)'))
     lines.append(_kv('Power state:', d['power_state']))
     lines.append(_kv('Access technology:', d['access_technology']))
-    lines.append(_kv('Operator:', d['operator']))
+    # While roaming, ModemManager's operator name is the SIM's home provider;
+    # show the visited network's own name when the FSM could read it.
+    lines.append(_kv('Operator:', d['serving_network'] or d['operator']))
     lines.append(_kv('Operator code:', d['operator_code']))
+    if d['registration']:
+        lines.append(_kv('Registration:', d['registration']))
+    if d['roaming'] and (d['home_network'] or d['home_network_code']):
+        home = d['home_network'] or d['home_network_code']
+        if d['home_network'] and d['home_network_code']:
+            home = f"{d['home_network']} ({d['home_network_code']})"
+        lines.append(_kv('Home network:', home))
     lines.append(_kv('APN:', d['apn']))
     # Always show the requested vs carrier-negotiated APN so the operator can
     # see exactly what was asked for and what the network activated — even when
