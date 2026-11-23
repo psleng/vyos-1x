@@ -295,7 +295,7 @@ automatically using a 4-priority APN discovery chain:
 | **PDP type** | per-SIM only, default `ipv4v6` | Dual-stack bearer per slot unless overridden |
 | **Roaming** | per-SIM only, default `enabled` | Roaming is permitted by default so aggregator/MVNO SIMs (e.g. roaming-style Rogers-on-Bell) work out of the box. Use `disable-roaming` per slot to forbid visited networks. |
 | **Network mode** | `auto` | Modem selects best available RAT (5G→LTE→3G→2G) |
-| **MTU** | `1420` (fallback) | Carrier-negotiated bearer MTU is used as-is when available; the interface `mtu` is a fallback used only when the carrier provides none and no per-SIM override is set — it is not a ceiling on the carrier value; a per-SIM `mtu` (if set) caps the effective MTU to the lesser of it and the carrier MTU |
+| **MTU** | `1420` (fallback) | Carrier-negotiated bearer MTU is used as-is when available; the interface `mtu` is a fallback used only when the carrier provides none and no per-SIM override is set — it is not a ceiling on the carrier value; a per-SIM `mtu` (if set) caps the effective MTU to the lesser of it and the carrier MTU. The WWAN state machine is the only writer of the wwanN MTU: a commit never sets it directly, and an `mtu` change takes effect through the state machine (immediately when connected) |
 | **Per-SIM MTU** | `0` (use interface mtu) | Optional per-SIM override; when the SIM is active the effective MTU is the lesser of this value and the carrier MTU (or this value if the carrier provides none) |
 | **SIM PIN** | per-SIM only | If a PIN is configured, the FSM always sends it automatically when the SIM is locked |
 | **SIM failover** | per-SIM, `enabled` | Automatic switch to backup SIM on failure; use `disable` to turn off |

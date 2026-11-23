@@ -326,7 +326,8 @@ def verify(ipsec):
                             f"A PRF algorithm is mandatory in IKE proposal {proposal}"
                         )
 
-    # FIPS 140-3: fail closed on explicitly-set non-approved IKE/ESP crypto.
+    # FIPS 140-3: fail closed on explicitly-set non-approved IKE/ESP crypto and
+    # remote-access client authentication.
     if 'fips' in ipsec:
         if 'fips_reject_radius' in ipsec:
             fips.reject_feature('RADIUS (IPsec EAP)')
@@ -360,6 +361,23 @@ def verify(ipsec):
             messages = fips.reject_unapproved(esp_config, esp_pfs_map)
             if messages:
                 raise ConfigError(f'ESP group "{name}": ' + '; '.join(messages))
+
+        # get_config() merges defaults, so an unset client-mode is checked as
+        # its eap-mschapv2 default too.
+        client_mode_map = {
+            'client_mode': 'vpn ipsec remote-access connection authentication client-mode',
+        }
+        connections = dict_search('remote_access.connection', ipsec) or {}
+        for name, ra_conf in connections.items():
+            auth = ra_conf.get('authentication', {})
+            messages = fips.reject_unapproved(auth, client_mode_map)
+            if messages:
+                hint = ''
+                if auth.get('client_mode') == 'eap-mschapv2':
+                    hint = ' (client-mode defaults to eap-mschapv2 when unset)'
+                raise ConfigError(
+                    f'Remote-access connection "{name}": ' + '; '.join(messages) + hint
+                )
 
     if 'l2tp' in ipsec:
         if 'esp_group' in ipsec['l2tp']:

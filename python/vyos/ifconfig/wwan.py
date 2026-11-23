@@ -105,6 +105,19 @@ class WWANIf(Interface):
             return None
         return super().add_ipv6_eui64_address(prefix)
 
+    def set_mtu(self, mtu):
+        # The WWAN state machine is the sole MTU authority on wwanN: on every
+        # bearer connect and every config change it applies per-SIM mtu >
+        # carrier bearer MTU > configured interface mtu (fallback only). The
+        # generic Interface.update() would otherwise re-apply the configured
+        # mtu (default 1420) on every commit, racing the FSM and overriding a
+        # carrier 1500. With qmi_wwan raw_ip that also shrinks the USB RX URB
+        # (usbnet_change_mtu), so downlink packets above it are dropped as
+        # rx_over_errors.
+        if getattr(self, '_fsm_owns_mtu', False):
+            return None
+        return super().set_mtu(mtu)
+
     def update(self, config, defer_admin_up=False):
         '''Perform interface setup for wwan
 
@@ -122,8 +135,12 @@ class WWANIf(Interface):
         # accept_dad / dad_transmits / autoconf / accept_ra (including from XML
         # defaultValues) on every commit.
         self._fsm_owns_ipv6_posture = bool(defer_admin_up)
+        # The FSM applies the MTU regardless of interface-management, so
+        # conf-mode never writes it (see set_mtu).
+        self._fsm_owns_mtu = True
         try:
             super().update(config)
         finally:
             self._defer_admin_up = False
             self._fsm_owns_ipv6_posture = False
+            self._fsm_owns_mtu = False
