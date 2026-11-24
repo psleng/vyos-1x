@@ -1,6 +1,6 @@
 # igOS FIPS 140-3 — Design Sketch
 
-Status: **vyos-1x enforcement landed + on-target validated (2026-11-08); audit round 3 landed (2026-11-09) — open items remain, see the 2026-11-09 checkpoint**
+Status: **vyos-1x enforcement landed + on-target validated (2026-11-08); audit round 3 landed (2026-11-09) — open items remain, see the 2026-11-09 checkpoint; 2026-11-20: IPsec remote-access client-mode reject + RadSec feasibility, see that checkpoint**
 (Phases 0, 1, the vyos-1x half of Phase 4, and the Phase 4 **kernel
 `CONFIG_CRYPTO_FIPS` defconfig** landed; enforcement landed — helper/policy +
 SSH + IPsec + HTTPS + NTP/NTS + WireGuard/PPTP + RADIUS/TACACS+ + OpenVPN-TPM +
@@ -30,6 +30,35 @@ system-wide, enforceable FIPS mode. It spans `vyos-1x`, `vyos-build`, and the
 kernel.
 
 ---
+
+## Implementation status (checkpoint: 2026-11-20 — IPsec remote-access client auth; RadSec feasibility)
+
+- **Fixed: IPsec remote-access `client-mode eap-mschapv2` was accepted under FIPS**
+  (commit `079a53c34`). FIPS mode rejected only `vpn ipsec remote-access radius`,
+  so local **EAP-MSCHAPv2** (MD4/DES; its EAP key is derived from them) still
+  committed — and it is the grammar **default**, so any remote-access connection
+  that left `client-mode` unset got it. It would then fail at login (charon's FIPS
+  plugin set has no MD4/DES) with nothing pointing at FIPS — the same "RADIUS-only
+  reject leaves local auth as a gap" pattern already fixed for accel-ppp. Now a
+  policy leaf `vpn ipsec remote-access connection authentication client-mode`
+  (approved `x509`, `eap-tls`) is enforced in
+  [vpn_ipsec.py](../src/conf_mode/vpn_ipsec.py) `verify()` per connection; defaults
+  are merged first, so an unset `client-mode` is rejected too (the error says so).
+  `eap-radius` stays out until RadSec exists. Enabling FIPS re-runs `vpn_ipsec`
+  (`fips` dependents), so it is gated at enable time as well. Unit test + grammar
+  drift test added; `verify()` exercised off-target. **Not yet run on a FIPS unit.**
+- **RadSec feasibility (analysis, no code).** Traced what "allow RADIUS under FIPS
+  via RadSec" actually needs — see the expanded §4.1 "RadSec feasibility" and §8.8.
+  Key findings: (1) under FIPS, OpenSSL has **no MD5** (only `fips` + `base`
+  providers, `fips=yes`), so RADIUS clients that compute MD5 through OpenSSL —
+  **hostapd, accel-ppp (IPoE), strongSwan EAP-RADIUS** — fail even when talking to
+  a local `radsecproxy`; only `pam_radius_auth` (bundled `md5.c`) and `radsecproxy`
+  (nettle) are unaffected. (2) For EAP consumers (IPsec EAP-RADIUS, WPA-Enterprise)
+  the **EAP method** determines whether the delivered key (MSK/PMK) is from approved
+  crypto — TLS-based methods only — and the router cannot enforce the method;
+  it becomes a deployment requirement. (3) The PPP servers stay rejected regardless
+  (no approved PPP auth), so RadSec would unblock `system login`, IPoE,
+  WPA-Enterprise and IPsec EAP-RADIUS only.
 
 ## Implementation status (checkpoint: 2026-11-18 — OpenSSL 3.5.7 base: validated-provider identity enforced)
 
@@ -305,6 +334,16 @@ configd-inspect/test clean):**
     so **all IKE crypto is served by the validated OpenSSL provider** (ESP bulk
     stays in the kernel, §6.2). A FIPS toggle forces a full `charon` restart
     (plugin set is only read at startup), wired via a `fips_changed` flag.
+    **strongSwan 6:** the VyOS strongSwan 6 build (vyos-build
+    `scripts/package-build/strongswan`, `6.0.7-1+vyos0`) also builds the native
+    ML-KEM `ml` plugin (patch `0005-T8099-enable-Module-Lattice-based-crypto-ML-KEM`),
+    so the override disables `ml` too; strongSwan 5.9 has no such plugin and
+    ignores the entry. ML-KEM is not in the validated provider (3.1.2), and the
+    `dh-group 33-35` / `pfs dh-group33-35` values it backs are absent from the
+    approved allow-lists, so they are also rejected at commit. The on-target
+    "only the `openssl` plugin" check below was done on 5.9 and must be repeated on
+    strongSwan 6 (`sudo swanctl --stats` lists loaded plugins; `ipsec statusall`
+    needs the `stroke` plugin, which 6.0 no longer enables by default).
   - **OpenVPN (enforced)** — [`server.conf.j2`](../data/templates/openvpn/server.conf.j2)
     renders **`providers fips base`** under FIPS (was `providers default`, which
     explicitly loaded the *non-FIPS* default provider and bypassed FIPS);
@@ -500,6 +539,7 @@ traced yet. Treat ⚠audit as "must be looked at", not "confirmed non-compliant"
 | **Serial global TLS — Perle** | [`serial/global/tls-global.xml.i`](../interface-definitions/include/serial/global/tls-global.xml.i): `version` default **`any`** (allows TLS<1.2); `cipher-options` defaults **`encryption any`** (non-AES), **`min-key-size 40`** (40-bit!), **`key-exchange any`** (incl. anonymous-DH / DSS), **`hmac any/md5`** | **LANDED** — in-boundary, **opt-in**, provider-backstopped | **Verified on target (10.10.50.165):** the Perle IOLAN daemons (`iol_direct`/`iol_rawd`/…) **dynamically link the system `libssl.so.3`** and carry **no `OPENSSL_CONF`/provider override**, so under FIPS they route through the validated provider (a *runtime backstop* — weak suites simply won't negotiate). Exposure is **opt-in** (both `tls template` and `cipher-options` are tagNodes — an SSH-only serial box emits no TLS). Enforcement **landed** ([serial.py](../src/conf_mode/serial.py)): under FIPS `verify()` rejects explicit non-approved `version`/`encryption`/`min`+`max-key-size`/`key-exchange`/`hmac`, and `generate()` emits approved defaults (incl. pinning an approved `cipher-options 1`) so a configured template is approved-by-default. Approved values live in [approved-algorithms.toml](../data/fips/approved-algorithms.toml) (6 new leaves, grammar-drift-tested). Downgraded from "biggest surface" → normal priority (not a passive hole). *On-target: exercise a `tls template` under FIPS.* |
 | **stunnel TLS proxy** | [`service_stunnel`](../interface-definitions/service_stunnel.xml.in) + [`ssl.xml.i`](../interface-definitions/include/stunnel/ssl.xml.i)/[`psk.xml.i`](../interface-definitions/include/stunnel/psk.xml.i): cert/CA + **TLS-PSK**; no cipher/version CLI leaf | **LANDED** — approved key exchange emitted (earlier "provider-governed, no code" verdict was **wrong**) | stunnel links the system OpenSSL and auto-detects `fips = yes` (TLS 1.2 `ciphers = FIPS`), but it **hard-codes its own `curves = X25519:P-256:X448:…` and TLS 1.3 `ciphersuites` (incl. CHACHA20)**, overriding OpenSSL's defaults. Live test on the FIPS unit (2026-11-09): the FIPS provider drops CHACHA20 and TLS ≤1.1, but **X25519/X448 key exchange was offered (client) and accepted (server)** — X25519 was what a modern peer actually negotiated — and these are not approved for key establishment (SP 800-56A: NIST P-curves). Fix: emit-only policy leaves `service stunnel curves` (P-256/384/521), `… ciphersuites` (AES-GCM) and `… ssl-version-min` (TLSv1.2) in [approved-algorithms.toml](../data/fips/approved-algorithms.toml); [service_stunnel.py](../src/conf_mode/service_stunnel.py) `get_config()` emits them and the template writes `curves`/`ciphersuites`/`sslVersionMin` per client+server service plus global `fips = yes`. TLS 1.2 `ciphers` stays at stunnel's FIPS default so **TLS-PSK keeps working**. Re-tested on target: X25519/X448 rejected/not offered in both modes; negotiates P-256 + AES-256-GCM. `options authentication ntlm` is **application-layer `connect`/`smtp` proxy auth** (MD4), outside the TLS/validated boundary — a note, not a gate. |
 | **WWAN APN auth** | [`interfaces_wwan`](../interface-definitions/interfaces_wwan.xml.in) `authentication type` = `none pap chap both` (PAP=plaintext, CHAP=MD5) | **OUT OF SCOPE** (decided) | **Documented scope exclusion:** this is **carrier-mandated** link-layer authentication to the cellular network — the operator cannot choose the crypto (the carrier dictates PAP/CHAP), and the operator opts in by configuring it. Deliberately excluded rather than rejected; an auditor sees an explicit ruling, not a miss. |
+| **IPsec remote-access client auth** (found 2026-11-20) | [`vpn_ipsec.xml.in`](../interface-definitions/vpn_ipsec.xml.in) `remote-access connection <x> authentication client-mode` = `x509 eap-tls eap-mschapv2 eap-radius`, **default `eap-mschapv2`**. Only `remote-access radius` was rejected under FIPS, so local EAP-MSCHAPv2 (MD4/DES-derived key) committed and then failed at login | **LANDED** (`079a53c34`) | Policy leaf (approved `x509`, `eap-tls`) enforced per connection in [vpn_ipsec.py](../src/conf_mode/vpn_ipsec.py) `verify()`; defaults are merged before `verify()`, so an unset `client-mode` is rejected with a hint. `eap-radius` excluded until RadSec (§4.1). Pending on-target confirmation. |
 
 Remaining-ordering: **quick wins** = TLS-version floor + the PKI **input gate**
 (reject `dsa`/RSA<2048); **decisions needed** = PPP auth + VRRP auth
@@ -858,7 +898,7 @@ Each consumer needs a decision: *route through the OpenSSL FIPS provider*,
 |---|---|---|
 | **OpenSSL CLI / libssl** | fips provider via `openssl.cnf` | The upstream T8529 piece. Foundation for everything that links OpenSSL. |
 | **OpenSSH** (sshd/ssh) | approved KEX/cipher/MAC/host-key set | Debian OpenSSH links OpenSSL but also has internal implementations; FIPS requires pruning the negotiated algorithm lists (no curve25519/chacha20-poly1305/ed25519 unless treated as allowed; approved = ECDH P-curves, AES-GCM/CTR, HMAC-SHA2, RSA/ECDSA host keys). |
-| **strongSwan / IPsec** | restrict IKE/ESP proposals to approved set (conf_mode) | **NOT governed by the OpenSSL provider by default.** VyOS charon ([charon.j2](../data/templates/ipsec/charon.j2)) leaves `load`/`load_modular` at defaults, so strongSwan uses its **own native plugins** (aes, sha2, gmp, curve25519, chacha20poly1305). Enabling the FIPS provider does **not** break IPsec and does **not** make it compliant. Enforce by constraining the enumerated `encryption`/`hash`/`prf`/`dh-group` proposal values (rendered by [get_esp_ike_cipher](../python/vyos/template.py) into swanctl proposals) + approved defaults. Routing charon through the `openssl` plugin so crypto runs in the validated module is a heavier option, not needed for a first compliant cut. |
+| **strongSwan / IPsec** | restrict IKE/ESP proposals to approved set (conf_mode) | **NOT governed by the OpenSSL provider by default.** VyOS charon ([charon.j2](../data/templates/ipsec/charon.j2)) leaves `load`/`load_modular` at defaults, so strongSwan uses its **own native plugins** (aes, sha2, gmp, curve25519, chacha20poly1305). Enabling the FIPS provider does **not** break IPsec and does **not** make it compliant. Enforce by constraining the enumerated `encryption`/`hash`/`prf`/`dh-group` proposal values (rendered by the [get_ike_cipher / get_esp_cipher](../python/vyos/template.py) filters into swanctl proposals; `get_esp_ike_cipher` before strongSwan 6) + approved defaults. Routing charon through the `openssl` plugin so crypto runs in the validated module is a heavier option, not needed for a first compliant cut. |
 | **GUI / nginx TLS** | fips provider (links OpenSSL) | TLS 1.2/1.3 approved cipher suites only. |
 | **HTTP API / Python** | OpenSSL via `hashlib`/`ssl` | Non-approved digests (MD5) raise unless `usedforsecurity=False`; audit call sites. |
 | **FRR, SNMP, NTP/chrony, etc.** | approved algorithms / OpenSSL | SNMPv3 auth/priv limited to approved (no MD5/DES); audit each. |
@@ -898,7 +938,7 @@ the tree.
 |---|---|---|
 | **SAML** | **Approved** — TLS + XML-DSig | keep (iGos login path) |
 | **RADIUS (classic UDP)** | **Non-approved** — MD5 | reject **or** route via RadSec |
-| **RADIUS + RadSec** | **Approved** — TLS tunnel | **not implemented today** |
+| **RADIUS + RadSec** | **Approvable** — TLS tunnel; MD5 retained inside TLS as a non-security function (lab sign-off); EAP consumers need a TLS-based EAP method | **not implemented today** — see "RadSec feasibility" below |
 | **TACACS+** | **Non-approved** — MD5, no TLS variant | reject (no remediation) |
 | **Local** | Approved *iff* KDF approved | §8.5 (yescrypt) |
 
@@ -915,6 +955,80 @@ wraps it in TLS to the server. Scope: package `radsecproxy` in vyos-build, add
 CLI + config generation + cert wiring (PKI), and point the existing RADIUS
 clients at localhost. A real feature, not a flag flip — tracked as an open item
 (§8.8).
+
+#### RadSec feasibility (traced 2026-11-20)
+
+**What RadSec does and does not change.** RadSec (RFC 6614) wraps RADIUS in TLS
+but **keeps** the MD5 Request/Response Authenticator, Message-Authenticator
+(HMAC-MD5) and attribute hiding (User-Password, MS-MPPE key wrapping) inside the
+tunnel. The usual position — consistent with the table above — is that this MD5
+is then a **non-security function** (TLS from the validated module provides the
+protection). That is a **lab ruling** to obtain and record in the Security Policy,
+not something code settles. With a local `radsecproxy`, the client→proxy hop is
+plain RADIUS over **loopback** (not inside the tunnel); the argument there is that
+it never leaves the module's host boundary — make it explicitly. RADIUS/1.1
+(RFC 9765, *Experimental*, April 2025) negotiates a RadSec profile that removes
+MD5 entirely; it would be the cleaner long-term answer but needs client and
+server support.
+
+**Blocker: MD5 must be computable, and OpenSSL cannot.** Under FIPS,
+[openssl.cnf.j2](../data/templates/openssl/openssl.cnf.j2) loads only `fips` +
+`base` with `default_properties = fips=yes`, so `EVP_md5()` fetches are expected
+to fail (the FIPS provider has no MD5). Policy
+permission does not help a client that physically cannot compute MD5:
+
+| RADIUS client | MD5 source | Works behind local `radsecproxy` under FIPS? |
+|---|---|---|
+| `pam_radius_auth` (`system login`) | bundled `src/md5.c` (vyos/libpam-radius-auth) | **Yes** |
+| `radsecproxy` (Debian 1.9.2) | TLS via `libssl3`; MD5 via `libnettle8` | **Yes** |
+| accel-ppp (IPoE; PPP servers are rejected anyway) | OpenSSL `EVP_md5()` / `HMAC_Init_ex` (`radius/packet.c`, upstream) | **No** — needs a patch |
+| hostapd (WPA-Enterprise) | OpenSSL (links `libcrypto.so.3`, verified on target) | **No** — needs a patch |
+| strongSwan EAP-RADIUS | charon crypto plugins; FIPS set disables `md5`/`hmac` ([fips_plugins.conf.j2](../data/templates/ipsec/fips_plugins.conf.j2)) | **No** — needs plugin change |
+| ocserv (OpenConnect) | radcli; ocserv itself is GnuTLS (out of boundary) | **Stays rejected** |
+
+Still to confirm on a FIPS unit: `openssl dgst -md5 /dev/null` fails, and a
+hostapd/charon RADIUS exchange fails accordingly.
+
+**How to provide MD5 to OpenSSL-linked clients — options considered:**
+
+| Option | Scope of MD5 | Verdict |
+|---|---|---|
+| A. Activate `default` provider system-wide (keep `fips=yes`) | Any process that explicitly asks for non-FIPS (e.g. Python `usedforsecurity=False`) | Rejected — turns "MD5 impossible" into "MD5 opt-in", every binary would need auditing |
+| B. Per-daemon `OPENSSL_CONF` with `?fips=yes` | All of that daemon's crypto silently falls back to non-FIPS | Rejected — not RADIUS-scoped |
+| **C. Private library context in the RADIUS code** (`OSSL_LIB_CTX_new()` + `OSSL_PROVIDER_load(ctx, "default")` + `EVP_MD_fetch(ctx, "MD5", NULL)`) | Only the RADIUS MD5/HMAC-MD5 helpers | **Recommended** — same `libcrypto.so.3` (the `default` provider is built into libcrypto; no second OpenSSL), system config untouched, easy to state in the Security Policy |
+
+For strongSwan, the equivalent is loading its own `md5` + `hmac` plugins under
+FIPS (config-only, no package patch). Caveat: `hmac` can also provide HMAC-SHA2
+and may take precedence over the `openssl` plugin's FIPS implementation — plugin
+ordering must be verified or pinned before this is acceptable.
+
+**EAP consumers: the EAP method decides, and the router cannot enforce it.** For
+IPsec EAP-RADIUS the MSK from the RADIUS server feeds the IKEv2 AUTH payload; for
+WPA-Enterprise it becomes the PMK. So the key must come from approved crypto:
+
+| Client EAP method | Key derivation | FIPS-acceptable with RadSec |
+|---|---|---|
+| EAP-TLS | TLS exporter/PRF | **Yes** (approved TLS versions/suites) |
+| PEAP / EAP-TTLS (inner MSCHAPv2) | outer TLS | **Generally yes** (inner MSCHAPv2 inside TLS — same lab argument as MD5-in-TLS) |
+| EAP-MSCHAPv2 (bare) | MD4/DES/SHA-1 | **No** |
+| EAP-MD5 | no key | **No** (unusable with IKEv2) |
+
+With `eap-radius`, charon relays EAP and the RADIUS server picks the method;
+there is no strongSwan setting (known) to restrict it in that mode. The EAP
+endpoint (client + customer RADIUS server) is also outside our boundary. So
+"TLS-based EAP only" must be a **deployment requirement** in the Security Policy.
+The customer's RADIUS server must speak RadSec (FreeRADIUS and Aruba ClearPass
+do; Microsoft NPS is believed not to — it would need a `radsecproxy` in front).
+
+**Package impact** (beyond vyos-1x CLI/conf-mode/templates/policy):
+
+| Package | Source today | Change |
+|---|---|---|
+| `radsecproxy` | stock Debian (1.9.2 in bookworm) | add to `vyos-1x` Depends; no build |
+| hostapd | vyos-build `scripts/package-build/hostap` (upstream git `525bbfca3`; target `2.11-1020-g525bbfca3`) | patch (option C) via the `series` list `build.sh` writes; optionally enable upstream's "preliminary RADIUS/TLS" (2.11) — not found in the current binary |
+| accel-ppp-ng | vyos-build `linux-kernel/build-accel-ppp-ng.sh` | patch (option C) — only if IPoE RADIUS under FIPS is wanted |
+| strongSwan | vyos-build (`5.9.11-2+vyos0`; `6.0.7-1+vyos0` with the strongSwan 6 update) | none — `fips_plugins.conf.j2` change in vyos-1x |
+| `vyos-libpam-radius-auth`, openssl | VyOS fork / stock Debian | none |
 
 ---
 
@@ -1808,6 +1922,23 @@ in vyos-build + CLI + config generation + PKI cert wiring + point clients at
 localhost). TACACS+ has no remediation path. *Decision: scope + whether RadSec is
 in/out for the first release.*
 
+Additional decisions from the 2026-11-20 feasibility trace (§4.1 "RadSec
+feasibility"):
+- **Lab ruling** that MD5 retained inside RadSec (and on the loopback hop to a
+  local proxy) is a non-security function — prerequisite for everything below.
+- **Which consumers to unblock.** `system login` needs only plumbing
+  (`pam_radius_auth` has its own MD5). WPA-Enterprise and IPoE need a hostapd /
+  accel-ppp patch (private OpenSSL library context for MD5); IPsec EAP-RADIUS needs
+  the strongSwan `md5`/`hmac` plugin change with HMAC-SHA2 precedence verified.
+  PPP servers and OpenConnect stay rejected regardless. Suggested order:
+  `system login` first; WPA-Enterprise / IPsec EAP-RADIUS / IPoE after the MD5
+  approach is proven on target.
+- **EAP method requirement** — Security Policy states TLS-based EAP only
+  (EAP-TLS / PEAP / TTLS) for WPA-Enterprise and IPsec EAP-RADIUS, since the
+  router cannot enforce the server's method choice.
+- **RADIUS/1.1 (RFC 9765)** — track as the MD5-free successor; adopt if
+  `radsecproxy`/hostapd and customer servers support it.
+
 ---
 
 ## 9. Phasing
@@ -1829,7 +1960,9 @@ in/out for the first release.*
   (OpenVPN/`ssh-tpm-agent`/TPM-PKI — §6.1), approved-KDF password hashing (§8.5).
   Drop the "incomplete" warning. **(All landed; warning dropped 2026-11-08.)**
 - **Phase 3a (conditional) — RadSec.** If RADIUS is required under FIPS, add
-  `radsecproxy` + CLI/config/PKI wiring so RADIUS runs over TLS (§4.1/§8.8).
+  `radsecproxy` + CLI/config/PKI wiring so RADIUS runs over TLS (§4.1/§8.8), plus
+  an MD5 source for the OpenSSL-linked RADIUS clients (hostapd / accel-ppp patch,
+  strongSwan `md5`/`hmac` plugins) — `system login` needs none of that.
 - **Phase 4 — Kernel FIPS mode (approved-mode operation; NOT a validated kernel
   module). IN scope (§8.3).** `vyos-build`: kernel `CONFIG_CRYPTO_FIPS=y`
   (landed) + approved DRBG/entropy (jitterentropy). **Code integrity is provided
@@ -1888,8 +2021,11 @@ in/out for the first release.*
     added to `packages` (**DONE**); add to other FIPS-capable flavors as needed.
   - **`scripts/package-build-iGOS/openssl-3.5/`** — **unchanged** (base library;
     no `enable-fips`, no `fips.so`).
-  - **`radsecproxy`** (conditional, §4.1/§8.8) — new package if RADIUS is required
-    under FIPS (RadSec/TLS wrapper for the UDP RADIUS clients).
+  - **`radsecproxy`** (conditional, §4.1/§8.8) — stock Debian package (1.9.2), so
+    no package build; add to the image / `vyos-1x` Depends if RADIUS is required
+    under FIPS. The OpenSSL-linked RADIUS clients additionally need an MD5 source:
+    a **hostap** patch in `scripts/package-build/hostap` and, for IPoE, an
+    **accel-ppp-ng** patch (§4.1 "RadSec feasibility").
   - **Kernel config (Phase 4, §8.3)** — `CONFIG_CRYPTO_FIPS=y`
     **DONE + on-target validated (2026-11-08):** enabled in the perle-igos arm64
     defconfig with its deps (`CRYPTO_SELFTESTS=y`, `MODULE_SIG=y` +
