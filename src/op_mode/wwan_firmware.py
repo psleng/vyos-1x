@@ -19,6 +19,7 @@ import re
 import shutil
 import subprocess
 import sys
+import syslog
 import tarfile
 import tempfile
 import time
@@ -49,6 +50,8 @@ from vyos.utils.update_status import cellular_firmware_checks_disabled
 from vyos.utils.update_status import read_status
 from vyos.utils.update_status import write_status
 from vyos.version import get_version_data
+
+syslog.openlog('wwan-firmware', syslog.LOG_PID, syslog.LOG_DAEMON)
 
 MANAGER_UNIT = 'igos-wwan-manager.service'
 MODEMMANAGER_UNIT = 'ModemManager.service'
