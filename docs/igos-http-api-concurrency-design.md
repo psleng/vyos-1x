@@ -621,8 +621,10 @@ Fixed:
   than deleted; SIGHUP/SIGTERM still take the Ctrl+C path.
 - Cellular firmware, same principle: a downgrade now asks before downloading
   (it used to download first and only confirm at install time, and `now`
-  downgraded without asking); `now` refuses a downgrade unless `force` is also
-  given. Its transient download directory was already removed on errors and
+  downgraded without asking). The downgrade question defaults to No (`[y/N]`);
+  `now` refuses a downgrade and directs the operator to retry without `now`.
+  Same-version reinstalls and eligible local unsigned archives also require
+  explicit default-No answers, even with `now`. Its transient download directory was already removed on errors and
   Ctrl+C; SIGHUP/SIGTERM now take that path too — a killed run left the
   directory behind, which then blocked retrying that version
   (`work.mkdir(exist_ok=False)`).
