@@ -175,8 +175,8 @@ catalog; you never download more than the one version you install.
 - `firmware` (array, **required**) — the versions available for this track.
 
 **Firmware entry**
-- `igos_version` (string, **required**) — igOS overlay version; operator-facing
-  selector / sort key (numeric-tuple compare). Unique within the block.
+- `igos_version` (string, **required**) — iGOS release label used for CLI selection and as the
+  sort key (numeric-tuple compare). Unique within the block.
 - `telit_version` (string, **required**) — native MM `Revision` string; must equal the
   modem's reported `modem_firmware`; unique within the model (deterministic "running"
   lookup).
@@ -311,7 +311,7 @@ catalog entry.
 `hardware_revision` pattern (exact / `N.*` / `*`), or the install is refused —
 flashing the wrong firmware can brick it. A `*`/`N.*` firmware thus intentionally
 applies to revisions it was never explicitly qualified against, so scope the pattern
-deliberately. Overridable only via the lab `force-unsigned` path.
+deliberately. Unsigned-install confirmation does not override this gate.
 
 ### On-disk handling — archives are huge, device storage is limited
 Default flow is **download-one → verify → extract → flash → clean up**. Do NOT
@@ -340,20 +340,20 @@ replaces the prototype's `set/delete interfaces wwan … firmware` and
 
 ```
 show interfaces wwan <wwanN> firmware              # keep where prototype put it (show tree)
-update firmware wwan <wwanN> <igos_version>        # install (interactive confirm)
-update firmware wwan <wwanN> <igos_version> now    # non-interactive (matches `update firmware uboot now`)
+update firmware wwan <wwanN> <igos_version>         # install (interactive confirm)
+update firmware wwan <wwanN> <igos_version> now     # skip routine confirmation; exception prompts still apply
 update firmware wwan <wwanN> latest                # = max igos_version
-delete firmware wwan <wwanN> <igos_version>        # remove a cached version (only when retention enabled)
+delete firmware wwan <wwanN> <igos_version>         # remove a retained archive
 ```
 
 `show interfaces wwan <wwanN> firmware` table (all FSM-sourced):
 ```
-Version  Telit Firmware  Released     Cached  Running
-1.3      M0L.001004      2026-09-01   No      Yes
-1.2      M0L.001003      2026-05-10   No      No
+Version    Telit Version    Released    Cached    Running
+1.3        M0L.001004       2026-09-01  No        Yes
+1.2        M0L.001003       2026-05-10  No        No
 ```
 ("Cached" is usually No — archives aren't retained by default; §3.) Completion
-for `<igos_version>` lists available igOS versions for the detected model+rev;
+for `<igos_version>` lists available iGOS versions for the detected model+rev;
 `delete` completion restricts to cached ones.
 
 ### Choosing the version and the source
@@ -371,12 +371,13 @@ for `<igos_version>` lists available igOS versions for the detected model+rev;
 - **Ad-hoc archive not in any catalog (case 3):**
   ```
   update firmware wwan <wwanN> archive <url-or-local-path> [now]
-  update firmware wwan <wwanN> archive <local-path> force-unsigned [now]   # lab only, loud warning
   ```
   URL (download) or a local file already on the box. Default **requires** a detached
   `<archive>.sig` verified against the baked root, plus the model/revision gate (§3);
-  metadata comes from the in-archive manifest. `force-unsigned` skips the signature
-  (dev/debug images only).
+  metadata comes from the in-archive manifest. A local archive missing its `.sig`
+  sidecar requires a default-No unsigned-install confirmation, even with `now`,
+  and is allowed only on development images built with
+  `wwan_firmware_allow_unsigned = true`. Invalid signatures are rejected.
 
 ### Scheduled check & notifications (integrate with `system update-check`)
 Reuse the image update-check UX; do **not** merge modem logic into the upstream
@@ -396,7 +397,7 @@ image checker (`vyos-system-update-check.py`).
   override).
 - **Notify only, never auto-flash.** Flashing tears down the modem + needs a reboot,
   so it stays operator-initiated. The notice names the interface + available
-  `igos_version` + the exact `update firmware wwan <wwanN> <igos_version>` command.
+  `telit_version` + the exact `update firmware wwan <wwanN> <igos_version>` command.
 - **Graceful no-op** when no wwan is configured / FSM down / no modem present; checks
   every present `wwanN` and aggregates into one MOTD.
 
@@ -414,15 +415,18 @@ image checker (`vyos-system-update-check.py`).
    - *ad-hoc path* (`archive <url|path>`): skip the catalog entirely; the archive is
      obtained directly and authenticated by its own `.sig` in step 4.
 3. Map running `telit_version` → running `igos_version`. Resolve target
-   (`<igos_version>` or `latest`). Compare (numeric-tuple):
-   - equal → "already installed"; explicit `force` permits reinstalling with all trust/compatibility checks retained
+   (`<igos_version>` or `latest`) within the compatible track. Compare
+   `igos_version` labels as numeric tuples; display Telit versions in every message:
+   - equal → "already installed"; ask "Would you like to force install the same version? [y/N]"
+     even with `now`; declining stops the operation; trust/compatibility checks remain mandatory
    - target > running → upgrade
-   - target < running → **downgrade warning + confirm**
+   - target < running → **downgrade warning + default-No confirmation before downloading**;
+     `now` refuses the downgrade and directs the operator to retry without `now`
    - running not in catalog → "running: unknown", ordering indeterminate (warn)
 4. **Free-space check**, then obtain the **one** archive (the only large download):
    - catalog path: download by `url` → verify `archive_sha256` vs the signed catalog.
    - ad-hoc path: download/open the archive → verify `<archive>.sig` against the baked
-     root (unless `force-unsigned`).
+     root (except explicitly confirmed unsigned local archives on enabled development images).
    Extract safely into the work dir → read the in-archive manifest → **enforce the
    model/revision gate** (archive model+rev == detected modem). No apt; nothing else
    is downloaded.
@@ -450,7 +454,7 @@ image checker (`vyos-system-update-check.py`).
    **restart** the manager and remove the temp download.
 
 `delete firmware wwan <wwanN> <igos_version>` → remove that version's cached
-archive/work dir (only meaningful when retention is enabled).
+archive. Retained archives can also be deleted after retention is disabled.
 
 ---
 
@@ -459,8 +463,9 @@ archive/work dir (only meaningful when retention is enabled).
 Telit's native versioning is opaque/unorderable, so igOS assigns its own
 human-readable tag.
 
-- `igos_version` is the **operator-facing selector + sort key**; `telit_version`
-  is the ground-truth match string + on-disk path key.
+- `igos_version` is the **CLI selector and sort key**. `telit_version` is the
+  version used in prompts, status messages, notifications, modem revision matching,
+  and on-disk paths. The show table displays both versions.
 - **The modem only reports `telit_version`.** "Running igOS version" is derived by
   mapping the FSM `modem_firmware` string through the catalog. If the running
   Telit version isn't catalogued → "unknown", ordering indeterminate.
@@ -555,8 +560,8 @@ Global:
     + certificate mechanism.
 - **vyos-1x:**
   - `update firmware wwan …` op-mode nodes in `update-firmware.xml.in`
-    (+ keep `show … firmware`); add the `archive <url|path>` + `force-unsigned`
-    variants (§4, case 3);
+    (+ keep `show … firmware`); add `archive <url|path>` and the default-No
+    unsigned-install confirmation on enabled development images (§4, case 3);
   - a config node to override the catalog source, mirroring `system update-check url`:
     `system update-check cellular-firmware url <url>` (in
     `interface-definitions/system_update-check.xml.in`; the handler reads it and falls
@@ -597,8 +602,8 @@ Global:
     leaf vs a cellular-specific config area.
 11. **Transient catalog override:** also allow a per-command `… catalog <url>` for
     no-commit testing, or rely on the config node only (default)?
-12. **`force-unsigned` gating:** permit on production images (loud warning) or restrict
-    to dev/debug builds only?
+12. **Unsigned-install gating:** local archives only, on explicitly enabled
+    development images, with a default-No confirmation.
 13. **Scheduled-check hosting:** a dedicated `vyos-cellular-firmware-check.service` loop
     (recommended) vs extending the image checker; cadence (reuse the 12h interval?).
 14. **Toggle granularity (decided 2026-11-17):** on by default whenever an enabled
@@ -626,11 +631,37 @@ carrier bug-fix case is covered by the ad-hoc archive path, §4 case 3.)
   `debian/control`.
 - Pending: everything in §§1–8 above.
 
-### Explicit same-version reinstall
+### Same-version and unsigned-install confirmations
 
-Use `update firmware wwan <wwanN> <igos_version|latest> force [now]`
-or `update firmware wwan <wwanN> archive <url-or-local-path> force [now]`
-to reinstall the running version. `force` only bypasses the same-version skip;
-signature verification and model/revision checks still apply. Confirmation is
-required unless `now` is supplied. For the existing development-only unsigned
-path, use `archive <local-path> force-unsigned force [now]`.
+Use `update firmware wwan <wwanN> <igos_version|latest> [now]` or
+`update firmware wwan <wwanN> archive <url-or-local-path> [now]`.
+If the target is already running, ask:
+
+```text
+Firmware M0V.060001 is already installed.
+Would you like to force install the same version? [y/N]
+```
+
+An eligible unsigned local archive asks:
+
+```text
+Would you like to install this unsigned firmware archive? [y/N]
+```
+
+Both questions default to No and require an explicit yes even with `now`.
+The CLI exposes neither `force` nor `force-unsigned`. Catalog downgrades require
+confirmation before downloading; `now` refuses them and directs the operator
+to retry without `now`.
+
+### Customer-facing firmware identity
+
+Update/delete arguments and completion use iGOS release labels such as `1.0`.
+`latest` selects the maximum iGOS version in the compatible track. Telit revisions
+are not accepted as command arguments. Prompts, status messages and notifications
+use only the Telit revision, for example `Firmware M0L.011004 is already installed.`
+Any suggested update command uses the corresponding iGOS label.
+
+The show table retains `Version` (iGOS) and `Telit Version` alongside `Released`,
+`Cached`, and `Running`. Raw release entries expose the iGOS label in `version`
+and the native revision in `telit_version`; the top-level `running_version`
+remains the modem's native revision. Quiet completion output lists iGOS labels.
