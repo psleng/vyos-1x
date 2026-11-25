@@ -25,11 +25,13 @@ from makefun import with_signature
 
 from vyos.opmode import Error as OpModeError
 
+from ...background import BackgroundOpError, BackgroundOpFailed
 from ...config_lock import config_lock
 from ...session import SessionState
 from ..libs import key_auth
 from ..session.session import Session
 from ..session.errors.op_mode_errors import op_mode_err_msg, op_mode_err_code
+from .background_operations import background_op_manager
 
 mutation = ObjectType('Mutation')
 
@@ -48,6 +50,37 @@ def uses_config_lock(class_name: str) -> bool:
     the lock is the default; see _CONFIG_LOCK_EXEMPT for the exceptions.
     """
     return not any(marker in class_name for marker in _CONFIG_LOCK_EXEMPT)
+
+
+def op_mode_error_response(e: OpModeError) -> dict:
+    typename = type(e).__name__
+    msg = str(e)
+    return {
+        'success': False,
+        'errors': ['op_mode_error'],
+        'op_mode_error': {
+            'name': f'{typename}',
+            'message': msg if msg else op_mode_err_msg.get(typename, 'Unknown'),
+            'vyos_code': op_mode_err_code.get(typename, 9999),
+        },
+    }
+
+
+def run_background_mutation(execute, data: dict) -> dict:
+    """Run a mutation as a background operation; return its normal response.
+
+    A failed mutation raises BackgroundOpFailed carrying that response, so
+    the operation record shows `failed` with the response as its result.
+    """
+    try:
+        result = execute()
+    except OpModeError as e:
+        response = op_mode_error_response(e)
+        raise BackgroundOpFailed(response['op_mode_error']['message'], response)
+    except Exception as error:
+        response = {'success': False, 'errors': [repr(error)]}
+        raise BackgroundOpFailed(repr(error), response)
+    return {'success': True, 'data': {**data, 'result': result}}
 
 
 def make_mutation_resolver(mutation_name, class_name, session_func):
@@ -104,6 +137,9 @@ def make_mutation_resolver(mutation_name, class_name, session_func):
                 # one of the previous cases, so this is never reached.
                 pass
 
+            # Never pass the background flag on to the mutation itself
+            in_background = bool(data.pop('in_background', False))
+
             session = state.session
 
             # one may override the session functions with a local subclass
@@ -117,7 +153,7 @@ def make_mutation_resolver(mutation_name, class_name, session_func):
 
             # Run in the threadpool so the event loop stays free; the config
             # lock is taken inside the worker thread, never on the loop
-            def execute():
+            def execute(data):
                 k = klass(session, data)
                 method = getattr(k, session_func)
                 if locked:
@@ -125,22 +161,25 @@ def make_mutation_resolver(mutation_name, class_name, session_func):
                         return method()
                 return method()
 
-            result = await run_in_threadpool(execute)
+            if in_background:
+                job_data = dict(data)
+                try:
+                    record = background_op_manager.start(
+                        lambda: run_background_mutation(
+                            lambda: execute(job_data), job_data
+                        ),
+                        name=mutation_name,
+                    )
+                except BackgroundOpError as e:
+                    return {'success': False, 'errors': [str(e)]}
+                return {'success': True, 'data': data, 'operation': record.model_dump()}
+
+            result = await run_in_threadpool(execute, data)
             data['result'] = result
 
             return {'success': True, 'data': data}
         except OpModeError as e:
-            typename = type(e).__name__
-            msg = str(e)
-            return {
-                'success': False,
-                'errors': ['op_mode_error'],
-                'op_mode_error': {
-                    'name': f'{typename}',
-                    'message': msg if msg else op_mode_err_msg.get(typename, 'Unknown'),
-                    'vyos_code': op_mode_err_code.get(typename, 9999),
-                },
-            }
+            return op_mode_error_response(e)
         except Exception as error:
             return {'success': False, 'errors': [repr(error)]}
 
