@@ -813,7 +813,11 @@ class ModemStateMachine:
         # noise). Dual-SIM: tracked per slot; cleared per slot on reinsertion.
         self._sim_removed_slots = set()
 
-        # SIM PIN/PUK unlock safety — try only once per boot cycle
+        # SIM PIN/PUK unlock safety — try only once per boot cycle, per SIM
+        # slot.  These hold the ACTIVE slot's state; on a slot change they are
+        # stashed per slot and the new slot's state is loaded
+        # (_on_active_sim_changed), so one SIM's attempt never blocks or
+        # skips unlocking the other.
         self._pin_unlock_attempted = False    # True after first PIN attempt (success or failure)
         self._puk_unlock_attempted = False    # True after first PUK attempt (success or failure)
         self._pin_unlock_failed = False       # True if PIN unlock failed (wrong PIN)
@@ -821,6 +825,7 @@ class ModemStateMachine:
         self._sim_permanently_locked = False  # True if PUK retries exhausted — SIM destroyed
         self._pin_retries_remaining = -1      # Last known PIN retries (-1 = unknown)
         self._puk_retries_remaining = -1      # Last known PUK retries (-1 = unknown)
+        self._sim_unlock_state_by_slot = {}   # {slot: unlock flags of an inactive slot}
 
         # Connection failure tracking — records WHY the modem is in FAILED state
         # so status queries and operators can see the reason without digging through logs.
@@ -6891,6 +6896,100 @@ class ModemStateMachine:
         except Exception as e:
             logger.warning(f"Could not clear persisted APN: {e}",
                           extra={'interface_number': self.interface_number})
+
+    # ── SIM-scoped state ─────────────────────────────────────────────────────
+    # Values that describe one SIM card must not leak onto the other SIM
+    # after a slot change: the APNs (connected / requested / negotiated),
+    # the PIN/PUK unlock state, and the cached SIM identity.  Every slot
+    # change goes through the current_active_sim setter, so the reset lives
+    # in one place instead of at each of the call sites that move the slot.
+
+    _SIM_UNLOCK_FLAGS = ('_pin_unlock_attempted', '_pin_unlock_failed',
+                         '_puk_unlock_attempted', '_puk_unlock_failed',
+                         '_sim_permanently_locked')
+
+    @property
+    def current_active_sim(self):
+        return getattr(self, '_current_active_sim', None)
+
+    @current_active_sim.setter
+    def current_active_sim(self, slot):
+        self._current_active_sim = slot
+        if slot is None:
+            return
+        # The slot that the current SIM-scoped state belongs to.  It only
+        # moves on a real change, so a transient None does not hide one.
+        owner = getattr(self, '_sim_scoped_slot', None)
+        self._sim_scoped_slot = slot
+        if owner is not None and owner != slot:
+            self._on_active_sim_changed(owner, slot)
+
+    @property
+    def last_known_sim_info(self):
+        return getattr(self, '_last_known_sim_info', None)
+
+    @last_known_sim_info.setter
+    def last_known_sim_info(self, info):
+        # Remember which slot the identity was read from, so status never
+        # shows it while another slot is active.
+        self._last_known_sim_info = info
+        self._last_known_sim_slot = self.current_active_sim
+
+    def _on_active_sim_changed(self, old_slot, new_slot):
+        """Reset per-SIM state when the active SIM slot changes."""
+        store = getattr(self, '_sim_unlock_state_by_slot', None)
+        if store is None:
+            store = self._sim_unlock_state_by_slot = {}
+        store[old_slot] = {f: getattr(self, f, False) for f in self._SIM_UNLOCK_FLAGS}
+        saved = store.pop(new_slot, {})
+        for flag in self._SIM_UNLOCK_FLAGS:
+            setattr(self, flag, saved.get(flag, False))
+        # Retry counters are re-read from the SIM before every unlock; show
+        # them as unknown until the new SIM has been read.
+        self._pin_retries_remaining = -1
+        self._puk_retries_remaining = -1
+
+        self.connected_apn = None
+        self.requested_apn = ''
+        self.negotiated_apn = ''
+        self._clear_persisted_apn()
+
+        logger.info("Active SIM slot changed — cleared per-SIM state",
+                    extra={'interface_number': getattr(self, 'interface_number', None),
+                           'old_sim': old_slot, 'new_sim': new_slot})
+
+    def _cached_sim_identity(self) -> dict:
+        """Cached SIM identity, or {} if it was read from another slot."""
+        if getattr(self, '_last_known_sim_slot', None) != self.current_active_sim:
+            return {}
+        return self.last_known_sim_info or {}
+
+    @staticmethod
+    def _apply_live_sim_identity(status: dict, live_sim: dict) -> bool:
+        """Replace the status SIM identity with a live read that identifies a card.
+
+        Returns whether it did.  The whole identity is replaced, never field
+        by field, so blanks from the new card cannot be filled from another.
+        """
+        if not (live_sim.get('imsi') or live_sim.get('sim_identifier')):
+            return False
+        status['sim_imsi'] = live_sim.get('imsi', '') or ''
+        status['sim_iccid'] = live_sim.get('sim_identifier', '') or ''
+        status['sim_operator'] = live_sim.get('operator_name', '') or ''
+        status['sim_mcc_mnc'] = live_sim.get('mcc_mnc', '') or ''
+        return True
+
+    def _slot_cache_for_probe(self, slot_num, cached: dict, probed: dict) -> dict:
+        """Drop a slot's cached identity when a different card is now in it.
+
+        Otherwise fields the new card does not report would keep showing
+        the previous card's values.
+        """
+        new_iccid = (probed or {}).get('iccid')
+        if new_iccid and cached.get('iccid') and new_iccid != cached['iccid']:
+            self.sim_slot_info_cache.pop(slot_num, None)
+            return {}
+        return cached
 
     # ── SIM failback mechanism ───────────────────────────────────────────────
 
@@ -14371,8 +14470,9 @@ class ModemStateMachine:
         )
         status['failback_suppressed_by_connection_failure'] = self.failback_suppressed_by_connection_failure
 
-        # Cached SIM identifiers
-        sim = self.last_known_sim_info or {}
+        # Cached SIM identifiers — only for the slot they were read from;
+        # refined by the live read in section 3.
+        sim = self._cached_sim_identity()
         status['sim_imsi'] = sim.get('imsi', '')
         status['sim_iccid'] = sim.get('sim_identifier', '')
         status['sim_operator'] = sim.get('operator_name', '')
@@ -14400,17 +14500,15 @@ class ModemStateMachine:
 
         # ── 3. Live SIM details (query D-Bus if modem present) ───────────
         # Only a live read proves a card is in the active slot: the cached
-        # identity above survives SIM removal.
+        # identity above survives SIM removal.  A live read that identifies
+        # the card replaces the cached identity as a whole — never field by
+        # field, which could combine two different SIMs.
         live_sim_identity = False
         try:
             if self.proxy:
                 live_sim = await self._get_sim_information()
                 if live_sim:
-                    live_sim_identity = bool(live_sim.get('imsi') or live_sim.get('sim_identifier'))
-                    status['sim_imsi'] = live_sim.get('imsi', '') or status['sim_imsi']
-                    status['sim_iccid'] = live_sim.get('sim_identifier', '') or status['sim_iccid']
-                    status['sim_operator'] = live_sim.get('operator_name', '') or status['sim_operator']
-                    status['sim_mcc_mnc'] = live_sim.get('mcc_mnc', '') or status['sim_mcc_mnc']
+                    live_sim_identity = self._apply_live_sim_identity(status, live_sim)
                     status['sim_spn'] = live_sim.get('spn', '')
         except Exception:
             pass  # Keep cached values
@@ -15131,6 +15229,7 @@ class ModemStateMachine:
                     # Inactive slot: try D-Bus probe, fall back to cache
                     try:
                         probed = await self._probe_sim_slot_info(slot_num)
+                        cached = self._slot_cache_for_probe(slot_num, cached, probed)
                         # Merge: probed D-Bus values win, then cache, then empty
                         mm_present = probed.get('present', cached.get('present', False))
                         status[f"{prefix}_present"] = (
