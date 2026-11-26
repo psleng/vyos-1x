@@ -226,16 +226,28 @@ def get_config(config=None):
     # configured; record its presence so verify() can enforce the dependency.
     result['system_ssh_configured'] = conf.exists(['service', 'ssh'])
 
+    serial_defaults = {}
     if conf.exists(['service', 'serial']):
-        result['_serial_defaults'] = conf.get_config_dict(
+        serial_defaults = conf.get_config_dict(
             ['service', 'serial'],
             get_first_key=False,
             no_tag_node_value_mangle=True,
             with_recursive_defaults=True,
         )
-    else:
-        result['_serial_defaults'] = {}
 
+    interface_defaults = {}
+    for interface_key in ('ppp-tty', 'slip-tty'):
+        if conf.exists(['interfaces', interface_key]):
+            interface_defaults.update(conf.get_config_dict(
+                ['interfaces', interface_key],
+                get_first_key=False,
+                no_tag_node_value_mangle=True,
+                with_recursive_defaults=True,
+            ))
+    if interface_defaults:
+        serial_defaults['interfaces'] = interface_defaults
+
+    result['_serial_defaults'] = serial_defaults
     return result
 
 
