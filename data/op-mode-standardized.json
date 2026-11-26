@@ -37,5 +37,6 @@
 "uptime.py",
 "version.py",
 "vpp.py",
-"vrf.py"
+"vrf.py",
+"event_handler.py"
 ]

@@ -31,6 +31,7 @@ import time
 import subprocess
 
 from vyos.config import Config
+from vyos.configdep import set_dependents, call_dependents
 from vyos.configdict import get_interface_dict
 from vyos.configverify import verify_vrf
 from vyos.configverify import verify_mirror_redirect
@@ -426,6 +427,7 @@ def get_config(config=None):
     else:
         conf = Config()
 
+    set_dependents('event_handler', conf)
     base = ['interfaces', 'wwan']
 
     # get_interface_dict() handles VYOS_TAGNODE_VALUE, deleted detection,
@@ -1271,6 +1273,7 @@ def generate(wwan):
 # ---------------------------------------------------------------------------
 
 def apply(wwan):
+    call_dependents()
     ifname = wwan.get('ifname', 'wwan0')
     # Extract numeric interface index from wwanN
     match = re.search(r'(\d+)$', ifname)

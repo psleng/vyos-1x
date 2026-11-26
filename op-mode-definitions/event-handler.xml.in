@@ -1,0 +1,75 @@
+<?xml version="1.0"?>
+<interfaceDefinition>
+  <node name="show">
+    <properties>
+      <help>Show information</help>
+    </properties>
+    <children>
+      <node name="event-handler">
+        <properties>
+          <help>Event handler</help>
+        </properties>
+        <children>
+          <leafNode name="alert-types">
+            <properties>
+              <help>Show alert-types</help>
+            </properties>
+            <command>sudo ${vyos_op_scripts_dir}/event_handler.py show --types</command>
+          </leafNode>
+          <leafNode name="status">
+            <properties>
+              <help>Show status</help>
+            </properties>
+            <command>sudo ${vyos_op_scripts_dir}/event_handler.py show --status</command>
+          </leafNode>
+          <node name="alerts">
+            <properties>
+              <help>Show alert history</help>
+            </properties>
+            <command>sudo ${vyos_op_scripts_dir}/event_handler.py show</command>
+            <children>
+              <tagNode name="count">
+                <properties>
+                  <help>Filter by count</help>
+                  <completionHelp>
+                    <list>&lt;1-100000&gt;</list>
+                  </completionHelp>
+                </properties>
+                <command>sudo ${vyos_op_scripts_dir}/event_handler.py show --count "$5"</command>
+              </tagNode>
+              <tagNode name="severity">
+                <properties>
+                  <help>Filter by severity</help>
+                  <completionHelp>
+                    <list>critical warning info</list>
+                  </completionHelp>
+                </properties>
+                <command>sudo ${vyos_op_scripts_dir}/event_handler.py show --severity "$5"</command>
+              </tagNode>
+            </children>
+          </node>
+        </children>
+      </node>
+    </children>
+  </node>
+  <node name="clear">
+    <properties>
+      <help>Clear information</help>
+    </properties>
+    <children>
+      <node name="event-handler">
+        <properties>
+          <help>Event handler</help>
+        </properties>
+        <children>
+          <leafNode name="alerts">
+            <properties>
+              <help>Clear alert history</help>
+            </properties>
+            <command>sudo ${vyos_op_scripts_dir}/event_handler.py clear</command>
+          </leafNode>
+        </children>
+      </node>
+    </children>
+  </node>
+</interfaceDefinition>

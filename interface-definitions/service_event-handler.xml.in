@@ -56,14 +56,206 @@
                     <properties>
                       <help>Path to the script</help>
                       <constraint>
-                        <validator name="script"/>
+                        <validator name="script" />
                       </constraint>
                     </properties>
                   </leafNode>
                 </children>
               </node>
+              <leafNode name="severity">
+                <properties>
+                  <help>Alert severity</help>
+                  <completionHelp>
+                    <list>critical warning info</list>
+                  </completionHelp>
+                  <constraint>
+                    <regex>(critical|warning|info)</regex>
+                  </constraint>
+                </properties>
+              </leafNode>
+              <node name="notify">
+                <properties>
+                  <help>Notification channels</help>
+                </properties>
+                <children>
+                  <leafNode name="email">
+                    <properties>
+                      <help>Notification email target</help>
+                      <multi />
+                    </properties>
+                  </leafNode>
+                  <leafNode name="sms">
+                    <properties>
+                      <help>Notification sms target</help>
+                      <multi />
+                    </properties>
+                  </leafNode>
+                  <leafNode name="script">
+                    <properties>
+                      <help>Notification script target</help>
+                      <multi />
+                      <constraint>
+                        <validator name="script" />
+                      </constraint>
+                    </properties>
+                  </leafNode>
+                </children>
+              </node>
+              <leafNode name="disable">
+                <properties>
+                  <help>Disable this rule</help>
+                  <valueless />
+                </properties>
+              </leafNode>
+              <leafNode name="monitor-only">
+                <properties>
+                  <help>Record custom matches without delivery</help>
+                  <valueless />
+                </properties>
+              </leafNode>
             </children>
           </tagNode>
+          <tagNode name="alert">
+            <properties>
+              <help>Packaged alert instance</help>
+            </properties>
+            <children>
+              <leafNode name="type">
+                <properties>
+                  <help>Packaged alert type</help>
+                  <completionHelp>
+                    <script>${vyos_op_scripts_dir}/event_handler.py show --types --completion</script>
+                  </completionHelp>
+                </properties>
+              </leafNode>
+              <leafNode name="interface">
+                <properties>
+                  <help>Alert interface</help>
+                </properties>
+              </leafNode>
+              <leafNode name="service">
+                <properties>
+                  <help>Alert service</help>
+                  <completionHelp>
+                    <list>ssh.service isc-kea-dhcp4-server.service isc-kea-dhcp6-server.service strongswan.service radvd.service snmpd.service keepalived.service</list>
+                  </completionHelp>
+                </properties>
+              </leafNode>
+              <leafNode name="group">
+                <properties>
+                  <help>Alert group</help>
+                </properties>
+              </leafNode>
+              <leafNode name="severity">
+                <properties>
+                  <help>Alert severity</help>
+                  <completionHelp>
+                    <list>critical warning info</list>
+                  </completionHelp>
+                  <constraint>
+                    <regex>(critical|warning|info)</regex>
+                  </constraint>
+                </properties>
+              </leafNode>
+              <node name="notify">
+                <properties>
+                  <help>Notification channels</help>
+                </properties>
+                <children>
+                  <leafNode name="email">
+                    <properties>
+                      <help>Notification email target</help>
+                      <multi />
+                    </properties>
+                  </leafNode>
+                  <leafNode name="sms">
+                    <properties>
+                      <help>Notification sms target</help>
+                      <multi />
+                    </properties>
+                  </leafNode>
+                  <leafNode name="script">
+                    <properties>
+                      <help>Notification script target</help>
+                      <multi />
+                      <constraint>
+                        <validator name="script" />
+                      </constraint>
+                    </properties>
+                  </leafNode>
+                </children>
+              </node>
+              <leafNode name="disable">
+                <properties>
+                  <help>Disable this rule</help>
+                  <valueless />
+                </properties>
+              </leafNode>
+            </children>
+          </tagNode>
+          <tagNode name="sms-recipient">
+            <properties>
+              <help>Named SMS recipient</help>
+            </properties>
+            <children>
+              <leafNode name="number">
+                <properties>
+                  <help>SMS destination number</help>
+                </properties>
+              </leafNode>
+              <leafNode name="interface">
+                <properties>
+                  <help>WWAN modem to send from</help>
+                </properties>
+              </leafNode>
+            </children>
+          </tagNode>
+          <node name="history">
+            <properties>
+              <help>history settings</help>
+            </properties>
+            <children>
+              <leafNode name="size">
+                <properties>
+                  <help>Number of retained records</help>
+                  <constraint>
+                    <validator name="numeric" argument="--range 1-100000" />
+                  </constraint>
+                </properties>
+              </leafNode>
+            </children>
+          </node>
+          <node name="rate-limit">
+            <properties>
+              <help>rate-limit settings</help>
+            </properties>
+            <children>
+              <leafNode name="sms">
+                <properties>
+                  <help>Maximum SMS per hour</help>
+                  <constraint>
+                    <validator name="numeric" argument="--range 1-10000" />
+                  </constraint>
+                </properties>
+              </leafNode>
+              <leafNode name="email">
+                <properties>
+                  <help>Maximum emails per hour</help>
+                  <constraint>
+                    <validator name="numeric" argument="--range 1-10000" />
+                  </constraint>
+                </properties>
+              </leafNode>
+            </children>
+          </node>
+          <leafNode name="hold-down">
+            <properties>
+              <help>Repeated match suppression window in seconds</help>
+              <constraint>
+                <validator name="numeric" argument="--range 0-86400" />
+              </constraint>
+            </properties>
+          </leafNode>
         </children>
       </node>
     </children>

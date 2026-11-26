@@ -1,4 +1,7 @@
 {
+    "system_email": {
+        "event_handler": ["service_event-handler"]
+    },
     "system_conntrack": {
         "conntrack_sync": ["service_conntrack-sync"],
         "vrf": ["vrf"]
@@ -41,6 +44,7 @@
         "static_arp": ["protocols_static_arp"]
     },
     "interfaces_wwan": {
+        "event_handler": ["service_event-handler"],
         "static_arp": ["protocols_static_arp"]
     },
     "interfaces_wireguard": {

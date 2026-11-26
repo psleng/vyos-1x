@@ -1,0 +1,431 @@
+{
+  "version": 1,
+  "types": {
+    "interface-up": {
+      "category": "interface",
+      "description": "Interface {interface} is up",
+      "severity": "info",
+      "match": {
+        "SYSLOG_IDENTIFIER": "vyos-netlinkd",
+        "MESSAGE": "RTM_NEWLINK -> {interface}, state=UP, mac=.*"
+      },
+      "message": "Interface {interface} is up",
+      "object": "{interface}",
+      "state": "up",
+      "parameters": {
+        "interface": {
+          "required": true,
+          "validator": "interface-name"
+        }
+      },
+      "edge": {
+        "key": "{interface}",
+        "group": "interface-oper-state"
+      }
+    },
+    "interface-down": {
+      "category": "interface",
+      "description": "Interface {interface} is down",
+      "severity": "critical",
+      "match": {
+        "SYSLOG_IDENTIFIER": "vyos-netlinkd",
+        "MESSAGE": "RTM_NEWLINK -> {interface}, state=DOWN, mac=.*"
+      },
+      "message": "Interface {interface} is down",
+      "object": "{interface}",
+      "state": "down",
+      "parameters": {
+        "interface": {
+          "required": true,
+          "validator": "interface-name"
+        }
+      },
+      "edge": {
+        "key": "{interface}",
+        "group": "interface-oper-state"
+      }
+    },
+    "service-start": {
+      "category": "service",
+      "description": "Service {service}: start",
+      "severity": "info",
+      "match": {
+        "MESSAGE_ID": "39f53479d3a045ac8e11786248231fbf",
+        "UNIT": "{service}"
+      },
+      "message": "Service {service}: start",
+      "object": "{service}",
+      "state": "start",
+      "parameters": {
+        "service": {
+          "required": true,
+          "validator": "unit-name"
+        }
+      },
+      "suppress_during_commit": true
+    },
+    "service-stop": {
+      "category": "service",
+      "description": "Service {service}: stop",
+      "severity": "warning",
+      "match": {
+        "MESSAGE_ID": "9d1aaa27d60140bd96365438aad20286",
+        "UNIT": "{service}"
+      },
+      "message": "Service {service}: stop",
+      "object": "{service}",
+      "state": "stop",
+      "parameters": {
+        "service": {
+          "required": true,
+          "validator": "unit-name"
+        }
+      },
+      "suppress_during_commit": true
+    },
+    "service-failed": {
+      "category": "service",
+      "description": "Service {service}: failed",
+      "severity": "critical",
+      "match": {
+        "MESSAGE_ID": "d9b373ed55a64feb8242e02dbe79a49c",
+        "UNIT": "{service}"
+      },
+      "message": "Service {service}: failed",
+      "object": "{service}",
+      "state": "failed",
+      "parameters": {
+        "service": {
+          "required": true,
+          "validator": "unit-name"
+        }
+      },
+      "suppress_during_commit": false
+    },
+    "login-success": {
+      "category": "login",
+      "description": "SSH login by {user} from {host}",
+      "severity": "info",
+      "match": {
+        "SYSLOG_IDENTIFIER": "sshd",
+        "MESSAGE": "Accepted (?P<method>\\S+) for (?P<user>\\S+) from (?P<host>\\S+) port \\d+.*"
+      },
+      "message": "SSH login by {user} from {host}",
+      "object": "{user}@{host}",
+      "state": "",
+      "parameters": {}
+    },
+    "login-success-console": {
+      "category": "login",
+      "description": "Console login by {user}",
+      "severity": "info",
+      "match": {
+        "SYSLOG_IDENTIFIER": "login",
+        "MESSAGE": "pam_unix\\(login:session\\): session opened for user (?P<user>[^\\s(]+).*"
+      },
+      "message": "Console login by {user}",
+      "object": "{user}",
+      "state": "",
+      "parameters": {},
+      "verify_on_unit": true
+    },
+    "login-failed": {
+      "category": "login",
+      "description": "SSH login failed for {user} from {host}",
+      "severity": "warning",
+      "match": {
+        "SYSLOG_IDENTIFIER": "sshd",
+        "MESSAGE": "(?:Failed \\S+ for (?:invalid user )?(?P<user>\\S+) from (?P<host>\\S+) port \\d+.*|Invalid user (?P<user2>\\S+) from (?P<host2>\\S+).*)"
+      },
+      "message": "SSH login failed for {user} from {host}",
+      "object": "{user}@{host}",
+      "state": "",
+      "parameters": {}
+    },
+    "vrrp-state": {
+      "category": "vrrp",
+      "description": "VRRP {group} changed to {state}",
+      "severity": "warning",
+      "match": {
+        "SYSLOG_IDENTIFIER": "keepalived-fifo.py",
+        "MESSAGE": "INSTANCE (?P<group>{group}) changed state to (?P<state>\\S+)"
+      },
+      "message": "VRRP {group} changed to {state}",
+      "object": "{group}",
+      "state": "{state}",
+      "parameters": {
+        "group": {
+          "validator": "group-name"
+        }
+      }
+    },
+    "dhcp-server-lease": {
+      "category": "dhcp",
+      "description": "DHCP lease {address} allocated",
+      "severity": "info",
+      "match": {
+        "SYSLOG_IDENTIFIER": "kea-dhcp4",
+        "MESSAGE": ".*DHCP4_LEASE_ALLOC .*lease (?P<address>\\S+) has been allocated.*"
+      },
+      "message": "DHCP lease {address} allocated",
+      "object": "{address}",
+      "state": "",
+      "parameters": {},
+      "high_volume": true,
+      "verify_on_unit": true
+    },
+    "dhcp-server-release": {
+      "category": "dhcp",
+      "description": "DHCP lease {address} released",
+      "severity": "info",
+      "match": {
+        "SYSLOG_IDENTIFIER": "kea-dhcp4",
+        "MESSAGE": ".*DHCP4_RELEASE .*address (?P<address>\\S+) was released properly\\."
+      },
+      "message": "DHCP lease {address} released",
+      "object": "{address}",
+      "state": "",
+      "parameters": {},
+      "high_volume": true,
+      "verify_on_unit": true
+    },
+    "dhcp-client-bound": {
+      "category": "dhcp",
+      "description": "DHCP client {interface} bound to {address}",
+      "severity": "info",
+      "match": {
+        "_SYSTEMD_UNIT": "dhclient@{interface}.service",
+        "MESSAGE": "bound to (?P<address>\\S+) -- renewal in \\d+ seconds\\."
+      },
+      "message": "DHCP client {interface} bound to {address}",
+      "object": "{interface}",
+      "state": "",
+      "parameters": {
+        "interface": {
+          "required": true,
+          "validator": "interface-name"
+        }
+      },
+      "verify_on_unit": true
+    },
+    "dhcp-client-release": {
+      "category": "dhcp",
+      "description": "DHCP client {interface} released {address}",
+      "severity": "info",
+      "match": {
+        "SYSLOG_IDENTIFIER": "dhclient",
+        "MESSAGE": "DHCPRELEASE of (?P<address>\\S+) on {interface} to .*"
+      },
+      "message": "DHCP client {interface} released {address}",
+      "object": "{interface}",
+      "state": "",
+      "parameters": {
+        "interface": {
+          "required": true,
+          "validator": "interface-name"
+        }
+      },
+      "verify_on_unit": true
+    },
+    "wwan-bearer-down": {
+      "category": "wwan",
+      "description": "{MESSAGE}",
+      "severity": "critical",
+      "match": {
+        "SYSLOG_IDENTIFIER": "igos-wwan-alertbus",
+        "WWAN_ALERT_CODE": "WWAN_BEARER_DOWN",
+        "WWAN_ALERT_INTERFACE": "{interface}"
+      },
+      "message": "{MESSAGE}",
+      "object": "wwan{WWAN_ALERT_INTERFACE}",
+      "state": "",
+      "parameters": {
+        "interface": {
+          "validator": "wwan-interface"
+        }
+      },
+      "source_severity": true,
+      "high_volume": false
+    },
+    "wwan-bearer-up": {
+      "category": "wwan",
+      "description": "{MESSAGE}",
+      "severity": "info",
+      "match": {
+        "SYSLOG_IDENTIFIER": "igos-wwan-alertbus",
+        "WWAN_ALERT_CODE": "WWAN_BEARER_UP",
+        "WWAN_ALERT_INTERFACE": "{interface}"
+      },
+      "message": "{MESSAGE}",
+      "object": "wwan{WWAN_ALERT_INTERFACE}",
+      "state": "",
+      "parameters": {
+        "interface": {
+          "validator": "wwan-interface"
+        }
+      },
+      "source_severity": true,
+      "high_volume": false
+    },
+    "wwan-sim-failover": {
+      "category": "wwan",
+      "description": "{MESSAGE}",
+      "severity": "warning",
+      "match": {
+        "SYSLOG_IDENTIFIER": "igos-wwan-alertbus",
+        "WWAN_ALERT_CODE": "WWAN_SIM_FAILOVER",
+        "WWAN_ALERT_INTERFACE": "{interface}"
+      },
+      "message": "{MESSAGE}",
+      "object": "wwan{WWAN_ALERT_INTERFACE}",
+      "state": "",
+      "parameters": {
+        "interface": {
+          "validator": "wwan-interface"
+        }
+      },
+      "source_severity": true,
+      "high_volume": false
+    },
+    "wwan-sim-switch": {
+      "category": "wwan",
+      "description": "{MESSAGE}",
+      "severity": "info",
+      "match": {
+        "SYSLOG_IDENTIFIER": "igos-wwan-alertbus",
+        "WWAN_ALERT_CODE": "WWAN_SIM_SWITCH",
+        "WWAN_ALERT_INTERFACE": "{interface}"
+      },
+      "message": "{MESSAGE}",
+      "object": "wwan{WWAN_ALERT_INTERFACE}",
+      "state": "",
+      "parameters": {
+        "interface": {
+          "validator": "wwan-interface"
+        }
+      },
+      "source_severity": true,
+      "high_volume": false
+    },
+    "wwan-sim-removed": {
+      "category": "wwan",
+      "description": "{MESSAGE}",
+      "severity": "critical",
+      "match": {
+        "SYSLOG_IDENTIFIER": "igos-wwan-alertbus",
+        "WWAN_ALERT_CODE": "WWAN_SIM_REMOVED",
+        "WWAN_ALERT_INTERFACE": "{interface}"
+      },
+      "message": "{MESSAGE}",
+      "object": "wwan{WWAN_ALERT_INTERFACE}",
+      "state": "",
+      "parameters": {
+        "interface": {
+          "validator": "wwan-interface"
+        }
+      },
+      "source_severity": true,
+      "high_volume": false
+    },
+    "wwan-sim-inserted": {
+      "category": "wwan",
+      "description": "{MESSAGE}",
+      "severity": "info",
+      "match": {
+        "SYSLOG_IDENTIFIER": "igos-wwan-alertbus",
+        "WWAN_ALERT_CODE": "WWAN_SIM_INSERTED",
+        "WWAN_ALERT_INTERFACE": "{interface}"
+      },
+      "message": "{MESSAGE}",
+      "object": "wwan{WWAN_ALERT_INTERFACE}",
+      "state": "",
+      "parameters": {
+        "interface": {
+          "validator": "wwan-interface"
+        }
+      },
+      "source_severity": true,
+      "high_volume": false
+    },
+    "wwan-fsm-failed": {
+      "category": "wwan",
+      "description": "{MESSAGE}",
+      "severity": "critical",
+      "match": {
+        "SYSLOG_IDENTIFIER": "igos-wwan-alertbus",
+        "WWAN_ALERT_CODE": "WWAN_FSM_FAILED",
+        "WWAN_ALERT_INTERFACE": "{interface}"
+      },
+      "message": "{MESSAGE}",
+      "object": "wwan{WWAN_ALERT_INTERFACE}",
+      "state": "",
+      "parameters": {
+        "interface": {
+          "validator": "wwan-interface"
+        }
+      },
+      "source_severity": true,
+      "high_volume": false
+    },
+    "wwan-reconnect-attempt": {
+      "category": "wwan",
+      "description": "{MESSAGE}",
+      "severity": "info",
+      "match": {
+        "SYSLOG_IDENTIFIER": "igos-wwan-alertbus",
+        "WWAN_ALERT_CODE": "WWAN_RECONNECT_ATTEMPT",
+        "WWAN_ALERT_INTERFACE": "{interface}"
+      },
+      "message": "{MESSAGE}",
+      "object": "wwan{WWAN_ALERT_INTERFACE}",
+      "state": "",
+      "parameters": {
+        "interface": {
+          "validator": "wwan-interface"
+        }
+      },
+      "source_severity": true,
+      "high_volume": true
+    },
+    "wwan-usage-warning": {
+      "category": "wwan",
+      "description": "{MESSAGE}",
+      "severity": "warning",
+      "match": {
+        "SYSLOG_IDENTIFIER": "igos-wwan-alertbus",
+        "WWAN_ALERT_CODE": "WWAN_USAGE_WARNING",
+        "WWAN_ALERT_INTERFACE": "{interface}"
+      },
+      "message": "{MESSAGE}",
+      "object": "wwan{WWAN_ALERT_INTERFACE}",
+      "state": "",
+      "parameters": {
+        "interface": {
+          "validator": "wwan-interface"
+        }
+      },
+      "source_severity": true,
+      "high_volume": false
+    },
+    "wwan-usage-limit": {
+      "category": "wwan",
+      "description": "{MESSAGE}",
+      "severity": "critical",
+      "match": {
+        "SYSLOG_IDENTIFIER": "igos-wwan-alertbus",
+        "WWAN_ALERT_CODE": "WWAN_USAGE_LIMIT_EXCEEDED",
+        "WWAN_ALERT_INTERFACE": "{interface}"
+      },
+      "message": "{MESSAGE}",
+      "object": "wwan{WWAN_ALERT_INTERFACE}",
+      "state": "",
+      "parameters": {
+        "interface": {
+          "validator": "wwan-interface"
+        }
+      },
+      "source_severity": true,
+      "high_volume": false
+    }
+  }
+}
