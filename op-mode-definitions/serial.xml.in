@@ -254,13 +254,13 @@
                     <properties>
                       <help>Show serial devices that reference this profile</help>
                     </properties>
-                    <command>iol_dsppref "$4"</command>
+                    <command>iol_dsppref "$5"</command>
                     <children>
                       <node name="json">
                         <properties>
                           <help>Show serial devices that reference this profile in JSON format</help>
                         </properties>
-                        <command>iol_dsppref "$4" -j</command>
+                        <command>iol_dsppref "$5" -j</command>
                       </node>
                     </children>
                   </node>
