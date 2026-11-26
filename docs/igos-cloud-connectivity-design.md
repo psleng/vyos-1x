@@ -125,6 +125,92 @@ flask-react-dev
   Also documents the dial-on-demand traffic trigger (NFQUEUE on `output` for
   router-originated traffic to `wwanN`) and `tx_bytes`-based idle watcher that
   this design relies on (§2, §5).
+- `igos-alerting-design.md` — the alert record, history file and per-channel
+  delivery queue that device-originated cloud information builds on (§15).
+
+### 0.6 Information transfer today
+
+Verified against the code in all three repositories (2026-11-26).
+
+**Direction.** The protocol is pull-only. The device long-polls
+`routers/command`; the cloud returns one command per poll; the device posts a
+response when `requiresResponse` is set. The cloud cannot send anything
+unprompted, and the device sends nothing except registration, poll requests,
+command responses and `DISCONNECT`.
+
+**What the cloud can reach on the device:**
+
+| Path (cloud command) | Reaches | Cloud must supply | Runs on the device as |
+| --- | --- | --- | --- |
+| Built-in managed-device routes (`EXECUTE_REST_COMMAND`): `/api/v1.1/managed-devices/system`, `…/services/cloud-services/status`, `…/easyport/interfaces/all`, `…/cli` | Fixed `show` commands. `cli` returns `show config`, version, memory, storage and the log. | Nothing | The proxy's own key, `VYOS_API_KEY` from `cloud-env.conf` (ships as `mykey`) |
+| VyOS gateway (`EXECUTE_REST_COMMAND` to `/api/v1.1/managed-devices/vyos`) | The VyOS HTTP API: `/info`, `/retrieve`, `/show`, `/generate`, `/configure`, `/config-file`, `/reset`, `/reboot`, `/poweroff`, `/image`, `/graphql` | The API key in `body.key` on every request except `/info`; for `/graphql`, in the GraphQL variables | Whatever key the cloud sends |
+| GUI tunnel (`PROXY_CONNECT`) | Any URL the cloud puts in `proxyRequestUri`; intended to be the local GUI | Nothing beyond its device registration | A Flask session as user `PerleCLOUD` with role `administrator`; Flask then uses its own API key |
+
+**VyOS HTTP API authentication (vyos-1x).** Every REST route requires `key` on
+every request (router-wide `auth_required` dependency in
+`src/services/api/rest/routers.py`); only `/info` is open. GraphQL queries and
+mutations require the key, or a bearer JWT when the API is in token mode. There
+is no login session.
+
+**GUI tunnel authentication.** The proxy adds
+`Set-Cookie: IGOS_CLOUD_SESSION=<JWT>` to every forwarded response, signed with
+a key generated per process. Flask verifies it through vyos-1x `/auth`
+(`service=cloud`) and logs the user in as `PerleCLOUD`.
+
+**User levels today:**
+
+| Access path | Levels | Where defined and enforced |
+| --- | --- | --- |
+| CLI (SSH, console) | admin; operator | Admin = member of `vyattacfg` (no `operator` node). Operator = `system login user <u> operator group <g>`, with `system login operator-group <g> command-policy allow '<command>'`. `vyos-op-run` (`src/ocaml/vyos_op_run.ml`) restricts operators to op-mode commands in their groups' allow lists, and always denies `configure`, `commit`, `commit-confirm`, `confirm`, `execute shell` and commands containing special characters. |
+| GUI | administrator, operator+, operator | Flask session `permission`. Local login: `vyattacfg` → administrator, otherwise operator unless the Flask user database says otherwise (operator+ exists only there). TACACS+/RADIUS: privilege ≥ 10 → administrator, ≥ 5 → operator+, else operator. SAML JIT: `admin` / `super-operator` / `operator` → administrator / operator+ / operator. |
+| HTTP API (REST, GraphQL, cloud gateway) | none | `service https api keys id <id> key <k>` has no role; any valid key has full access. |
+| Cloud GUI tunnel | always administrator | Hard-coded in the proxy (see findings). PerleCLOUD's own user levels never reach the device. |
+| GUI web CLI | administrator only | `/cli/shell` in Flask requires `administrator`. The terminal itself is a WebSocket from nginx `/cli/shell/ws` straight to ttyd on `127.0.0.1:7681`, without the Flask check. Which account the ttyd shell runs as is not defined in these repositories (to verify). |
+
+Notes:
+
+- `operator+` has no CLI equivalent, and a GUI operator is not a CLI operator:
+  the GUI levels are enforced by Flask, the CLI levels by `vyos-op-run`.
+- **The web CLI does not work through the cloud tunnel**: the proxy rejects
+  WebSocket upgrades with `501`, so cloud users have no terminal.
+
+**Findings:**
+
+- **The cloud is fully trusted.** Through the tunnel, anyone the cloud
+  authenticates is a GUI administrator and can change configuration. Requiring
+  the API key on gateway calls therefore adds no protection; it only makes the
+  cloud store each device's key.
+- **Role is hard-coded.** `_local_auth_cookie()` in
+  `session/types/http_proxy.py` always issues `role: "administrator"`. Flask
+  also accepts `operator` and `operator+`, but `PROXY_CONNECT` has no role
+  field, so the cloud user's role never reaches the device.
+- **Tunnel target is not restricted.** `proxyRequestUri` is forwarded exactly
+  as supplied, so the cloud can reach any address the device can reach,
+  including LAN hosts, not only the local GUI.
+- **Status route is static.** `cloud-services/status` always reports
+  `cloudConnectionStatus: "connected"`.
+- **Responses are fire-and-forget.** A failed response send is logged and
+  dropped (`Proxy._send_response`). Gateway results are kept in memory for
+  24 h, recoverable by `taskId`, and lost when the proxy restarts.
+- **Inline transfers only.** Everything travels as JSON in the command channel.
+  Gateway limits: 8 MB request, 1 MB response.
+- **No version or capability advertisement.** The cloud cannot tell which
+  routes or gateway endpoints a firmware supports.
+
+**Alerts and events today:**
+
+- `vyos-event-handler` (vyos-1x) runs a script when a log line matches. It
+  keeps no history and has no op-mode command; it logs only
+  `Pattern found: "<regex>", script executed: "<path>"`.
+- GUI-created events run `gui_event_notification.py`, which posts to Flask
+  `/callback`. Flask stores them in its own database (at most 40 critical,
+  30 warning, 30 info), shows them on the alarm monitor page and pushes a
+  Socket.IO notification. Email goes out as the test email; SMS is not sent.
+  CLI-created events have no history at all.
+- SMS and email keep no record of which alert was sent.
+- The cloud cannot read Flask's database through the gateway. It can search
+  `show log` through the gateway, or view the GUI alarm page through the
+  tunnel. There is no device-initiated alert message.
 
 ---
 
@@ -586,6 +672,139 @@ cloud will show the device offline between check-ins.
 - vyos-1x smoketest: `service cloud` renders config, change-only reload,
   `show cloud status` fields, commit rejected for `service cloud enable` +
   non-dial-on-demand metered WWAN (both commit orders).
+
+---
+
+## 15. Device-originated information (alerts)
+
+The protocol is pull-only: the cloud learns about the device only by sending it
+commands. Apart from the WWAN AlertBus and syslog, igOS produces no user-facing
+alerts of its own; the alert source is the event-handler pipeline in
+`igos-alerting-design.md` (catalog alerts and custom events). This section
+defines how those alerts reach PerleCLOUD.
+
+**Baseline (§15.1): the cloud reads alert history through the existing gateway.
+Push (§15.3) is an optional upgrade** for lower latency, and pull stays as its
+backfill path.
+
+### 15.1 Baseline — cloud reads history (no protocol change)
+
+The cloud reads `show event-handler alerts --raw` through the VyOS gateway
+(GraphQL, since the op-mode script is standardized) and keeps a cursor. This is
+already the plan in `igos-alerting-design.md` §8. **Neither the command nor the
+history exists yet**: today's `vyos-event-handler` only runs scripts on regex
+matches and keeps no record, so the baseline depends on the alerting design
+being implemented. The protocol needs no change; the gateway is already there.
+
+Persistence of what the cloud reads (as designed; no code yet):
+
+| Event | History (`/var/lib/vyos/alerts/history.jsonl`) | Delivery queues (`/var/lib/vyos/alerts/queue/`) |
+| --- | --- | --- |
+| Daemon restart | kept | kept |
+| Reboot | kept — the file is in the image's overlay upper (`boot/<image>/rw`) on the persistence partition | kept |
+| Image upgrade | **undecided** — today left behind with the old image; the new image starts empty (§15.5) | same as history |
+| History full (`history size`, default 1000) | oldest records dropped | n/a |
+
+Today the image installer carries only `/config`, SSH host keys and
+known_hosts, and optionally `/var/lib/tee` into a new image (`add_image()` in
+`src/op_mode/image_installer.py`); nothing under `/var/lib/vyos/` is migrated.
+Booting back into the old image shows the old history again.
+
+The journald copy (`SYSLOG_IDENTIFIER=igos-alert`) is not the cloud's source;
+history is.
+
+### 15.2 What the cursor relies on (alerting design §3, §7d)
+
+- **`sequence` resumes across reboots and `clear`**, continuing from the last
+  recorded alert, so numbers are never reused while history exists.
+- **`history_id`** changes only when an image starts with no history (an image
+  upgrade, unless history is carried over — §15.5). A changed `history_id`
+  tells the cloud to resynchronize from the start.
+- **`since <sequence>` and `first_sequence`** in `show event-handler alerts
+  --raw` let the cloud fetch only new records and detect records lost to
+  history overflow.
+
+Cloud algorithm: remember `(history_id, last_sequence)`; request
+`since last_sequence`; on a different `history_id`, read everything; on
+`first_sequence > last_sequence + 1`, flag a gap.
+
+Limits of the baseline: alert latency equals the cloud's read interval, and
+every read costs a gateway round trip even when there is nothing new.
+
+### 15.3 Optional upgrade — push
+
+A cloud delivery channel in the alerting pipeline, alongside email, SMS and
+script:
+
+```text
+vyos-event-handler ── cloud queue ── cloud worker ──► igos-cloud-proxy local API
+                      (§7a of the                       POST /perlecloud/events
+                       alerting design)                     │
+                                                            ▼
+                                                 DEVICE_EVENT ──► PerleCLOUD
+                                                 ◄── ack (record ids)
+```
+
+- **vyos-1x (event-handler):** a cloud worker drains a cloud queue with the
+  same retry, backoff, 24 h give-up and severity-ordered overflow as the other
+  channels. An item is removed only when the proxy reports that the cloud
+  acknowledged it.
+- **igos-cloud-proxy:** a `POST /perlecloud/events` route on the existing unix
+  socket. It sends `DEVICE_EVENT` on `routers/command` and returns success only
+  after the cloud's acknowledgement; while not connected it returns `503`, and
+  the worker retries. The proxy stores nothing — durability is the alert queue.
+  It does not follow journald itself, keeping one reader and one pipeline.
+- **Protocol:** `DEVICE_EVENT` (proxy → cloud, `requiresResponse: true`):
+
+  ```json
+  {
+    "eventType": "alert",
+    "historyId": "…",
+    "records": [ { "id": "…", "sequence": 812, "severity": "critical", "…": "…" } ]
+  }
+  ```
+
+  The cloud replies with the accepted record `id`s. `records` is a list so a
+  backlog after an outage drains in a few requests. `eventType` keeps the
+  message general for later device-originated notices (§15.4).
+- **Delivery semantics:** at-least-once. The cloud deduplicates on `id`; pull
+  (§15.1) remains the reconciliation path, so a lost or expired push item is
+  recovered at the next read.
+- **Unsupported cloud:** if PerleCLOUD answers `DEVICE_EVENT` with an error for
+  an unknown message type, the proxy returns `501` to the worker, which drops
+  cloud items and stops pushing until the proxy restarts. Pull still covers
+  everything.
+- **Noise control:** the alerting design's hold-down and edge detection apply
+  unchanged; add `rate-limit cloud` alongside SMS and email.
+
+### 15.4 Later uses of `DEVICE_EVENT`
+
+- `config-changed` from a commit post-hook, so the cloud re-reads configuration
+  after a CLI or GUI commit instead of polling for it.
+- Metric/threshold alerts once the alerting design's poller exists (its §13.4);
+  they use the same record and channel.
+
+### 15.5 Open decisions
+
+1. **Which alerts are pushed:** per-rule `notify cloud` (consistent with email
+   and SMS), every recorded alert while `service cloud` is enabled, or a
+   minimum severity.
+2. **Carry alerts across image upgrade? (undecided)** If yes, it becomes one
+   more step in the image installer (`add_image()`), copying
+   `/var/lib/vyos/alerts/` into the new image the same way `/var/lib/tee` is
+   migrated; the cloud cursor then continues without a resync. Tracked in
+   `igos-alerting-design.md` §12.
+3. **Backend:** can PerleCLOUD accept `DEVICE_EVENT` and acknowledge by `id`?
+   Until then, the baseline is the only path.
+
+### 15.6 Changes by repository
+
+| Repo | Baseline | Push (optional) |
+| --- | --- | --- |
+| vyos-1x | `sequence` resume, `history_id`, `since` (alerting design §7d) | cloud worker and queue, `notify cloud` / selection rule, `rate-limit cloud` |
+| igos-cloud-proxy | none | `POST /perlecloud/events`, `DEVICE_EVENT` message, ack handling, `501` for unsupported cloud |
+| flask-react-dev | none | `cloud` in the alert channel picker (if per-rule) |
+| PerleCLOUD | cursor read of `show event-handler alerts` | accept and acknowledge `DEVICE_EVENT`, deduplicate on `id` |
 
 ---
 

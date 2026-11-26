@@ -243,7 +243,7 @@ Every match produces one record. It is written to the history file, to journald
 | Field | Type | Notes |
 |---|---|---|
 | `id` | string | UUID, unique per record |
-| `sequence` | int | Monotonic per boot, for ordering and paging |
+| `sequence` | int | Monotonic, continues across reboots and `clear` (§7d); for ordering and paging |
 | `timestamp` | string | ISO-8601 UTC, taken from the journal entry (`__REALTIME_TIMESTAMP`) |
 | `hostname` | string | `system host-name` |
 | `rule` | string | Config tag: the `alert <name>` or `event <name>` |
@@ -438,6 +438,7 @@ set service event-handler rate-limit email 60        # max emails per hour (defa
 show event-handler alerts                       # newest first
 show event-handler alerts count 50
 show event-handler alerts severity critical
+show event-handler alerts since 812             # records after sequence 812 (§7d)
 show event-handler alert-types                  # installed catalog
 show event-handler status                       # queue depth, last delivery result per channel
 clear event-handler alerts
@@ -513,6 +514,24 @@ cursor is a possible later improvement.
 
 - History is a bounded JSON-lines file at `/var/lib/vyos/alerts/history.jsonl`
   (size from `history size`), read by `show event-handler alerts`.
+- History lives in the image's overlay on the persistence partition: it
+  survives daemon restarts and reboots. **Carry-over across image upgrade is
+  undecided (§12).** Today the installer (`add_image()` in
+  `src/op_mode/image_installer.py`) migrates only `/config`, SSH keys and
+  known_hosts, and `/var/lib/tee`, so history and queues stay with the old
+  image.
+- **`sequence` resumes; it is never reset by a reboot or `clear`.** A small
+  state file `/var/lib/vyos/alerts/state.json` holds `history_id` (random,
+  created with the file) and `last_sequence`. On start the daemon continues
+  from the larger of `last_sequence` and the last valid record in history
+  (a torn final line after power loss is skipped). `state.json` is written on
+  `clear event-handler alerts` and on clean shutdown, not per record.
+- If history is not carried over, a new image starts with no history, so it
+  gets a new `history_id` and `sequence` starts at 1. Readers that keep a
+  cursor (GUI, cloud) treat a changed `history_id` as "start over".
+- `show event-handler alerts --raw` includes `history_id` and
+  `first_sequence` (oldest record still held), and accepts `since <sequence>`,
+  so a reader can fetch only new records and detect overflow gaps.
 - Each record is also sent to journald (`SYSLOG_IDENTIFIER=igos-alert`,
   `ALERT_*` fields), which gives remote syslog forwarding and a live feed for
   the GUI with no extra code.
@@ -712,6 +731,12 @@ Design questions:
 - Should edge state be persisted so a reboot does not re-announce every
   interface as "up"?
 - Multi-modem units: is "first connected wwan" the right SMS default?
+- **Undecided — carry alerts across image upgrade?** If yes, it becomes one
+  more step in the image installer (`add_image()`), copying
+  `/var/lib/vyos/alerts/` (history, `state.json`, queues) into the new image's
+  overlay, the same way `/var/lib/tee` is migrated today. History, `sequence`,
+  `history_id` and pending deliveries then continue unbroken. If no, the new
+  image starts empty and undelivered items are left behind.
 
 ---
 
