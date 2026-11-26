@@ -52,6 +52,7 @@ from vyos.configdep import called_as_dependent
 
 CERT_PATH = Path('/run/vyos_pki')
 SERIAL_PATH = Path('/run/serial')
+SERIAL_DEFAULTS_FILE = Path('/run/serial/serial-defaults.json')
 SERIAL_SERVICE = 'iolan-monitor.service'
 
 PROC = Path('/proc')
@@ -224,6 +225,17 @@ def get_config(config=None):
     # Serial SSH server relies on the system SSH service (service ssh) being
     # configured; record its presence so verify() can enforce the dependency.
     result['system_ssh_configured'] = conf.exists(['service', 'ssh'])
+
+    if conf.exists(['service', 'serial']):
+        result['_serial_defaults'] = conf.get_config_dict(
+            ['service', 'serial'],
+            get_first_key=False,
+            no_tag_node_value_mangle=True,
+            with_recursive_defaults=True,
+        )
+    else:
+        result['_serial_defaults'] = {}
+
     return result
 
 
@@ -1173,6 +1185,10 @@ def generate(config):
     '''Generate serial device configuration.'''
     if config.get('_fips'):
         _fips_apply_tls_template_defaults(config)
+
+    SERIAL_PATH.mkdir(parents=True, exist_ok=True)
+    SERIAL_DEFAULTS_FILE.write_text(json.dumps(config.get('_serial_defaults', {})))
+
     if config.get('_invoke_context') == 'interface':
         device = config['device']
         interface_type = config['interface_type']
@@ -1641,7 +1657,6 @@ def generate(config):
                     port_config['service'] = f'{svc_prefix}-direct'
                     port_config['raw_option'] = 'initiate-specific-char'
 
-            SERIAL_PATH.mkdir(parents=True, exist_ok=True)
             cfg_filename = (SERIAL_PATH/f'ttyS{ttynum}.json').absolute()
             with cfg_filename.open('w') as f:
                 json.dump(prepare_for_json(port_config), f, indent=4)
