@@ -792,9 +792,9 @@ they could not already do. Replace keys for these internal callers with:
    user's role with each request; the agent enforces what each role may call
    and logs every call with the cloud user (§19.9).
 7. **Operator keys stay.** Keys configured under `service https api keys`
-   (any number) keep working for remote API clients through nginx. With the
-   API's nginx locations localhost-only or disabled by default (security
-   finding G1 fix), a factory-fresh unit has no API key at all.
+   (any number) keep working for remote API clients through nginx, from the
+   networks listed in `service https allow-client address`. Once the shipped
+   key is removed, a factory-fresh unit has no API key at all.
 8. **Remove the shipped key.** Drop it from `config.boot.default.igos`, the
    GUI `.env` and `cloud-env.conf`. An igOS migration
    (`src/migration-scripts/igos/`) removes the shipped default key entry from
@@ -815,12 +815,13 @@ their own tools:
 ```text
 set service https api keys id ops key '<long random value>'
 set service https api rest               # and/or graphql
-set service https api remote allow-from <network>   # proposed; off by default
+set service https allow-client address <network>    # remote access; off by default
 ```
 
-- **Off by default.** The API's nginx locations accept only loopback until
-  remote access is explicitly enabled, ideally limited to source networks
-  (command name to be decided).
+- **Off by default.** The API's nginx location accepts only loopback (since
+  vyos-1x `5d1cf09d6`) unless source networks are listed in
+  `service https allow-client address` (fixed so it takes effect; security
+  findings §5d).
 - **Key required.** Through nginx, every API endpoint except `/info` needs a
   valid configured key (or a JWT in GraphQL token mode) — unchanged VyOS
   behavior. With no keys configured, remote callers get nothing.
@@ -853,7 +854,7 @@ set service https api remote allow-from <network>   # proposed; off by default
 5. **What a key holder can do is the API itself.** Since keys are full access,
    a key holder can change configuration — including enabling or disabling
    services. That is the nature of an API key, not a bypass; protect keys
-   accordingly and restrict `allow-from`.
+   accordingly and keep `allow-client` narrow.
 
 Why: nothing to rotate, distribute or leak; no secret in any package or
 backup; the socket gives a trustworthy caller, which also solves trusted actor
@@ -869,7 +870,7 @@ repositories.
 | Step | Change | Safe alone? |
 | --- | --- | --- |
 | 1 | vyos-1x: local socket, key optional there (any key sent is ignored), identity headers honoured only there and cleared by nginx, commit-attribution plumbing | Yes — additive; `/run/api.sock` unchanged |
-| 1 | vyos-1x: API nginx locations loopback-only by default, `remote allow-from` option | Yes — the GUI and agent call `127.0.0.1`; there are no remote API users today, so no migration is needed |
+| 1 | vyos-1x: API nginx location loopback-only (already so since `5d1cf09d6`); `service https allow-client` fixed so it grants remote API access | Yes — the GUI and agent call `127.0.0.1`; there are no remote API users today, so no migration is needed |
 | 2 | flask-react-dev and igos-cloud-proxy switch to the local socket and stop sending keys (either order) | Yes, once step 1 is installed |
 | 3 | igOS migration removing the shipped `myid` key; remove the key from vyos-build `config.boot.default.igos` and model defaults | Only after step 2 — earlier, the GUI and agent would lose API access |
 
