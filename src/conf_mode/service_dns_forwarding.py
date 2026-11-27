@@ -20,10 +20,12 @@ from sys import exit
 from glob import glob
 
 from vyos.config import Config
+from vyos.base import Warning
 from vyos.hostsd_client import Client as hostsd_client
 from vyos.template import render
 from vyos.template import bracketize_ipv6
 from vyos.utils.network import interface_exists
+from vyos.utils.network import is_addr_assigned
 from vyos.utils.process import call
 from vyos.utils.permission import chown
 from vyos import ConfigError
@@ -248,6 +250,15 @@ def verify(dns):
 
     if 'allow_from' not in dns:
         raise ConfigError('DNS forwarding requires an allow-from network')
+
+    # pdns binds non-locally (non-local-bind=yes), so a stale listen-address
+    # (e.g. after the LAN address changed) silently serves nobody
+    for address in dns['listen_address']:
+        if not is_addr_assigned(address, include_vrf=True):
+            Warning(
+                f'DNS forwarding listen-address "{address}" is not '
+                'assigned to any interface; no client can reach it there'
+            )
 
     # we can not use dict_search() when testing for domain servers
     # as a domain will contains dot's which is out dictionary delimiter.
