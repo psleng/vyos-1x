@@ -51,6 +51,12 @@ from vyos.configsession import ConfigSessionError
 
 from ..background import BackgroundOpManager
 from ..background import BackgroundOpError
+from ..caller import Caller
+from ..caller import find_key_id
+from ..caller import get_caller
+from ..caller import is_local
+from ..caller import local_caller
+from ..caller import set_caller
 from ..config_lock import config_lock
 from ..config_lock import wait_for_system_commit
 from ..session import SessionState
@@ -89,21 +95,31 @@ LOG = logging.getLogger('http_api.routers')
 
 
 def check_auth(key_list, key):
-    key_id = None
-    for k in key_list:
-        if k['key'] == key:
-            key_id = k['id']
-    return key_id
+    return find_key_id(key_list, key)
 
 
-def auth_required(data: ApiModel):
+async def auth_required(request: Request, data: ApiModel):
+    # async so the caller ContextVar is set in the request's own context and
+    # is inherited by the endpoint, its threadpool work and background tasks
+    if is_local(request.scope):
+        set_caller(local_caller(request.headers))
+        return
     session = SessionState()
-    key = data.key
-    api_keys = session.keys
-    key_id = check_auth(api_keys, key)
+    key_id = check_auth(session.keys, data.key)
     if not key_id:
         raise HTTPException(status_code=401, detail='Valid API key is required')
+    # kept for compatibility; per-request identity is the caller ContextVar
     session.id = key_id
+    set_caller(Caller(key_id=key_id))
+
+
+def _caller_label() -> str:
+    caller = get_caller()
+    if caller is None:
+        return 'by unknown caller'
+    if caller.local:
+        return f"by '{caller.user or 'unknown'}' via local socket ({caller.via or 'local'})"
+    return f"using key '{caller.key_id}'"
 
 
 # override Request and APIRoute classes in order to convert form request to json;
@@ -254,7 +270,11 @@ class MultipartRequest(Request):
                                 f"Malformed command '{c}': missing 'section' or 'config' field",
                             )
 
-                if 'key' not in forms and 'key' not in merge:
+                if (
+                    'key' not in forms
+                    and 'key' not in merge
+                    and not is_local(self.scope)
+                ):
                     self.form_err = (401, 'Valid API key is required')
                 if 'key' in forms and 'key' not in merge:
                     merge['key'] = forms['key']
@@ -506,7 +526,7 @@ def _execute_configure_op(
             out = self_ref_msg
             msg = msg + out if msg else out
 
-        LOG.info(f"Configuration modified via HTTP API using key '{state.id}'")
+        LOG.info(f'Configuration modified via HTTP API {_caller_label()}')
     except ConfigSessionError as e:
         session.discard()
         status = 400

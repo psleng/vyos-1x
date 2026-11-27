@@ -766,6 +766,12 @@ Proceed ?"""
         try:
             user = os.getlogin()
         except OSError:
+            # No login terminal: e.g. the HTTP API, which sets COMMIT_USER for
+            # commits made on behalf of a local caller (GUI, cloud agent).
+            # Interactive sessions always keep their real login name.
+            commit_user = os.getenv('COMMIT_USER')
+            if commit_user:
+                return commit_user
             try:
                 user = pwd.getpwuid(os.geteuid())[0]
             except KeyError:

@@ -72,18 +72,22 @@ server {
         proxy_pass http://unix:/run/api.sock;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        # Identity headers are trusted only on the root-only local API socket
+        proxy_set_header X-Igos-User "";
+        proxy_set_header X-Igos-Via "";
         proxy_read_timeout 600;
         proxy_buffering off;
-        allow 127.0.0.1;     # Only allow requests from localhost
-        deny all;            # Deny all other IP addresses
+        # Localhost, plus remote clients listed in 'service https allow-client'
+        # (allow lines must come before 'deny all': first match wins)
+        allow 127.0.0.1;
+{%     if allow_client.address is vyos_defined %}
+{%         for address in allow_client.address %}
+        allow {{ address }};
+{%         endfor %}
+{%     endif %}
+        deny all;
 {% else %}
         return 503;
-{% endif %}
-{% if allow_client.address is vyos_defined %}
-{%     for address in allow_client.address %}
-        allow {{ address }};
-{%     endfor %}
-        deny all;
 {% endif %}
     }
 

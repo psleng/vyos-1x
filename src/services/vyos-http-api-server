@@ -18,6 +18,8 @@ import os
 import sys
 import grp
 import json
+import asyncio
+import contextlib
 import logging
 import signal
 import traceback
@@ -30,11 +32,15 @@ from uvicorn import Config as UvicornConfig
 from uvicorn import Server as UvicornServer
 
 from vyos.configsession import ConfigSession
+from vyos.defaults import DEFAULT_COMMIT_CONFIRM_MINUTES
 from vyos.defaults import api_config_state
 from vyos.utils.file import read_file
 from vyos.version import get_version
 
 from api.session import SessionState
+from api.caller import LocalSocketMarker
+from api.caller import bind_local_socket
+from api.caller import commit_actor_env
 from api.rest.models import error, InfoQueryParams, success
 
 CFG_GROUP = 'vyattacfg'
@@ -108,7 +114,9 @@ def info(q: Annotated[InfoQueryParams, Query()]):
 # Modify uvicorn to allow reloading server within the configsession
 ###
 
-server = None
+# The nginx-published listener and the root-only local listener
+# (api.caller.LOCAL_SOCKET) serve the same app; both stop on reload/shutdown.
+servers = []
 shutdown = False
 
 
@@ -120,15 +128,34 @@ class ApiServer(UvicornServer):
     def install_signal_handlers(self):
         pass
 
+    @contextlib.contextmanager
+    def capture_signals(self):
+        # Newer uvicorn swaps signal handlers per serve(); with two servers in
+        # one loop that would route SIGTERM to only one. Keep ours in charge.
+        yield
+
+
+class ApiConfigSession(ConfigSession):
+    """Config session that records the acting local caller on each commit"""
+
+    def commit(self):
+        with commit_actor_env(self.get_session_env()):
+            return super().commit()
+
+    def commit_confirm(self, minutes: int = DEFAULT_COMMIT_CONFIRM_MINUTES):
+        with commit_actor_env(self.get_session_env()):
+            return super().commit_confirm(minutes=minutes)
+
 
 def reload_handler(signum, frame):
     # pylint: disable=global-statement
 
-    global server
+    global servers
     LOG.debug('Reload signal received...')
-    if server is not None:
-        server.handle_exit(signum, frame)
-        server = None
+    if servers:
+        for s in servers:
+            s.handle_exit(signum, frame)
+        servers = []
         LOG.info('Server stopping for reload...')
     else:
         LOG.warning('Reload called for non-running server...')
@@ -139,7 +166,8 @@ def shutdown_handler(signum, frame):
 
     global shutdown
     LOG.debug('Shutdown signal received...')
-    server.handle_exit(signum, frame)
+    for s in servers:
+        s.handle_exit(signum, frame)
     LOG.info('Server shutdown...')
     shutdown = True
 
@@ -171,7 +199,7 @@ def regenerate_docs(app: FastAPI) -> None:
 def initialization(session: SessionState, app: FastAPI = app):
     # pylint: disable=global-statement,broad-exception-caught,import-outside-toplevel
 
-    global server
+    global servers
     try:
         server_config = load_server_config()
     except Exception as e:
@@ -233,7 +261,20 @@ def initialization(session: SessionState, app: FastAPI = app):
         LOG.debug(f'{r.path}')
 
     config = ApiServerConfig(app, uds="/run/api.sock", proxy_headers=True)
-    server = ApiServer(config)
+    # Lifespan events run once, on the main listener only
+    local_config = ApiServerConfig(LocalSocketMarker(app), lifespan='off')
+    servers = [ApiServer(config), ApiServer(local_config)]
+
+
+async def serve_all(api_servers):
+    main_server, local_server = api_servers
+    try:
+        local_sock = bind_local_socket()
+    except OSError as e:
+        LOG.critical(f'Failed to create the local API socket: {e}')
+        await main_server.serve()
+        return
+    await asyncio.gather(main_server.serve(), local_server.serve(sockets=[local_sock]))
 
 
 if __name__ == '__main__':
@@ -250,13 +291,16 @@ if __name__ == '__main__':
     signal.signal(signal.SIGTERM, shutdown_handler)
 
     session_state = SessionState()
-    session_state.session = ConfigSession(os.getpid())
+    session_state.session = ApiConfigSession(os.getpid())
 
     while True:
         LOG.debug('Enter main loop...')
         if shutdown:
             break
-        if server is None:
+        if not servers:
             initialization(session_state)
-            server.run()
+            loop_setup = getattr(servers[0].config, 'setup_event_loop', None)
+            if loop_setup is not None:
+                loop_setup()
+            asyncio.run(serve_all(servers))
         sleep(1)

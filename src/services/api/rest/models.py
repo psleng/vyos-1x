@@ -54,7 +54,9 @@ def success(data):
 
 
 class ApiModel(BaseModel):
-    key: StrictStr
+    # Required on the nginx-published socket (enforced in auth_required);
+    # not needed on the root-only local socket (api.caller)
+    key: Optional[StrictStr] = None
 
 
 class BasePathModel(BaseModel):

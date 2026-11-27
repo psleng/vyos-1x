@@ -55,36 +55,11 @@ def make_query_resolver(query_name, class_name, session_func):
     @with_signature(func_sig, func_name=resolver_name)
     async def func_impl(*args, **kwargs):
         try:
-            auth_type = state.auth_type
-
-            if auth_type == 'key':
-                data = kwargs['data']
-                key = data['key']
-
-                auth = key_auth.auth_required(key)
-                if auth is None:
-                    return {'success': False, 'errors': ['invalid API key']}
-
-                # We are finished with the 'key' entry, and may remove so as to
-                # pass the rest of data (if any) to function.
-                del data['key']
-
-            elif auth_type == 'token':
-                data = kwargs['data']
-                if data is None:
-                    data = {}
-                info = kwargs['info']
-                user = info.context.get('user')
-                if user is None:
-                    error = info.context.get('error')
-                    if error is not None:
-                        return {'success': False, 'errors': [error]}
-                    return {'success': False, 'errors': ['not authenticated']}
-            else:
-                # AtrributeError will have already been raised if no
-                # auth_type; validation and defaultValue ensure it is
-                # one of the previous cases, so this is never reached.
-                pass
+            data, auth_error = key_auth.authorize(
+                kwargs.get('info'), kwargs.get('data')
+            )
+            if auth_error is not None:
+                return {'success': False, 'errors': [auth_error]}
 
             session = state.session
 

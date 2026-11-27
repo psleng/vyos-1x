@@ -31,7 +31,6 @@ from typing import Any, Dict, Optional  # pylint: disable=W0611 # noqa: F401
 from graphql import GraphQLResolveInfo  # pylint: disable=W0611 # noqa: F401
 
 from ...background import BackgroundOpManager
-from ...session import SessionState
 from ..libs import key_auth
 from .queries import query
 
@@ -42,16 +41,9 @@ background_op_manager = BackgroundOpManager()
 def resolve_background_operations(
     obj: Any, info: GraphQLResolveInfo, data: Optional[Dict] = None
 ):
-    state = SessionState()
-    data = data or {}
-
-    if state.auth_type == 'key':
-        if key_auth.auth_required(data.get('key')) is None:
-            return {'success': False, 'errors': ['invalid API key']}
-    elif state.auth_type == 'token':
-        if info.context.get('user') is None:
-            error = info.context.get('error')
-            return {'success': False, 'errors': [error or 'not authenticated']}
+    data, auth_error = key_auth.authorize(info, data)
+    if auth_error is not None:
+        return {'success': False, 'errors': [auth_error]}
 
     op_id = data.get('op_id')
     if op_id:

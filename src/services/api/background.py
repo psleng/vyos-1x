@@ -15,6 +15,7 @@
 
 import time
 import functools
+import contextvars
 import threading
 from collections import deque
 from enum import Enum
@@ -128,8 +129,11 @@ class BackgroundOpManager:
             record = BackgroundOpRecord(op_id=op_id, created_at=_ts())
 
             self._jobs[op_id] = record
-            # store the callable for later execution (outside the lock)
-            self._workers[op_id] = functools.partial(func, *args, **kwargs)
+            # store the callable for later execution (outside the lock); bind
+            # the caller's context, since one drain() runs jobs of many requests
+            self._workers[op_id] = functools.partial(
+                contextvars.copy_context().run, func, *args, **kwargs
+            )
             self._queue.append(op_id)
 
             if not self._drain_scheduled:
@@ -167,7 +171,7 @@ class BackgroundOpManager:
 
         threading.Thread(
             target=self._execute,
-            args=(op_id, func),
+            args=(op_id, functools.partial(contextvars.copy_context().run, func)),
             name=f'background-op-{op_id[:8]}',
             daemon=True,
         ).start()
