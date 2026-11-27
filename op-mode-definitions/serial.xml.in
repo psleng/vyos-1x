@@ -1,0 +1,488 @@
+<?xml version="1.0"?>
+<interfaceDefinition>
+  <node name="clear">
+    <children>
+      <node name="serial">
+        <properties>
+          <help>Clear serial</help>
+        </properties>
+        <children>
+          <node name="statistics">
+            <properties>
+              <help>Clear all serial port statistics</help>
+            </properties>
+            <command>iol_dspport -c</command>
+            <children>
+              <tagNode name="device">
+                <properties>
+                  <help>Clear specific TTY device statistics</help>
+                  <completionHelp>
+                    <script>${vyos_completion_dir}/list_serial.py --selector all</script>
+                  </completionHelp>
+                </properties>
+                <command>iol_dspport -f "$5" -c</command>
+                <children>
+                  <tagNode name="to">
+                    <properties>
+                      <help>Clear range of TTY devices statistics</help>
+                      <completionHelp>
+                        <script>${vyos_completion_dir}/list_serial.py --selector all --greater ${COMP_WORDS[4]}</script>
+                      </completionHelp>
+                    </properties>
+                    <command>iol_dspport -f "$5" -e "$7" -c</command>
+                  </tagNode>
+                </children>
+              </tagNode>
+            </children>
+          </node>
+        </children>
+      </node>
+    </children>
+  </node>
+  <node name="connect">
+    <properties>
+      <help>Establish connection</help>
+    </properties>
+    <children>
+      <node name="serial">
+        <properties>
+          <help>Connect to serial</help>
+        </properties>
+        <children>
+          <tagNode name="device">
+            <properties>
+              <help>Connect to serial device</help>
+              <completionHelp>
+                <script>${vyos_completion_dir}/list_serial.py --selector console-management</script>
+              </completionHelp>
+            </properties>
+            <command>${vyos_op_scripts_dir}/connect_serial.py "$4"</command>
+          </tagNode>
+        </children>
+      </node>
+    </children>
+  </node>
+  <node name="monitor">
+    <children>
+      <node name="serial">
+        <properties>
+          <help>Monitor serial changes</help>
+        </properties>
+        <children>
+          <tagNode name="device">
+            <properties>
+              <help>Monitor specific TTY device</help>
+              <completionHelp>
+                <script>${vyos_completion_dir}/list_serial.py --selector active</script>
+              </completionHelp>
+            </properties>
+            <command>${vyos_op_scripts_dir}/monitor_serial.py "$4"</command>
+            <children>
+              <tagNode name="and">
+                <properties>
+                  <help>Monitor another specific TTY device</help>
+                  <completionHelp>
+                    <script>${vyos_completion_dir}/list_serial.py --selector active</script>
+                  </completionHelp>
+                </properties>
+                <command>${vyos_op_scripts_dir}/monitor_serial.py "$4" "$6"</command>
+              </tagNode>
+            </children>
+          </tagNode>
+        </children>
+      </node>
+    </children>
+  </node>
+  <node name="restart">
+    <children>
+      <node name="serial">
+        <properties>
+          <help>Restart services on serial ports</help>
+        </properties>
+        <command>${vyos_op_scripts_dir}/restart_serial.py restart_serial_tty</command>
+        <children>
+          <tagNode name="device">
+            <properties>
+              <help>Restart specific TTY device</help>
+              <completionHelp>
+                <script>${vyos_completion_dir}/list_serial.py --selector active</script>
+              </completionHelp>
+            </properties>
+            <command>${vyos_op_scripts_dir}/restart_serial.py restart_serial_tty --device-name-start "$4"</command>
+            <children>
+              <tagNode name="to">
+                <properties>
+                  <help>Restart specific TTY device</help>
+                  <completionHelp>
+                    <script>${vyos_completion_dir}/list_serial.py --selector active --greater ${COMP_WORDS[3]}</script>
+                  </completionHelp>
+                </properties>
+                <command>${vyos_op_scripts_dir}/restart_serial.py restart_serial_tty --device-name-start "$4" --device-name-end "$6"</command>
+              </tagNode>
+            </children>
+          </tagNode>
+        </children>
+      </node>
+    </children>
+  </node>
+  <node name="show">
+    <children>
+      <node name="serial">
+        <properties>
+          <help>Show information on serial ports</help>
+        </properties>
+        <children>
+          <node name="users">
+            <properties>
+              <help>Show user information on serial ports</help>
+            </properties>
+            <command>iol_dspuser</command>
+            <children>
+              <node name="json">
+                <properties>
+                  <help>Show user information on serial ports in JSON format</help>
+                </properties>
+                <command>iol_dspuser --json</command>
+              </node>
+              <node name="count">
+                <properties>
+                  <help>Show sessions with user count on all serial ports with authentication on</help>
+                </properties>
+                <command>iol_dspuser --count</command>
+                <children>
+                  <node name="json">
+                    <properties>
+                      <help>Show sessions with user count on all serial ports with authentication on in JSON format</help>
+                    </properties>
+                    <command>iol_dspuser --count --json</command>
+                  </node>
+                </children>
+              </node>
+              <tagNode name="device">
+                <properties>
+                  <help>Show user information on specified serial port with authentication on</help>
+                  <completionHelp>
+                    <script>${vyos_completion_dir}/list_serial.py --selector auth</script>
+                  </completionHelp>
+                </properties>
+                <command>python3 -c "import os; from vyos.utils.serial import is_ttyS; os.system('iol_dspuser -d $5') if is_ttyS('$5') else None"</command>
+                <children>
+                  <node name="count">
+                    <properties>
+                      <help>Show sessions with user count on specified serial port</help>
+                    </properties>
+                    <command>python3 -c "import os; from vyos.utils.serial import is_ttyS; os.system('iol_dspuser -d $5 --count') if is_ttyS('$5') else None"</command>
+                    <children>
+                      <node name="json">
+                        <properties>
+                          <help>Show sessions with user count on specified serial port in JSON format</help>
+                        </properties>
+                        <command>python3 -c "import os; from vyos.utils.serial import is_ttyS; os.system('iol_dspuser -d $5 --count --json') if is_ttyS('$5') else None"</command>
+                      </node>
+                    </children>
+                  </node>
+                </children>
+              </tagNode>
+            </children>
+          </node>
+          <node name="connect-list">
+            <properties>
+              <help>Show serial ports running console-management service</help>
+            </properties>
+            <command>iol_dspcm</command>
+            <children>
+              <node name="json">
+                <properties>
+                  <help>Show serial ports running console-management service in JSON format</help>
+                </properties>
+                <command>iol_dspcm --json</command>
+              </node>
+            </children>
+          </node>
+          <node name="configuration">
+            <properties>
+              <help>Show active serial configuration</help>
+            </properties>
+            <children>
+              <tagNode name="device">
+                <properties>
+                  <help>Show configuration for specific TTY device</help>
+                  <completionHelp>
+                    <script>${vyos_completion_dir}/list_serial.py --selector active</script>
+                  </completionHelp>
+                </properties>
+                <command>iol_dsppconf "$5"</command>
+                <children>
+                  <node name="json">
+                    <properties>
+                      <help>Show configuration for specific TTY device in JSON format</help>
+                    </properties>
+                    <command>iol_dsppconf "$5" -j</command>
+                  </node>
+                  <node name="default">
+                    <properties>
+                      <help>Show configuration with default for specific TTY device</help>
+                    </properties>
+                    <command>iol_dsppconf "$5" -d</command>
+                    <children>
+                      <node name="json">
+                        <properties>
+                          <help>Show configuration with default for specific TTY device in JSON format</help>
+                        </properties>
+                        <command>iol_dsppconf "$5" -d -j</command>
+                      </node>
+                    </children>
+                  </node>
+                </children>
+              </tagNode>
+            </children>
+          </node>
+          <node name="port-profile">
+            <properties>
+              <help>Show information about serial port profiles</help>
+            </properties>
+            <children>
+              <tagNode name="name">
+                <properties>
+                  <help>Show information for specified serial port profile</help>
+                  <completionHelp>
+                    <path>service serial profile tty-profile</path>
+                  </completionHelp>
+                </properties>
+                <children>
+                  <node name="referenced-by">
+                    <properties>
+                      <help>Show serial devices that reference this profile</help>
+                    </properties>
+                    <command>iol_dsppref "$5"</command>
+                    <children>
+                      <node name="json">
+                        <properties>
+                          <help>Show serial devices that reference this profile in JSON format</help>
+                        </properties>
+                        <command>iol_dsppref "$5" -j</command>
+                      </node>
+                    </children>
+                  </node>
+                </children>
+              </tagNode>
+            </children>
+          </node>
+          <node name="statistics">
+            <properties>
+              <help>Show serial statistics</help>
+            </properties>
+            <command>iol_dspport</command>
+            <children>
+              <tagNode name="device">
+                <properties>
+                  <help>Show statistics on specified serial port</help>
+                  <completionHelp>
+                    <script>${vyos_completion_dir}/list_serial.py --selector all</script>
+                  </completionHelp>
+                </properties>
+                <command>python3 -c "import os; from vyos.utils.serial import is_ttyS; os.system('iol_dspport -f $5') if is_ttyS('$5') else None"</command>
+                <children>
+                  <node name="json">
+                    <properties>
+                      <help>Show statistics on specified serial port in JSON format</help>
+                    </properties>
+                    <command>python3 -c "import os; from vyos.utils.serial import is_ttyS; os.system('iol_dspport -f $5 --json') if is_ttyS('$5') else None"</command>
+                  </node>
+                  <tagNode name="to">
+                    <properties>
+                      <help>Show statistics on range of specified serial ports</help>
+                      <completionHelp>
+                        <script>${vyos_completion_dir}/list_serial.py --selector all --greater ${COMP_WORDS[4]}</script>
+                      </completionHelp>
+                    </properties>
+                    <command>python3 -c "import os; from vyos.utils.serial import is_valid_ttyS_range; os.system('iol_dspport -f $5 -e $7') if is_valid_ttyS_range(tty_start='$5', tty_end='$7') else None"</command>
+                    <children>
+                      <node name="json">
+                        <properties>
+                          <help>Show statistics on range of specified serial ports in JSON format</help>
+                        </properties>
+                        <command>python3 -c "import os; from vyos.utils.serial import is_valid_ttyS_range; os.system('iol_dspport -f $5 -e $7 --json') if is_valid_ttyS_range(tty_start='$5', tty_end='$7') else None"</command>
+                      </node>
+                    </children>
+                  </tagNode>
+                </children>
+              </tagNode>
+              <node name="modbus">
+                <properties>
+                  <help>Show serial modbus statistics</help>
+                </properties>
+                <children>
+                  <node name="master-tcp">
+                    <properties>
+                      <help>Show serial modbus master-tcp statistics</help>
+                    </properties>
+                    <children>
+                      <tagNode name="device">
+                        <properties>
+                          <help>Show modbus master-tcp statistics on specified serial port</help>
+                          <completionHelp>
+                            <script>${vyos_completion_dir}/list_serial.py --selector modbus-master</script>
+                          </completionHelp>
+                        </properties>
+                        <command>python3 -c "import os; from vyos.utils.serial import is_ttyS; os.system('iol_mbstats -f $7 -m -t') if is_ttyS('$7') else None"</command>
+                        <children>
+                          <node name="json">
+                            <properties>
+                              <help>Show modbus master-tcp statistics on specified serial port in JSON format</help>
+                            </properties>
+                            <command>python3 -c "import os; from vyos.utils.serial import is_ttyS; os.system('iol_mbstats -f $7 -m -t --json') if is_ttyS('$7') else None"</command>
+                          </node>
+                          <tagNode name="to">
+                            <properties>
+                              <help>Show modbus master-tcp statistics on range of specified serial ports</help>
+                              <completionHelp>
+                                <script>${vyos_completion_dir}/list_serial.py --selector modbus-master --greater ${COMP_WORDS[6]}</script>
+                              </completionHelp>
+                            </properties>
+                            <command>python3 -c "import os; from vyos.utils.serial import is_valid_ttyS_range; os.system('iol_mbstats -f $7 -e $9 -m -t') if is_valid_ttyS_range(tty_start='$7', tty_end='$9') else None"</command>
+                            <children>
+                              <node name="json">
+                                <properties>
+                                  <help>Show modbus master-tcp statistics on range of specified serial ports in JSON format</help>
+                                </properties>
+                                <command>python3 -c "import os; from vyos.utils.serial import is_valid_ttyS_range; os.system('iol_mbstats -f $7 -e $9 -m -t --json') if is_valid_ttyS_range(tty_start='$7', tty_end='$9') else None"</command>
+                              </node>
+                            </children>
+                          </tagNode>
+                        </children>
+                      </tagNode>
+                    </children>
+                  </node>
+                  <node name="master-udp">
+                    <properties>
+                      <help>Show serial modbus master-udp statistics</help>
+                    </properties>
+                    <children>
+                      <tagNode name="device">
+                        <properties>
+                          <help>Show modbus master-udp statistics on specified serial port</help>
+                          <completionHelp>
+                            <script>${vyos_completion_dir}/list_serial.py --selector modbus-master</script>
+                          </completionHelp>
+                        </properties>
+                        <command>python3 -c "import os; from vyos.utils.serial import is_ttyS; os.system('iol_mbstats -f $7 -m -u') if is_ttyS('$7') else None"</command>
+                        <children>
+                          <node name="json">
+                            <properties>
+                              <help>Show modbus master-udp statistics on specified serial port in JSON format</help>
+                            </properties>
+                            <command>python3 -c "import os; from vyos.utils.serial import is_ttyS; os.system('iol_mbstats -f $7 -m -u --json') if is_ttyS('$7') else None"</command>
+                          </node>
+                          <tagNode name="to">
+                            <properties>
+                              <help>Show modbus master-udp statistics on range of specified serial ports</help>
+                              <completionHelp>
+                                <script>${vyos_completion_dir}/list_serial.py --selector modbus-master --greater ${COMP_WORDS[6]}</script>
+                              </completionHelp>
+                            </properties>
+                            <command>python3 -c "import os; from vyos.utils.serial import is_valid_ttyS_range; os.system('iol_mbstats -f $7 -e $9 -m -u') if is_valid_ttyS_range(tty_start='$7', tty_end='$9') else None"</command>
+                            <children>
+                              <node name="json">
+                                <properties>
+                                  <help>Show modbus master-udp statistics on range of specified serial ports in JSON format</help>
+                                </properties>
+                                <command>python3 -c "import os; from vyos.utils.serial import is_valid_ttyS_range; os.system('iol_mbstats -f $7 -e $9 -m -u --json') if is_valid_ttyS_range(tty_start='$7', tty_end='$9') else None"</command>
+                              </node>
+                            </children>
+                          </tagNode>
+                        </children>
+                      </tagNode>
+                    </children>
+                  </node>
+                  <node name="slave-tcp">
+                    <properties>
+                      <help>Show serial modbus slave-tcp statistics</help>
+                    </properties>
+                    <children>
+                      <tagNode name="device">
+                        <properties>
+                          <help>Show modbus slave-tcp statistics on specified serial port</help>
+                          <completionHelp>
+                            <script>${vyos_completion_dir}/list_serial.py --selector modbus-slave</script>
+                          </completionHelp>
+                        </properties>
+                        <command>python3 -c "import os; from vyos.utils.serial import is_ttyS; os.system('iol_mbstats -f $7 -s -t') if is_ttyS('$7') else None"</command>
+                        <children>
+                          <node name="json">
+                            <properties>
+                              <help>Show modbus slave-tcp statistics on specified serial port in JSON format</help>
+                            </properties>
+                            <command>python3 -c "import os; from vyos.utils.serial import is_ttyS; os.system('iol_mbstats -f $7 -s -t --json') if is_ttyS('$7') else None"</command>
+                          </node>
+                          <tagNode name="to">
+                            <properties>
+                              <help>Show modbus slave-tcp statistics on range of specified serial ports</help>
+                              <completionHelp>
+                                <script>${vyos_completion_dir}/list_serial.py --selector modbus-slave --greater ${COMP_WORDS[6]}</script>
+                              </completionHelp>
+                            </properties>
+                            <command>python3 -c "import os; from vyos.utils.serial import is_valid_ttyS_range; os.system('iol_mbstats -f $7 -e $9 -s -t') if is_valid_ttyS_range(tty_start='$7', tty_end='$9') else None"</command>
+                            <children>
+                              <node name="json">
+                                <properties>
+                                  <help>Show modbus slave-tcp statistics on range of specified serial ports in JSON format</help>
+                                </properties>
+                                <command>python3 -c "import os; from vyos.utils.serial import is_valid_ttyS_range; os.system('iol_mbstats -f $7 -e $9 -s -t --json') if is_valid_ttyS_range(tty_start='$7', tty_end='$9') else None"</command>
+                              </node>
+                            </children>
+                          </tagNode>
+                        </children>
+                      </tagNode>
+                    </children>
+                  </node>
+                  <node name="slave-udp">
+                    <properties>
+                      <help>Show serial modbus slave-udp statistics</help>
+                    </properties>
+                    <children>
+                      <tagNode name="device">
+                        <properties>
+                          <help>Show modbus slave-udp statistics on specified serial port</help>
+                          <completionHelp>
+                            <script>${vyos_completion_dir}/list_serial.py --selector modbus-slave</script>
+                          </completionHelp>
+                        </properties>
+                        <command>python3 -c "import os; from vyos.utils.serial import is_ttyS; os.system('iol_mbstats -f $7 -s -u') if is_ttyS('$7') else None"</command>
+                        <children>
+                          <node name="json">
+                            <properties>
+                              <help>Show modbus slave-udp statistics on specified serial port in JSON format</help>
+                            </properties>
+                            <command>python3 -c "import os; from vyos.utils.serial import is_ttyS; os.system('iol_mbstats -f $7 -s -u --json') if is_ttyS('$7') else None"</command>
+                          </node>
+                          <tagNode name="to">
+                            <properties>
+                              <help>Show modbus slave-udp statistics on range of specified serial ports</help>
+                              <completionHelp>
+                                <script>${vyos_completion_dir}/list_serial.py --selector modbus-slave --greater ${COMP_WORDS[6]}</script>
+                              </completionHelp>
+                            </properties>
+                            <command>python3 -c "import os; from vyos.utils.serial import is_valid_ttyS_range; os.system('iol_mbstats -f $7 -e $9 -s -u') if is_valid_ttyS_range(tty_start='$7', tty_end='$9') else None"</command>
+                            <children>
+                              <node name="json">
+                                <properties>
+                                  <help>Show modbus slave-udp statistics on range of specified serial ports in JSON format</help>
+                                </properties>
+                                <command>python3 -c "import os; from vyos.utils.serial import is_valid_ttyS_range; os.system('iol_mbstats -f $7 -e $9 -s -u --json') if is_valid_ttyS_range(tty_start='$7', tty_end='$9') else None"</command>
+                              </node>
+                            </children>
+                          </tagNode>
+                        </children>
+                      </tagNode>
+                    </children>
+                  </node>
+                </children>
+              </node>
+            </children>
+          </node>
+        </children>
+      </node>
+    </children>
+  </node>
+</interfaceDefinition>

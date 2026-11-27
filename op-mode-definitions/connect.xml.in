@@ -5,22 +5,6 @@
       <help>Establish connection</help>
     </properties>
     <children>
-      <node name="serial">
-        <properties>
-          <help>Connect to serial</help>
-        </properties>
-        <children>
-          <tagNode name="device">
-            <properties>
-              <help>Connect to serial device</help>
-              <completionHelp>
-                <script>${vyos_completion_dir}/list_serial.py --selector console-management</script>
-              </completionHelp>
-            </properties>
-            <command>${vyos_op_scripts_dir}/connect_serial.py "$4"</command>
-          </tagNode>
-        </children>
-      </node>
       <tagNode name="interface">
         <properties>
           <help>Bring up a connection-oriented network interface</help>
