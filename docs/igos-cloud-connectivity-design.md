@@ -38,6 +38,7 @@ This document offers two approaches. Both start from the same findings (§0,
 | Cloud on cellular | Block it (`egress`) or let the cloud slow polling (`nextPollDelay`) | Metered duty cycle (§2–§7), or block it (`egress`) |
 | Alerts to the cloud | Cloud reads history through the gateway (§15.1) | Plus push (`DEVICE_EVENT`, §15.3) |
 | Cloud user roles on the device | Passed in `PROXY_CONNECT` (small cloud change) | Passed with every session and tunnel |
+| Router API keys | Generated at every boot, never shared; agent supplies its key to the gateway; cloud sends the user's role (§11.2, §19.9) | Same |
 | PerleCLOUD effort | **Small** (a few optional fields; status display) | **Large** (relay, browser clients, store-and-forward) |
 | Device effort | Small–medium | Medium–large |
 
@@ -142,7 +143,8 @@ flask-react-dev
   | Any other exception (e.g. `TPMError`, config parse) | 1 | restart after 1 s, unbounded |
 
 - Local VyOS access: REST handlers use `VYOS_API_KEY` from the packaged
-  `/etc/igos-cloud-proxy/cloud-env.conf` (ships `mykey`); the VyOS gateway
+  `/etc/igos-cloud-proxy/cloud-env.conf` (a fixed packaged value; security
+  finding G11); the VyOS gateway
   route requires the cloud to supply the key.
 - GUI tunnel: `PROXY_CONNECT` spawns `HttpProxySession`; responses get a
   `Set-Cookie: IGOS_CLOUD_SESSION=<RS256 JWT>`; the signing key is generated
@@ -185,7 +187,7 @@ command responses and `DISCONNECT`.
 
 | Path (cloud command) | Reaches | Cloud must supply | Runs on the device as |
 | --- | --- | --- | --- |
-| Built-in managed-device routes (`EXECUTE_REST_COMMAND`): `/api/v1.1/managed-devices/system`, `…/services/cloud-services/status`, `…/easyport/interfaces/all`, `…/cli` | Fixed `show` commands. `cli` returns `show config`, version, memory, storage and the log. | Nothing | The proxy's own key, `VYOS_API_KEY` from `cloud-env.conf` (ships as `mykey`) |
+| Built-in managed-device routes (`EXECUTE_REST_COMMAND`): `/api/v1.1/managed-devices/system`, `…/services/cloud-services/status`, `…/easyport/interfaces/all`, `…/cli` | Fixed `show` commands. `cli` returns `show config`, version, memory, storage and the log. | Nothing | The proxy's own key, `VYOS_API_KEY` from `cloud-env.conf` (a fixed packaged value, same on every unit) |
 | VyOS gateway (`EXECUTE_REST_COMMAND` to `/api/v1.1/managed-devices/vyos`) | The VyOS HTTP API: `/info`, `/retrieve`, `/show`, `/generate`, `/configure`, `/config-file`, `/reset`, `/reboot`, `/poweroff`, `/image`, `/graphql` | The API key in `body.key` on every request except `/info`; for `/graphql`, in the GraphQL variables | Whatever key the cloud sends |
 | GUI tunnel (`PROXY_CONNECT`) | Any URL the cloud puts in `proxyRequestUri`; intended to be the local GUI | Nothing beyond its device registration | A Flask session as user `PerleCLOUD` with role `administrator`; Flask then uses its own API key |
 
@@ -227,8 +229,9 @@ Notes:
   the CLI page but the terminal never connects.
 - What the cloud can do instead, non-interactively:
   - run individual op-mode or configuration commands through the VyOS gateway
-    (`/show`, `/configure`, `/graphql`, …) — needs the device's API key, and
-    PerleCLOUD must provide its own command-entry screen;
+    (`/show`, `/configure`, `/graphql`, …) — today needs the device's API key
+    (§11.2 removes that), and PerleCLOUD must provide its own command-entry
+    screen;
   - fetch the fixed tech-support bundle through
     `/api/v1.1/managed-devices/cli` (config, version, memory, storage, log) —
     no key needed.
@@ -746,12 +749,78 @@ Proposal:
 
 ## 11. Identity and secrets (interim vs. target)
 
+### 11.1 Device identity toward the cloud
+
 - **Target**: DevID mTLS per TPM-PKI §3.11; `deviceSecretUID` retired.
-- **Interim**: keep serial-based registration, but
-  - refuse to register with the shared `000-000000M00000` fallback in release
-    builds (`UNPROVISIONED`, reason `invalid_serial`);
-  - replace the packaged `VYOS_API_KEY=mykey` with a per-unit key (§13;
-    interacts with `igos-gui-user-accounting-design.md`).
+- **Interim**: keep serial-based registration, but refuse to register with
+  the shared `000-000000M00000` fallback in release builds (`UNPROVISIONED`,
+  reason `invalid_serial`).
+
+### 11.2 Router API keys — generated at boot, never shared (decided direction)
+
+Today the router HTTP API key is the same on every unit and is shipped in the
+GUI package, the cloud agent package and the default configuration (security
+findings G1, G11). Every gateway call also requires the cloud to supply it
+(§0.6). Replace this with:
+
+1. **Internal keys generated at every boot.** One random key per internal API
+   user — `igos-gui` (Flask) and `igos-cloud` (cloud agent) — created when
+   missing in `/run/igos/api-keys/<user>` (tmpfs, cleared at power-off; mode
+   `0600`, readable only by that service). Never written to `config.boot`,
+   config backups or any package. A reboot always rotates them.
+2. **The API server accepts them alongside operator keys.** It already loads
+   its keys from a runtime file (`/run/http-api-state`, written by
+   `service_https.py`) and accepts any number of keys
+   (`service https api keys id <id> key <value>` is a tag node; every entry is
+   checked). `service_https.py` merges the internal keys into the key list
+   under the reserved ids `igos-gui` and `igos-cloud`. Conflicts:
+   - `verify()` rejects operator keys whose id is reserved (`igos-` prefix);
+   - if an operator key ever has the same value as an internal key,
+     `service_https.py` regenerates the internal key (the API reports the
+     last matching id, so a duplicate would also break attribution).
+
+   Operator keys stay in the configuration and keep working; all keys have
+   full API access (no per-key scopes), which is why cloud access is limited
+   by role in the agent (§19.9). Keys are stable within a boot, so they cause
+   no extra API restarts.
+3. **Consumers read their key file at start** instead of a packaged value:
+   Flask instead of `.env` `VYOS_APIKEY`, the agent instead of
+   `cloud-env.conf` `VYOS_API_KEY`. Their systemd units order after key
+   creation and retry while the file is missing.
+4. **The cloud never holds a router key.** The agent inserts its own key into
+   every gateway request (§19.9). PerleCLOUD sends none and stores none.
+5. **Authorization by cloud role, not by key possession.** The cloud sends the
+   user's role with each request; the agent enforces what each role may call
+   and logs every call with the cloud user (§19.9).
+6. **Remove the shipped key.** Drop it from `config.boot.default.igos`, the GUI
+   `.env` and `cloud-env.conf`. An igOS migration (`src/migration-scripts/igos/`)
+   removes the shipped default key entry from existing configurations;
+   operator-added keys under `service https api keys` are kept and remain the
+   operator's concern.
+
+Why: nothing to leak from the cloud; rotation every boot costs nothing because
+the keys never leave the unit; and it removes no protection — the router
+already fully trusts an authenticated cloud session (§0.6). Applies to both
+options (§18.7).
+
+Accounting note: API calls from the GUI and the agent are attributed to key
+ids `igos-gui` / `igos-cloud`; per-user attribution is the subject of
+`igos-gui-user-accounting-design.md`.
+
+### 11.3 Alternative considered — a per-unit key shared with the cloud
+
+Generate a per-unit key and send it to the cloud over the authenticated
+command channel (new `API_CREDENTIAL` message, acknowledged; never in logs or
+the capability block). Not preferred:
+
+- Routers rarely reboot, so boot-only rotation can leave a key valid for
+  months; it would also need timed rotation (e.g. daily), a cloud-requested
+  `ROTATE_API_KEY`, and a short grace period for the old key.
+- After a reboot the cloud holds a stale key until the router reconnects and
+  sends the new one; gateway calls fail meanwhile — worst on metered links
+  that check in rarely.
+- A cloud breach exposes every router's current key until its next rotation.
+- A key is all-or-nothing; role enforcement would still be needed.
 
 ---
 
@@ -780,7 +849,9 @@ Proposal:
 7. **Backend** — can PerleCLOUD implement §10 items 1–3 (required for a good
    metered experience) and optionally 4–5?
 8. **Rename `enabled` → `enable`** with an igOS migration, or keep?
-9. **Local API key** — per-unit generated key vs a restricted API identity.
+9. **Local API key** — direction chosen (§11.2): internal keys generated at
+   boot, agent supplies its key to the gateway, authorization by cloud role.
+   Open: the per-role endpoint list (§19.9).
 10. **Dial-on-demand constraint** — adopt it (preferred, §5.4) or support
     `connect-on-demand` / `always-on` metered links via a `cloud` bearer
     lease? Hard commit error vs warning for non-compliant WWANs?
@@ -1239,9 +1310,9 @@ What each team needs from this document, and what is still open. Rows marked
    `operator`, and what each may do (GUI, gateway, tunnels). Today the device
    always grants administrator (§0.6). Option 1 passes it in `PROXY_CONNECT`
    (§18.3).
-3. **Gateway API key provisioning** (§11, §13 item 9): who creates the
-   per-device key and how the cloud obtains it. Every gateway call, including
-   reading alerts, needs it.
+3. **No API key in the cloud** (§11.2, §19.9): the agent supplies its own
+   boot-time key to the gateway; the cloud stops sending `body.key` once the
+   device advertises `GATEWAY_LOCAL_KEY`, and sends the user's role instead.
 
 ### 17.2 Cloud (PerleCLOUD) team
 
@@ -1249,6 +1320,7 @@ What each team needs from this document, and what is still open. Rows marked
 | --- | --- | --- |
 | **O1** Capability report and `UNSUPPORTED_COMMAND` | §19.1 | Drafted. To confirm: the cloud ignores unknown `messageParams` fields |
 | **O1** Optional `role` in `PROXY_CONNECT` | §18.3 | Drafted |
+| **O1** Gateway: stop sending `body.key`, send `user` with role | §11.2, §19.9 | Drafted; per-role endpoint list to agree |
 | **O1** `nextPollDelay` for metered devices | §18.2 | Drafted; choose the delay |
 | **O1** Status display | §8, §18.1 | States and reasons, including `blocked` (and `standby` in Option 2) |
 | **O1** Alert reading | §15.1–15.2, §19.8 f | Drafted; exact GraphQL query and `--raw` output schema to be fixed with the alerting implementation |
@@ -1274,6 +1346,7 @@ What each team needs from this document, and what is still open. Rows marked
 | **O1** Alarm page | §15, alerting design §8 | Read `show event-handler alerts` with `since`; keep only read/dismissed state in Flask; remove `/callback`; show delivery results |
 | **O1** Web CLI URLs | §0.6 | Replace hard-coded `ws://` / `http://` and missing port in `constants/api.ts`, `XTerm.tsx`, `ShellCLI.tsx` with relative or same-scheme URLs |
 | **O1** Web CLI authorization | §0.6 | Verify nginx `/cli/shell/ws` → ttyd bypassing Flask's administrator check, and which account the ttyd shell runs as |
+| **O1** Router API key | §11.2, §18.7 | Read the key from `/run/igos/api-keys/igos-gui` (created at every boot) instead of `.env` `VYOS_APIKEY`; wait for it at start |
 | Phase 2 readiness | §16.8 | GUI served from a cloud subdomain: relative URLs, cookie path/SameSite, Socket.IO over the tunnel, real cloud role in the session token |
 | Phase 2 readiness | §16.8 | GUI served from a cloud subdomain: relative URLs, cookie path/SameSite, Socket.IO over the tunnel, real cloud role in the session token |
 
@@ -1376,10 +1449,10 @@ alerting design is implemented. No push.
 
 | Repo | Work | Size |
 | --- | --- | --- |
-| igos-cloud-proxy | §18.1, `egress` check (§18.2), §18.3, §18.5, Appendix A | Small–medium |
-| vyos-1x | `service cloud egress` and optional `remote-access` subset (XML, `verify()`, render); `register` → SIGHUP; `show cloud status` state/reason; restart only on change; per-unit API key instead of `mykey` | Small |
-| flask-react-dev | Status widget states and reasons; connect/disconnect through config; web CLI URL fix (local use) | Small |
-| PerleCLOUD | Show device state/reason; optional `role` in `PROXY_CONNECT`; set `nextPollDelay` for metered devices; ignore the `device` block if unused; handle `UNSUPPORTED_COMMAND`; read alert history | Small |
+| igos-cloud-proxy | §18.1, `egress` check (§18.2), §18.3, §18.5, §18.7, Appendix A | Small–medium |
+| vyos-1x | `service cloud egress` and optional `remote-access` subset (XML, `verify()`, render); `register` → SIGHUP; `show cloud status` state/reason; restart only on change; boot-time internal API keys, reserved key ids, migration removing the shipped key (§18.7) | Small |
+| flask-react-dev | Status widget states and reasons; connect/disconnect through config; web CLI URL fix (local use); read the API key from `/run/igos/api-keys/igos-gui`, drop it from `.env` | Small |
+| PerleCLOUD | Show device state/reason; optional `role` in `PROXY_CONNECT`; set `nextPollDelay` for metered devices; ignore the `device` block if unused; handle `UNSUPPORTED_COMMAND`; read alert history; stop sending `body.key`, send the user's role on gateway calls (§18.7) | Small |
 
 **What Option 1 does not give:** SSH (LAN devices, router, serial ports); the
 web CLI from the cloud; VNC, RDP, GPS live view; WebSockets through the cloud;
@@ -1388,7 +1461,25 @@ store-and-forward for sleeping devices.
 
 **Carries over to Option 2 unchanged:** §18.1 (the supervisor grows into §7),
 `egress`, status state/reason, role passing, capability reporting,
-unknown-command handling, allow-list and route check, Appendix A fixes.
+unknown-command handling, allow-list and route check, internal API keys and
+gateway authorization (§18.7), Appendix A fixes.
+
+### 18.7 Router API keys (both options)
+
+Implement §11.2 in Option 1 as well — it fixes security findings G1 and G11
+and is small:
+
+- vyos-1x: boot-time internal keys for `igos-gui` and `igos-cloud`, merged into
+  the API key list by `service_https.py`; reserved ids in `verify()`; igOS
+  migration removing the shipped key entry; drop the key from
+  `config.boot.default.igos`.
+- igos-cloud-proxy: read `/run/igos/api-keys/igos-cloud`; insert it into
+  gateway requests; enforce the per-role endpoint list and log each call
+  (§19.9). In Option 1 the role arrives as an optional `user` object
+  (`id`, `name`, `role`) in the `EXECUTE_REST_COMMAND` parameters; absent →
+  `administrator` (today's effective behavior) until the cloud sends it.
+- flask-react-dev: read `/run/igos/api-keys/igos-gui` instead of `.env`.
+- PerleCLOUD: stop sending `body.key`; send the user's role.
 
 ---
 
@@ -1411,7 +1502,8 @@ first `GET_NEXT_COMMAND` after each proxy start, and again whenever it changes
   "proxyVersion": "2.0.0",
   "capabilities": [
     "EXECUTE_REST_COMMAND", "PROXY_CONNECT", "PROXY_CONNECT_ROLE",
-    "TUNNEL_OPEN", "TUNNEL_CLOSE", "DEVICE_EVENT", "EVENT_HANDLER_ALERTS"
+    "TUNNEL_OPEN", "TUNNEL_CLOSE", "DEVICE_EVENT", "EVENT_HANDLER_ALERTS",
+    "GATEWAY_LOCAL_KEY"
   ],
   "tunnel": {
     "subprotocols": ["igos-tunnel.v1"],
@@ -1711,6 +1803,55 @@ proxy (protocol 1)                     PerleCLOUD
   │────────────────────────────────────►│ never send TUNNEL_OPEN / DEVICE_EVENT,
   │                                     │ use PROXY_CONNECT and gateway only
 ```
+
+### 19.9 Gateway authorization (agent-supplied key, cloud role)
+
+Replaces "caller must supply `body.key`" (`igos-cloud-proxy`
+`docs/vyos-gateway.md`). Applies to both options (§11.2, §18.7).
+
+**Request.** `EXECUTE_REST_COMMAND` to `/api/v1.1/managed-devices/vyos` gains
+a `user` object; `body.key` is no longer sent:
+
+```json
+{
+  "restCommandUri": "/api/v1.1/managed-devices/vyos",
+  "requestMethod": "POST",
+  "taskId": "cloud-request-123",
+  "user": {"id": "u-1234", "name": "jsmith@example.com", "role": "operator"},
+  "commandBody": "{\"endpoint\":\"/show\",\"body\":{\"data\":{\"op\":\"show\",\"path\":[\"version\"]}}}"
+}
+```
+
+**Agent behavior.**
+
+1. Check `user.role` against the endpoint table below; refuse with `403`
+   (`{"error": "role not allowed"}`) otherwise.
+2. Insert its boot-time key (`/run/igos/api-keys/igos-cloud`): as `body.key`
+   for REST, as `variables.key` for GraphQL documents that declare `$key`.
+3. Log the call: cloud user, role, endpoint, operation, result status.
+
+**Per-role endpoints (proposal; §13 item 9):**
+
+| Endpoint | operator | operator+ | administrator |
+| --- | --- | --- | --- |
+| `/info`, `/retrieve`, `/show` | ✔ | ✔ | ✔ |
+| `/graphql` queries | ✔ | ✔ | ✔ |
+| `/generate`, `/reset`, `/traceroute`, `/renew` | | ✔ | ✔ |
+| `/graphql` mutations | | | ✔ |
+| `/configure`, `/configure-section`, `/config-file`, `/image`, `/container-image`, `/import-pki`, `/reboot`, `/poweroff` | | | ✔ |
+| Built-in `cli` (tech-support) route | | | ✔ |
+
+Telling GraphQL queries from mutations needs the agent to parse the operation
+type (e.g. `graphql-core`) or an allow-list of operation names — to decide.
+
+**Compatibility.**
+
+- The agent advertises `GATEWAY_LOCAL_KEY` in its capabilities (§19.1). The
+  cloud stops sending `body.key` only to devices that advertise it.
+- During transition the agent ignores any `body.key` the cloud still sends and
+  uses its own key.
+- No `user` object → treated as `administrator` (today's effective behavior)
+  until the cloud sends roles; a `service cloud` option can later require it.
 
 ---
 
