@@ -1,13 +1,17 @@
+"""Entry point for ``dial-on-demand@<wwanN>:<idle>:<connect>:<flush>.service``.
+
+Argument parsing and signal handling only; the long-running state machine
+lives in ``DemandDaemon`` (docs/igos-wwan-dial-on-demand-design.md §10).
+"""
+
 import argparse
 import asyncio
-import signal
 import logging
-import subprocess
 import re
-import vyos.utils.wwan.dial_on_demand.idle_wwan_watcher as idle_wwan_watcher
-import vyos.utils.wwan.dial_on_demand.wwan_nft_reconnect as wwan_nft_reconnect
-import vyos.utils.wwan.dial_on_demand.install_wwan_nft_rules as nft_rules
-from vyos.utils.wwan.dial_on_demand._client import open_client_with_retry
+import signal
+import sys
+
+from vyos.utils.wwan.dial_on_demand.dial_daemon import DemandDaemon
 
 logger = logging.getLogger(__name__)
 # Do NOT embed %(asctime)s here: journald already timestamps every line (the
@@ -17,100 +21,56 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO,
                     format="%(module)s: %(message)s")
 
-def cleanup(interface='wwan0'):
-    pattern = re.compile(rf"^table\s+(\S+)\s+({re.escape(interface)}+_raw_\d+)$")
-    result = subprocess.run(
-        ["nft", "list", "tables"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    for line in result.stdout.splitlines():
-        m = pattern.match(line)
-        if not m:
-            continue
-        family = m.group(1)
-        table = m.group(2)
-        subprocess.run(
-            ["nft", "delete", "table", family, table],
-            check=True
-        )
-
-async def run(interface='wwan0', timeout=30, connect_timeout=30, flush_timeout=60):
-    # Open ONE WWAN D-Bus client for the whole pipeline and hand it to every
-    # stage, instead of each stage opening and closing its own. open_client_with_
-    # retry() waits for the FSM manager (igos-wwan-manager) to claim its bus name,
-    # so the single connect also absorbs the boot race. The client is closed once
-    # here when the pipeline ends.
-    client = await open_client_with_retry(interface)
-    try:
-        # Apply the dial-on-demand connection mode ONCE on the shared client.
-        # (Each stage used to re-apply it on its own client, and every apply
-        # makes the FSM fire a RECONFIGURE that bounces a connected bearer.)
-
-        logger.info("Starting idle wwan watcher program.")
-        await idle_wwan_watcher.main(interface=interface, timeout=timeout,
-                                     client=client)
-        logger.info("Finished idle wwan watcher program.")
-        logger.info("Starting installation of nft rules.")
-        await nft_rules.generate_nft_rules(interface=interface)
-        logger.info("Finished installing nft rules.")
-        logger.info("Starting nfqueue monitor.")
-        await wwan_nft_reconnect.main(interface=interface,
-                                     connect_timeout=connect_timeout,
-                                     client=client,
-                                     flush_timeout=flush_timeout)
-        logger.info("Finished nfqueue monitor.")
-    except asyncio.CancelledError:
-        raise
-    finally:
-        await client.close()
-        logger.info("Finished service successfully!")
+_INTERFACE_RE = re.compile(r'^wwan\d+$')
 
 
-async def main(interface='wwan0', timeout=30, connect_timeout=30, loop=None,
+def parse_params(params):
+    """Parse the ``wwanN[:idle[:connect[:flush]]]`` instance string."""
+    items = params.split(':')
+    if len(items) > 4:
+        raise ValueError(f'Too many fields in instance name {params!r}')
+    interface = items[0]
+    if not _INTERFACE_RE.match(interface):
+        raise ValueError(f'Invalid WWAN interface {interface!r}')
+    idle_timeout = int(items[1]) if len(items) > 1 else 30
+    connect_timeout = int(items[2]) if len(items) > 2 else 30
+    # flush-timeout is optional so an older 3-field instance name still starts.
+    flush_timeout = int(items[3]) if len(items) > 3 else 60
+    return interface, idle_timeout, connect_timeout, flush_timeout
+
+
+async def main(interface='wwan0', timeout=30, connect_timeout=30,
                flush_timeout=60):
-    """Run the dial-on-demand pipeline and clean up nft state on stop."""
-    if loop is None:
-        loop = asyncio.get_event_loop()
-    current_task = asyncio.create_task(run(interface=interface, timeout=timeout,
-                                           connect_timeout=connect_timeout,
-                                           flush_timeout=flush_timeout))
-    def handle_sigterm():
-        logger.info("Received signal termination. Stopping service...")
-        current_task.cancel()
+    """Run the dial-on-demand daemon until SIGTERM.  Returns the exit code."""
+    daemon = DemandDaemon(interface=interface, idle_timeout=timeout,
+                          connect_timeout=connect_timeout,
+                          flush_timeout=flush_timeout)
+    loop = asyncio.get_running_loop()
 
-    loop.add_signal_handler(signal.SIGTERM, handle_sigterm)
+    def handle_signal(signum):
+        logger.info('Received %s; stopping dial-on-demand on %s',
+                    signal.Signals(signum).name, interface)
+        daemon.request_stop()
 
+    loop.add_signal_handler(signal.SIGTERM, handle_signal, signal.SIGTERM)
     try:
-        await current_task
-    except asyncio.CancelledError:
-        logger.info("Received a termination signal.")
+        return await daemon.run()
     finally:
-        # Always remove leftover nftables tables for this interface.
-        cleanup(interface=interface)
         loop.remove_signal_handler(signal.SIGTERM)
 
 
-
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(prog="nfqueue-bound-monitor", description="binds wwanX to nfqueue", epilog="Test")
-    parser.add_argument('params',help="colon separated parameter string")
+    parser = argparse.ArgumentParser(
+        prog="dial-on-demand",
+        description="WWAN dial-on-demand daemon")
+    parser.add_argument('params',
+                        help="instance string wwanN[:idle[:connect[:flush]]]")
     args = parser.parse_args()
-    params = args.params
-    items = params.split(':')
-    if len(items) > 4:
-        raise ValueError("Too many arguments for this function")
-    interface = items[0]
-    timeout = items[1] if len(items) > 1 else 30
-    connect_timeout = items[2] if len(items) > 2 else 30
-    # flush-timeout is optional so an older 3-field instance name still starts.
-    flush_timeout = items[3] if len(items) > 3 else 60
-
-    loop = asyncio.get_event_loop()
     try:
-        loop.run_until_complete(main(interface=interface, timeout=timeout,
-                                     connect_timeout=connect_timeout, loop=loop,
-                                     flush_timeout=flush_timeout))
-    finally:
-        loop.close()
+        iface, idle, connect, flush = parse_params(args.params)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    sys.exit(asyncio.run(main(interface=iface, timeout=idle,
+                              connect_timeout=connect,
+                              flush_timeout=flush)))
