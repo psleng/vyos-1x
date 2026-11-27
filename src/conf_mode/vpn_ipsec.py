@@ -25,6 +25,7 @@ from ipaddress import ip_address
 from netaddr import IPNetwork
 from netaddr import IPRange
 
+from vyos.base import DeprecationWarning
 from vyos.config import Config
 from vyos.config import config_dict_merge
 from vyos.configdep import set_dependents
@@ -316,7 +317,47 @@ def verify(ipsec):
     # need to use a pseudo-random function (PRF) with an authenticated encryption algorithm.
     # If a hash algorithm is defined then it will be mapped to an equivalent PRF
     if 'ike_group' in ipsec:
-        for _, ike_config in ipsec['ike_group'].items():
+        # T9320: IKEv1 is deprecated and will be removed in a future StrongSwan
+        # release. Collect the IKE groups actually bound to a connection so we
+        # can also warn about groups without an explicit key-exchange: those
+        # propose IKEv2 when initiating but still accept IKEv1 when acting as a
+        # responder.
+        used_ike_groups = set()
+
+        l2tp_ike_group = dict_search('l2tp.ike_group', ipsec)
+        if l2tp_ike_group:
+            used_ike_groups.add(l2tp_ike_group)
+
+        for profile_conf in (ipsec.get('profile') or {}).values():
+            if 'ike_group' in profile_conf:
+                used_ike_groups.add(profile_conf['ike_group'])
+
+        for ra_conf in (dict_search('remote_access.connection', ipsec) or {}).values():
+            if 'ike_group' in ra_conf:
+                used_ike_groups.add(ra_conf['ike_group'])
+
+        for peer_conf in (dict_search('site_to_site.peer', ipsec) or {}).values():
+            if 'ike_group' in peer_conf:
+                used_ike_groups.add(peer_conf['ike_group'])
+
+        for ike_name, ike_config in ipsec['ike_group'].items():
+            # T9320: warn about the upcoming IKEv1 removal in StrongSwan.
+            key_exchange = ike_config.get('key_exchange')
+            if key_exchange == 'ikev1':
+                # Explicit IKEv1: the connection will stop working once
+                # StrongSwan removes IKEv1 support.
+                DeprecationWarning(
+                    f'IKE group "{ike_name}" uses deprecated IKEv1, which will be '
+                    'removed in the future. Please migrate this configuration to IKEv2.'
+                )
+            elif key_exchange is None and ike_name in used_ike_groups:
+                # T9320: without an explicit key-exchange the group still
+                # accepts incoming IKEv1 connections when acting as a responder.
+                DeprecationWarning(
+                    f'IKE group "{ike_name}" has no key-exchange set and will still '
+                    'accept incoming deprecated IKEv1 connections. IKEv1 will be '
+                    'removed in the future; please set key-exchange to IKEv2.'
+                )
             for proposal, proposal_config in ike_config.get('proposal', {}).items():
                 if 'encryption' in proposal_config and 'prf' not in proposal_config:
                     # list of hash algorithms that cannot be mapped to an equivalent PRF
@@ -326,7 +367,8 @@ def verify(ipsec):
                             f"A PRF algorithm is mandatory in IKE proposal {proposal}"
                         )
 
-    # FIPS 140-3: fail closed on explicitly-set non-approved IKE/ESP crypto.
+    # FIPS 140-3: fail closed on explicitly-set non-approved IKE/ESP crypto and
+    # remote-access client authentication.
     if 'fips' in ipsec:
         if 'fips_reject_radius' in ipsec:
             fips.reject_feature('RADIUS (IPsec EAP)')
@@ -360,6 +402,23 @@ def verify(ipsec):
             messages = fips.reject_unapproved(esp_config, esp_pfs_map)
             if messages:
                 raise ConfigError(f'ESP group "{name}": ' + '; '.join(messages))
+
+        # get_config() merges defaults, so an unset client-mode is checked as
+        # its eap-mschapv2 default too.
+        client_mode_map = {
+            'client_mode': 'vpn ipsec remote-access connection authentication client-mode',
+        }
+        connections = dict_search('remote_access.connection', ipsec) or {}
+        for name, ra_conf in connections.items():
+            auth = ra_conf.get('authentication', {})
+            messages = fips.reject_unapproved(auth, client_mode_map)
+            if messages:
+                hint = ''
+                if auth.get('client_mode') == 'eap-mschapv2':
+                    hint = ' (client-mode defaults to eap-mschapv2 when unset)'
+                raise ConfigError(
+                    f'Remote-access connection "{name}": ' + '; '.join(messages) + hint
+                )
 
     if 'l2tp' in ipsec:
         if 'esp_group' in ipsec['l2tp']:

@@ -75,6 +75,7 @@ extend type Query {
 mutation_template  = """
 input {{ schema_name }}Input {
     key: String
+    in_background: Boolean
     {%- for field_entry in schema_fields %}
     {{ field_entry }}
     {%- endfor %}
@@ -87,6 +88,7 @@ type {{ schema_name }} {
 type {{ schema_name }}Result {
     data: {{ schema_name }}
     op_mode_error: OpModeError
+    operation: BackgroundOperation
     success: Boolean!
     errors: [String]
 }

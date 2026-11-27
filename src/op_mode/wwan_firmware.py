@@ -16,7 +16,6 @@
 
 import fcntl
 import re
-import shlex
 import shutil
 import subprocess
 import sys
@@ -27,6 +26,8 @@ import zipfile
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
+
+from tabulate import tabulate
 
 import vyos.opmode
 from vyos.utils.io import ask_yes_no
@@ -159,7 +160,6 @@ def _get_usb_device_path(interface: str) -> Path:
     )
     if usb_device is None:
         raise vyos.opmode.DataUnavailable(f'Unable to find the physical USB device for {interface}')
-    print(f'Physical USB device for {interface}: {usb_device}')
     return usb_device
 
 
@@ -250,11 +250,8 @@ def _get_tfl_diagnostic_port(firmware_path: Path, usb_device: Path) -> Path:
     if not modem_ports:
         raise vyos.opmode.DataUnavailable(f'No serial ports were found below {usb_device}')
 
-    print(f'TFL modem serial-port group: {", ".join(str(port) for port in modem_ports)}')
-
     diagnostic_port = max(modem_ports, key=lambda port: int(re.search(r'\d+$', port.name).group()))
 
-    print('Validating TFL firmware package and modem ports...')
     # TFL requires --force whenever --port is explicit, including dry runs.
     # Publisher trust and modem model/revision were checked before this point.
     return_code, output = rc_cmd([
@@ -263,30 +260,7 @@ def _get_tfl_diagnostic_port(firmware_path: Path, usb_device: Path) -> Path:
     if return_code:
         raise vyos.opmode.IncorrectValue(output or 'TFL firmware compatibility validation failed')
 
-    print('TFL firmware package validation succeeded.')
     return diagnostic_port
-
-
-def _display_firmware_details(
-    interface: str, diagnostic_port: Path | None, firmware_manifest: dict[str, object], modem_identity: dict[str, str]
-) -> None:
-    """Display validated firmware metadata and the selected modem identity."""
-    if diagnostic_port is not None:
-        print(f'Diagnostic port selected: {diagnostic_port}')
-
-    print('\nFirmware file details:')
-    for field, value in firmware_manifest.items():
-        if field == 'payload_sha256':
-            continue
-        label = field.replace('_', ' ').capitalize()
-        print(f'{label:<24}: {value}')
-
-    print(f'\nCurrent {interface} details:')
-    print(f'{"Interface":<24}: {interface}')
-    print(f'{"Model":<24}: {modem_identity["model"]}')
-    print(f'{"Firmware revision":<24}: {modem_identity["firmware_revision"]}')
-    print(f'{"H/W revision":<24}: {modem_identity["hardware_revision"]}')
-    print()
 
 
 def _catalog_url(config=None) -> str:
@@ -338,7 +312,6 @@ def _load_firmware_catalog(refresh: bool | None = True) -> list[dict[str, object
         else:
             prefix = 'Unable to load firmware catalog'
         raise vyos.opmode.DataUnavailable(f'{prefix}: {error}') from error
-
 
 def _get_vendor_name(value: str) -> str:
     """Return a package vendor slug for a manufacturer name."""
@@ -448,8 +421,7 @@ def _get_compatible_firmware(
 
 
 def _ensure_qcserial_kernel_module_loaded() -> None:
-    """Load qcserial when necessary and print its lsmod entry."""
-    print('Checking for qcserial kernel module...')
+    """Load qcserial when necessary."""
     for attempt in range(2):
         return_code, output = rc_cmd(['lsmod'])
         if return_code:
@@ -457,11 +429,9 @@ def _ensure_qcserial_kernel_module_loaded() -> None:
 
         qcserial_lines = [line for line in output.splitlines() if line.split() and line.split()[0] == 'qcserial']
         if qcserial_lines:
-            print(f'qcserial: {qcserial_lines[0]}')
             return
 
         if attempt == 0:
-            print('Loading qcserial kernel module.')
             return_code, output = rc_cmd(['modprobe', 'qcserial'])
             if return_code:
                 raise vyos.opmode.DataUnavailable(output or 'Unable to load qcserial kernel module')
@@ -519,10 +489,6 @@ def _run_firmware_installer(
     else:
         raise vyos.opmode.IncorrectValue(f'Unsupported WWAN firmware type: {firmware_type}')
 
-    print(f'Using {firmware_type.upper()} tool to install WWAN firmware.')
-
-    print(f'Executing firmware command: {shlex.join(command)}')
-
     try:
         if firmware_type == 'uxfp':
             return_code, output = _run_uxfp_installer(command, on_started=on_started)
@@ -570,8 +536,6 @@ def _install_firmware_payload(firmware: dict[str, object], interface: str, no_pr
     """Run the selected package's installer against the selected modem."""
     payload = firmware['payload']
     installer = str(firmware['installer'])
-    manifest = firmware['manifest']
-    modem = firmware['modem']
 
     _select_wwan_interface(interface)
     usb_device = _get_usb_device_path(interface)
@@ -581,8 +545,6 @@ def _install_firmware_payload(firmware: dict[str, object], interface: str, no_pr
         raise vyos.opmode.DataUnavailable(f'{installer.upper()} firmware update tool is not installed')
 
     with _prepare_firmware_payload(payload, installer) as prepared_payload:
-        # Review metadata without touching diagnostic ports or stopping services.
-        _display_firmware_details(interface, None, manifest, modem)
         if firmware.get('unsigned'):
             print('WARNING: unsigned firmware; publisher authenticity is not verified.')
         print('Updating firmware disconnects ALL managed cellular interfaces.')
@@ -604,7 +566,6 @@ def _install_firmware_payload(firmware: dict[str, object], interface: str, no_pr
             # Validation may have changed USB composition. Resolve the captured
             # modem again immediately before launching the flashing process.
             diagnostic_port = _select_diagnostic_port(installer, prepared_payload, usb_identity)
-            print(f'Diagnostic port selected: {diagnostic_port}')
             _run_firmware_installer(
                 installer, prepared_payload, diagnostic_port, on_started=mark_installer_started
             )
@@ -635,6 +596,13 @@ def _running_version(compatible):
         if release['telit_version'] == parts[0]
     ]
     return matches[0] if len(matches) == 1 else None
+
+
+def _resolve_igos_version(compatible: dict, version: str) -> str:
+    """Validate the iGOS release label supplied by the CLI."""
+    if version not in compatible['releases']:
+        raise vyos.opmode.IncorrectValue('Unknown iGOS firmware version; use command completion for available releases')
+    return version
 
 
 def show_firmware(
@@ -684,7 +652,7 @@ def show_firmware(
             'model': modem['model'],
             'hardware_revision': modem['hardware_revision'],
             'firmware_revision': modem['firmware_revision'],
-            'running_version': running_version,
+            'running_version': modem['firmware_revision'],
             'versions': firmware_versions,
         }
 
@@ -692,13 +660,14 @@ def show_firmware(
         print('No compatible firmware versions are listed for this modem.')
         return
 
-    print(f'{"Version":<10}{"Telit Firmware":<20}{"Released":<14}{"Cached":<10}Running')
-    print(f'{"-" * 7:<10}{"-" * 14:<20}{"-" * 10:<14}{"-" * 6:<10}{"-" * 7}')
+    headers = ['Version', 'Telit Version', 'Released', 'Cached', 'Running']
+    rows = []
     for firmware in firmware_versions:
         cached = 'Yes' if firmware['downloaded'] else 'No'
         running = 'Yes' if firmware['running'] else 'No'
         released = firmware['release_date'] or '-'
-        print(f'{firmware["version"]:<10}{firmware["telit_version"]:<20}{released:<14}{cached:<10}{running}')
+        rows.append([firmware['version'], firmware['telit_version'], released, cached, running])
+    print(tabulate(rows, headers, disable_numparse=True))
 
 
 
@@ -707,10 +676,10 @@ def delete_firmware(interface: str, version: str, no_prompt: bool = False) -> No
     try:
         with _firmware_update_lock():
             compatible = _get_compatible_firmware(interface, refresh_map=False)
-            if version not in compatible['releases']:
-                raise vyos.opmode.IncorrectValue(f'Unknown firmware version {version}')
+            label = _resolve_igos_version(compatible, version)
             cache = _get_archive_cache()
-            release = compatible['releases'][version]
+            release = compatible['releases'][label]
+            version = release['telit_version']
             digest = release['archive_sha256']
             filename = archive_cache_name(release)
             if not cache.contains(digest, filename):
@@ -723,31 +692,28 @@ def delete_firmware(interface: str, version: str, no_prompt: bool = False) -> No
         raise vyos.opmode.DataUnavailable(f'Unable to delete firmware cache: {error}') from error
 
 
-def set_firmware(version: str, interface: str, no_prompt: bool = False, force: bool = False) -> None:
+def set_firmware(version: str, interface: str, no_prompt: bool = False) -> None:
     """Download one cataloged archive, validate, flash, and remove transient files."""
     try:
         with _firmware_update_lock():
             compatible = _get_compatible_firmware(interface, show_progress=True)
-            if version == 'latest':
-                version = compatible['versions'][0]
-            if version not in compatible['releases']:
-                raise vyos.opmode.IncorrectValue(f'Firmware {version} is not available for {interface}')
-            release = {**compatible['releases'][version], 'manufacturer': compatible['manufacturer']}
+            label = compatible['versions'][0] if version == 'latest' else _resolve_igos_version(compatible, version)
+            release = {**compatible['releases'][label], 'manufacturer': compatible['manufacturer']}
+            version = release['telit_version']
             running = _running_version(compatible)
-            if running == version and not force:
+            if running == label:
                 print(f'Firmware {version} is already installed.')
-                return
-            if running == version and force:
-                print(f"Reinstalling firmware {version} (--force).")
+                if not ask_yes_no('Would you like to force install the same version?', default=False):
+                    return
             if running is None:
                 print('Running firmware is not in the catalog; version ordering is unknown.')
-            elif version_key(version) < version_key(running):
-                # Ask before downloading anything; without a prompt, only an
-                # explicit force downgrades
+            elif version_key(label) < version_key(running):
+                running = compatible['releases'][running]['telit_version']
+                # Require confirmation before downloading an older release.
                 print(f'WARNING: firmware {version} is older than the running {running}.')
-                if no_prompt and not force:
+                if no_prompt:
                     raise vyos.opmode.IncorrectValue(
-                        f'Not downgrading firmware from {running} to {version} without confirmation; use force'
+                        f'Not downgrading firmware from {running} to {version} without confirmation; retry without now'
                     )
                 if not no_prompt and not ask_yes_no(f'Download and install older firmware {version}?', default=False):
                     print('Firmware update cancelled.')
@@ -768,23 +734,27 @@ def set_firmware(version: str, interface: str, no_prompt: bool = False, force: b
         raise vyos.opmode.DataUnavailable(f'Unable to update WWAN firmware: {error}') from error
 
 
-def update_archive(interface: str, archive: str, no_prompt: bool = False, force_unsigned: bool = False, force: bool = False) -> None:
+def update_archive(interface: str, archive: str, no_prompt: bool = False) -> None:
     """Authenticate a standalone archive before extraction and compatibility checks."""
-    version = get_version_data()
-    if force_unsigned and not (
-        version.get('build_type') == 'development' and version.get('wwan_firmware_allow_unsigned') is True
-    ):
-        raise vyos.opmode.IncorrectValue('force-unsigned is permitted only on explicitly enabled development images')
-    if force_unsigned and (urlsplit(archive).scheme or not Path(archive).is_file()):
-        raise vyos.opmode.IncorrectValue('force-unsigned requires a local archive file')
+    force_unsigned = False
+    local = Path(archive)
+    signature = Path(f'{archive}.sig')
+    if not urlsplit(archive).scheme and local.is_file() and not signature.exists() and not signature.is_symlink():
+        version = get_version_data()
+        if version.get('build_type') == 'development' and version.get('wwan_firmware_allow_unsigned') is True:
+            print('WARNING: unsigned firmware; publisher authenticity is not verified.')
+            if not ask_yes_no('Would you like to install this unsigned firmware archive?', default=False):
+                return
+            force_unsigned = True
     try:
         with _firmware_update_lock():
             modem = _get_modem_identity(interface)
             with prepare_standalone(FIRMWARE_ROOT, modem, archive, force_unsigned=force_unsigned) as firmware:
                 manifest = firmware['manifest']
-                if not force and _running_version({'modem': modem, 'releases': {'archive': manifest}}) is not None:
+                if _running_version({'modem': modem, 'releases': {'archive': manifest}}) is not None:
                     print(f"Firmware {manifest['telit_version']} is already installed.")
-                    return
+                    if not ask_yes_no('Would you like to force install the same version?', default=False):
+                        return
                 print('Standalone archive: release ordering is unknown without a catalog.')
                 _install_firmware_payload(firmware, interface, no_prompt=no_prompt)
     except (OSError, ValueError, KeyError, TypeError, tarfile.TarError, zipfile.BadZipFile) as error:
@@ -837,7 +807,8 @@ def execute_check_firmware(notify: bool = False):
                 current = _running_version(compatible)
                 # Unknown native firmware cannot be ordered safely.
                 if current is not None and version_key(latest) > version_key(current):
-                    notices.append((interface, current, latest))
+                    notices.append((interface, compatible['releases'][current]['telit_version'],
+                                    compatible['releases'][latest]['telit_version'], latest))
             except (OSError, ValueError, vyos.opmode.Error) as error:
                 print(f'Skipping {interface}: {error}')
                 errors.append(f'{interface}: {error}')
@@ -846,8 +817,8 @@ def execute_check_firmware(notify: bool = False):
     write_status(CELLULAR_FIRMWARE_STATUS, url, error='; '.join(errors) or None)
     plain = '\n'.join(
         f'{interface}: firmware {latest} available (running {current}). '
-        f'Run: update firmware wwan {interface} {latest}'
-        for interface, current, latest in notices
+        f'Run: update firmware wwan {interface} {label}'
+        for interface, current, latest, label in notices
     )
     if not notify:
         print(plain or 'No newer mapped cellular firmware found.')
@@ -866,7 +837,7 @@ def execute_check_firmware(notify: bool = False):
         f'---\n'
         f'Current cellular firmware ({interface}): {current}\n'
         f'Cellular firmware update available: \033[1;34m{latest}\033[0m\n'
-        for interface, current, latest in notices
+        for interface, current, latest, label in notices
     ) + '---\n'
     previous = motd.read_text() if motd.exists() else ''
     motd.parent.mkdir(parents=True, exist_ok=True)
@@ -883,7 +854,7 @@ def execute_check_firmware(notify: bool = False):
         # plain text, like the image update broadcast
         broadcast = ''.join(
             f'Cellular firmware update available ({interface}): {latest} (running {current})\n'
-            for interface, current, latest in notices
+            for interface, current, latest, label in notices
         )
         subprocess.run(['wall', '-n'], input=broadcast, text=True, check=False)
 

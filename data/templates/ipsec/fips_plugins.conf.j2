@@ -35,6 +35,8 @@ drbg { load = no }
 random { load = no }
 fips-prf { load = no }
 af-alg { load = no }
+# strongSwan 6 native ML-KEM (VyOS builds it with --enable-ml); ignored on 5.9.
+ml { load = no }
 
 openssl {
     load = yes

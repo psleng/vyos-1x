@@ -15,6 +15,7 @@
 
 import time
 import functools
+import threading
 from collections import deque
 from enum import Enum
 from threading import Lock
@@ -50,6 +51,7 @@ class BackgroundOpRecord(BaseModel):
     """Metadata and outcome for a single background operation"""
 
     op_id: StrictStr
+    name: Optional[StrictStr] = None
     created_at: StrictInt
     started_at: Optional[StrictInt] = None
     finished_at: Optional[StrictInt] = None
@@ -64,12 +66,27 @@ class BackgroundOpError(Exception):
     pass
 
 
+class BackgroundOpFailed(Exception):
+    """Raised by an operation to fail with a structured result.
+
+    The record gets status `failed`, `error` = the message, and `result` = the
+    given result, so a client polling the operation sees the same response it
+    would have received synchronously.
+    """
+
+    def __init__(self, message: str, result: Any = None):
+        super().__init__(message)
+        self.result = result
+
+
 class BackgroundOpManager:
     """
-    In-memory FIFO operation queue.
+    In-memory operation registry.
 
-    Uses BackgroundTasks to schedule a `drain()` call after the response,
-    so `enqueue()` is fast and non-blocking for the client.
+    `enqueue()` runs operations one at a time in FIFO order, using
+    BackgroundTasks to schedule a `drain()` call after the response.
+    `start()` runs each operation at once in its own thread.
+    Both are fast and non-blocking for the client.
     """
 
     DEFAULT_MAX_QUEUE_SIZE = 128
@@ -121,12 +138,77 @@ class BackgroundOpManager:
                 self._drain_scheduled = True
 
             # Best-effort pruning: keep history bounded by dropping oldest completed records
-            if len(self._jobs) > self._max_queue_size:
-                oldest = min(self._jobs.values(), key=lambda record: record.created_at)
-                if oldest.status.is_completed:
-                    del self._jobs[oldest.op_id]
+            self._prune()
 
         return record
+
+    def start(self, func: Callable, name: Optional[str] = None) -> BackgroundOpRecord:
+        """Run `func()` now in its own thread and return its record.
+
+        Unlike `enqueue()`, operations do not wait for each other; callers
+        serialize where needed (e.g. with the API config lock).
+        """
+
+        assert callable(func), '`func` argument should be function or lambda'
+
+        with self._mx:
+            active = sum(
+                1 for record in self._jobs.values() if not record.status.is_completed
+            )
+            if active >= self._max_queue_size:
+                raise BackgroundOpError(
+                    f'Too many background operations in progress ({self._max_queue_size})'
+                )
+
+            op_id = str(uuid4())
+            record = BackgroundOpRecord(op_id=op_id, name=name, created_at=_ts())
+            self._jobs[op_id] = record
+            self._prune()
+
+        threading.Thread(
+            target=self._execute,
+            args=(op_id, func),
+            name=f'background-op-{op_id[:8]}',
+            daemon=True,
+        ).start()
+
+        return record.copy(deep=True)
+
+    def _prune(self):
+        """Drop the oldest completed record while history exceeds the limit"""
+
+        if len(self._jobs) > self._max_queue_size:
+            oldest = min(self._jobs.values(), key=lambda record: record.created_at)
+            if oldest.status.is_completed:
+                del self._jobs[oldest.op_id]
+
+    def _execute(self, op_id: str, func: Callable):
+        """Run one operation and record its outcome"""
+
+        with self._mx:
+            record = self._jobs[op_id]
+            record.status = BackgroundOpStatus.running
+            record.started_at = _ts()
+
+        # execute outside the lock to avoid blocking enqueues/status reads
+        result = error = status = None
+        try:
+            result = func()
+        except BackgroundOpFailed as e:
+            status = BackgroundOpStatus.failed
+            error = str(e)
+            result = e.result
+        except Exception as e:  # noqa: BLE001
+            status = BackgroundOpStatus.failed
+            error = str(e)
+        else:
+            status = BackgroundOpStatus.succeeded
+
+        with self._mx:
+            record.result = result
+            record.error = error
+            record.status = status
+            record.finished_at = _ts()
 
     def drain(self):
         """Run queued operations sequentially until the queue is empty"""
@@ -139,27 +221,9 @@ class BackgroundOpManager:
                     return
 
                 op_id = self._queue.popleft()
-                record = self._jobs[op_id]
                 func = self._workers.pop(op_id)
 
-                record.status = BackgroundOpStatus.running
-                record.started_at = _ts()
-
-            # execute outside the lock to avoid blocking enqueues/status reads
-            result = error = status = None
-            try:
-                result = func()
-            except Exception as e:  # noqa: BLE001
-                status = BackgroundOpStatus.failed
-                error = str(e)
-            else:
-                status = BackgroundOpStatus.succeeded
-
-            with self._mx:
-                record.result = result
-                record.error = error
-                record.status = status
-                record.finished_at = _ts()
+            self._execute(op_id, func)
 
     def get_record(self, op_id: str) -> BackgroundOpRecord | None:
         """Return a deep copy of a single record"""

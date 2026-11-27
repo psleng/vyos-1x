@@ -321,14 +321,14 @@ Depends:
   nfct,
   nftables (>= 0.9.3),
 # For "vpn ipsec"
-  strongswan (>= 5.9),
-  strongswan-swanctl (>= 5.9),
-  charon-systemd,
-  libcharon-extra-plugins (>=5.9),
-  libcharon-extauth-plugins (>=5.9),
-  libstrongswan-extra-plugins (>=5.9),
-  libstrongswan-standard-plugins (>=5.9),
-  python3-vici (>= 5.7.2),
+  strongswan (>= 6.0.6),
+  strongswan-swanctl (>= 6.0.6),
+  charon-systemd (>= 6.0.6),
+  libcharon-extra-plugins (>= 6.0.6),
+  libcharon-extauth-plugins (>= 6.0.6),
+  libstrongswan-extra-plugins (>= 6.0.6),
+  libstrongswan-standard-plugins (>= 6.0.6),
+  python3-vici (>= 6.0.6),
 # End "vpn ipsec"
 # For "nat64"
   jool,

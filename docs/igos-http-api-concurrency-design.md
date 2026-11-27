@@ -1,6 +1,7 @@
 # igOS HTTP API Concurrency & GUI Lock-out — Design / Analysis
 
-Status: **Analysis complete; fixes proposed, not yet implemented**
+Status: **Analysis complete; fixes A, B, C, D (GraphQL op-mode mutations) and
+E.1/E.3 implemented; remaining items in §7 and the GUI follow-ups in §5.2**
 (analysis 2026-11-09; revised 2026-11-16 after a second code review — see
 "Revision notes" at the end)
 
@@ -477,11 +478,54 @@ Remaining:
    status, retry) are covered by unit tests and local checks only; the
    reference unit's image predates the merged firmware code.
 
-**D. Long-running ops → background.** Route genuinely long operations through the
-existing `BackgroundOpManager` (`background.py`) — enqueue + poll — instead of
-blocking a request. Not yet done: `BackgroundOpManager` is REST-only, so this
-needs a GraphQL "start job → id → poll" pattern plus GUI changes. Needed for
-image installs (E.2) and firmware flashes (§5.1 C.2 item 4).
+**D. Long-running ops → background.** *(Implemented for GraphQL op-mode
+mutations, 2026-11-25.)* Genuinely long operations can run as background jobs —
+start, get an ID, poll — instead of blocking a request. REST already had this
+for configure (`/configure?in_background=true` +
+`/retrieve/background-operations`); GraphQL now has the same pattern:
+
+- Every generated **op-mode mutation** (in-tree and Perle, since both go through
+  `schema_from_op_mode.py`) accepts `in_background: Boolean` in its input and
+  returns an `operation: BackgroundOperation` field. With `in_background: true`
+  the mutation returns at once with `success: true` and the operation record
+  (`op_id`, `name`, `status`, timestamps); `data.result` is empty.
+  Timestamps (`created_at`, `started_at`, `finished_at`) are Unix seconds typed
+  `Float`, not `Int`: GraphQL `Int` is 32-bit and would fail from 2038.
+- Poll with the new `BackgroundOperations(data: {key, op_id})` query (omit
+  `op_id` to list all). `status` (enum `BackgroundOperationStatus`) is
+  `queued` → `running` → `succeeded` or `failed` — the same strings as REST.
+  `result` holds the mutation's normal synchronous response
+  (`success`, `errors`, `op_mode_error`, `data.result`), so a client handles
+  both the same way; on failure `error` has the message.
+- Without `in_background` (or `false`) a mutation behaves exactly as before.
+  The flag is always removed before the op-mode function is called.
+- Same auth as other operations (API key or token), checked when the job is
+  started and on every poll.
+- Separate manager from REST (`graphql/graphql/background_operations.py`), so a
+  long GraphQL job never delays a REST `in_background` configure. Each job runs
+  in its own thread (`BackgroundOpManager.start()`); REST keeps its FIFO
+  (`enqueue()`/`drain()`, unchanged behavior). Jobs that use the config lock
+  still serialize on it; exempt ones (`SystemImage`, `WwanFirmware`) do not.
+  At most 128 jobs may be in progress; more are rejected with an error.
+- Records gained an optional `name` (the mutation name). REST
+  `/retrieve/background-operations` records therefore now include
+  `"name": null` — additive; the REST smoketest reads fields with `.get()` and
+  is unaffected.
+- Records are in memory: an API restart loses them and kills running jobs, as
+  for REST background ops.
+- Tests: `src/tests/test_graphql_background.py` (real Ariadne schema built
+  from the generator template; skipped where Ariadne/FastAPI are missing).
+- **Not covered:** config-session and composite mutations (`LoadConfigFile`,
+  `SaveConfigFile`, …) — their generators were not changed. Not yet tested on
+  the reference unit; the GraphQL schema is regenerated at package install.
+
+GUI use (Perle repo, optional): for an image install, call
+`AddSystemImagePerleImageMutation(data: {key, …, in_background: true})`, keep
+`operation.op_id`, and poll `BackgroundOperations` from the Flask job — no
+single HTTP request then spans the install, which removes the nginx 600 s
+limit (E.2) for that path. A firmware flash started this way still runs inside
+the API process (§5.1 C.2 item 4): it no longer blocks a request, but an API
+restart still kills it.
 
 **E. Image download reliability (reported 2026-11-17).** A user reported that a
 GUI system image (ISO) download failed. Phase 1/2 do **not** fix this: they
@@ -621,8 +665,10 @@ Fixed:
   than deleted; SIGHUP/SIGTERM still take the Ctrl+C path.
 - Cellular firmware, same principle: a downgrade now asks before downloading
   (it used to download first and only confirm at install time, and `now`
-  downgraded without asking); `now` refuses a downgrade unless `force` is also
-  given. Its transient download directory was already removed on errors and
+  downgraded without asking). The downgrade question defaults to No (`[y/N]`);
+  `now` refuses a downgrade and directs the operator to retry without `now`.
+  Same-version reinstalls and eligible local unsigned archives also require
+  explicit default-No answers, even with `now`. Its transient download directory was already removed on errors and
   Ctrl+C; SIGHUP/SIGTERM now take that path too — a killed run left the
   directory behind, which then blocked retrying that version
   (`work.mkdir(exist_ok=False)`).
@@ -831,10 +877,11 @@ Paths under `src/services/api/` unless stated. Line numbers re-verified
   `proceed_without_signature` default; decide build-input (TOML) integrity
   controls.
 - **Image download reliability** (§5.1 E): resume/retry done (E.1, ISO and
-  cellular firmware). Still to decide: the E.2 stop-gap (raise the API
-  location's `proxy_read_timeout`, or GUI → unix socket) until fix D — resume
-  makes slow downloads succeed but they can still exceed nginx's 600 s on the
-  GUI path.
+  cellular firmware). The proper fix for E.2, GraphQL background jobs (fix D),
+  is now in vyos-1x; the GUI still has to adopt it. Until it does, decide
+  whether to apply the stop-gap (raise the API location's
+  `proxy_read_timeout`, or GUI → unix socket) — resume makes slow downloads
+  succeed but they can still exceed nginx's 600 s on the GUI path.
 - ~~**Deferred HTTPS commit hand-off**~~ — **decided 2026-11-16:** acquire the
   lock in the background task only (§5.1 A); the short exposure window is
   accepted.
@@ -957,3 +1004,10 @@ unit with a real archive.
 and how it is authenticated; follow-ups to sign the image update listing,
 refuse unsigned ISOs without a prompt, and address build-input (TOML)
 integrity.
+
+**2026-11-25 (background jobs)** — fix D implemented for GraphQL op-mode
+mutations: `in_background: true` on any generated op-mode mutation starts it
+as a background job and returns an `operation` record; poll with the new
+`BackgroundOperations` query. Separate manager from REST, one thread per job;
+REST background behavior unchanged. Unit-tested locally; not yet tested on the
+reference unit.

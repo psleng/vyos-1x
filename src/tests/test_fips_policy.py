@@ -45,6 +45,8 @@ GRAMMAR_SOURCES = {
         'interface-definitions/include/vpn-ipsec-hash.xml.i', 'hash'),
     'vpn ipsec esp-group pfs': (
         'interface-definitions/vpn_ipsec.xml.in', 'pfs'),
+    'vpn ipsec remote-access connection authentication client-mode': (
+        'interface-definitions/vpn_ipsec.xml.in', 'client-mode'),
     'interfaces openvpn encryption cipher': (
         'interface-definitions/interfaces_openvpn.xml.in', 'cipher'),
     'interfaces openvpn encryption data-ciphers': (
@@ -171,6 +173,17 @@ class TestFipsPolicy(TestCase):
     def test_reject_unapproved_ignores_unset(self):
         self.assertEqual(
             fips.reject_unapproved({}, {'cipher': 'service ssh cipher'}), [])
+
+    def test_ipsec_client_mode_rejects_mschapv2(self):
+        key_to_leaf = {
+            'client_mode': 'vpn ipsec remote-access connection authentication client-mode',
+        }
+        messages = fips.reject_unapproved({'client_mode': 'eap-mschapv2'}, key_to_leaf)
+        self.assertEqual(len(messages), 1)
+        self.assertIn('eap-mschapv2', messages[0])
+        for mode in ('x509', 'eap-tls'):
+            self.assertEqual(
+                fips.reject_unapproved({'client_mode': mode}, key_to_leaf), [])
 
     def test_apply_fips_defaults_fills_only_when_absent(self):
         policy = {

@@ -229,6 +229,14 @@ approved = [
     "dh-group19", "dh-group20", "dh-group21",
 ]
 
+# Remote-access client authentication. eap-mschapv2 (the grammar default) is
+# built on MD4/DES and derives its EAP key from them, so it has no approved
+# form. eap-radius is left out while classic RADIUS is rejected under FIPS (no
+# RadSec). No `default`: an unset leaf falls through to the non-approved
+# eap-mschapv2, which verify() rejects so the operator picks a method explicitly.
+[leaf."vpn ipsec remote-access connection authentication client-mode"]
+approved = ["x509", "eap-tls"]
+
 # ---------------------------------------------------------------------------
 # OpenVPN (OpenSSL-backed). Under FIPS the config renders `providers fips base`
 # so the validated module refuses non-approved algorithms at runtime; these

@@ -1,0 +1,36 @@
+enum BackgroundOperationStatus {
+    queued
+    running
+    succeeded
+    failed
+}
+
+type BackgroundOperation {
+    op_id: String!
+    name: String
+    status: BackgroundOperationStatus!
+    created_at: Float!
+    started_at: Float
+    finished_at: Float
+    result: Generic
+    error: String
+}
+
+input BackgroundOperationsInput {
+    key: String
+    op_id: String
+}
+
+type BackgroundOperations {
+    operations: [BackgroundOperation]
+}
+
+type BackgroundOperationsResult {
+    data: BackgroundOperations
+    success: Boolean!
+    errors: [String]
+}
+
+extend type Query {
+    BackgroundOperations(data: BackgroundOperationsInput) : BackgroundOperationsResult
+}

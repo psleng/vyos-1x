@@ -592,3 +592,98 @@ class TestRoamingNetworkName(IsolatedAsyncioTestCase):
         with patch.object(state_machine.shutil, 'which', return_value='/usr/bin/qmicli'), exec_patch:
             self.assertEqual(
                 await fsm._qmi_get_serving_network_name(self.MODEM_PROPS, '302720'), 'Rogers')
+
+
+class TestSimScopedStateOnSlotChange(TestCase):
+    """Per-SIM state must not carry over to the other SIM after a slot change."""
+
+    def _fsm(self, slot=1):
+        fsm = ModemStateMachine.__new__(ModemStateMachine)
+        fsm.interface_number = 0
+        fsm.sim_slot_info_cache = {}
+        fsm._clear_persisted_apn = Mock()
+        fsm.current_active_sim = slot
+        fsm.connected_apn = {'name': 'telstra.internet'}
+        fsm.requested_apn = 'telstra.internet'
+        fsm.negotiated_apn = 'telstra.internet'
+        return fsm
+
+    def test_switch_clears_apns(self):
+        fsm = self._fsm()
+        fsm.current_active_sim = 2
+        self.assertIsNone(fsm.connected_apn)
+        self.assertEqual((fsm.requested_apn, fsm.negotiated_apn), ('', ''))
+        fsm._clear_persisted_apn.assert_called_once()
+
+    def test_first_slot_assignment_and_same_slot_keep_apns(self):
+        fsm = ModemStateMachine.__new__(ModemStateMachine)
+        fsm._clear_persisted_apn = Mock()
+        fsm.current_active_sim = None
+        fsm.connected_apn = {'name': 'restored'}
+        fsm.current_active_sim = 1
+        fsm.current_active_sim = 1
+        self.assertEqual(fsm.connected_apn, {'name': 'restored'})
+        fsm._clear_persisted_apn.assert_not_called()
+
+    def test_transient_none_does_not_hide_a_change(self):
+        fsm = self._fsm()
+        fsm.current_active_sim = None
+        fsm.current_active_sim = 2
+        self.assertIsNone(fsm.connected_apn)
+
+    def test_pin_unlock_state_is_per_slot(self):
+        fsm = self._fsm()
+        fsm._pin_unlock_attempted = True
+        fsm._pin_unlock_failed = True
+        fsm._pin_retries_remaining = 2
+
+        fsm.current_active_sim = 2
+        self.assertFalse(fsm._pin_unlock_attempted)
+        self.assertFalse(fsm._pin_unlock_failed)
+        self.assertEqual(fsm._pin_retries_remaining, -1)
+
+        fsm._puk_unlock_attempted = True
+        fsm.current_active_sim = 1
+        self.assertTrue(fsm._pin_unlock_attempted)
+        self.assertTrue(fsm._pin_unlock_failed)
+        self.assertFalse(fsm._puk_unlock_attempted)
+        self.assertEqual(fsm._pin_retries_remaining, -1)
+
+        fsm.current_active_sim = 2
+        self.assertTrue(fsm._puk_unlock_attempted)
+        self.assertFalse(fsm._pin_unlock_attempted)
+
+    def test_cached_identity_only_for_its_slot(self):
+        fsm = self._fsm()
+        fsm.last_known_sim_info = {'imsi': '505012009219713'}
+        self.assertEqual(fsm._cached_sim_identity(), {'imsi': '505012009219713'})
+        fsm.current_active_sim = 2
+        self.assertEqual(fsm._cached_sim_identity(), {})
+        fsm.current_active_sim = 1
+        self.assertEqual(fsm._cached_sim_identity(), {'imsi': '505012009219713'})
+
+    def test_live_identity_replaces_cached_as_a_whole(self):
+        status = {'sim_imsi': 'old', 'sim_iccid': 'old', 'sim_operator': 'Telstra',
+                  'sim_mcc_mnc': '50501'}
+        live = {'imsi': '302720123', 'sim_identifier': '8930', 'operator_name': '',
+                'mcc_mnc': ''}
+        self.assertTrue(ModemStateMachine._apply_live_sim_identity(status, live))
+        self.assertEqual(status, {'sim_imsi': '302720123', 'sim_iccid': '8930',
+                                  'sim_operator': '', 'sim_mcc_mnc': ''})
+
+    def test_live_read_without_identity_keeps_cached(self):
+        status = {'sim_imsi': 'cached', 'sim_iccid': 'cached', 'sim_operator': 'Telstra',
+                  'sim_mcc_mnc': '50501'}
+        before = dict(status)
+        self.assertFalse(
+            ModemStateMachine._apply_live_sim_identity(status, {'operator_name': 'Rogers'}))
+        self.assertEqual(status, before)
+
+    def test_slot_cache_dropped_for_a_different_card(self):
+        fsm = self._fsm()
+        old = {'iccid': 'A', 'operator': 'Telstra'}
+        fsm.sim_slot_info_cache[2] = dict(old)
+        self.assertEqual(fsm._slot_cache_for_probe(2, dict(old), {'iccid': 'A'}), old)
+        self.assertEqual(fsm._slot_cache_for_probe(2, dict(old), {}), old)
+        self.assertEqual(fsm._slot_cache_for_probe(2, dict(old), {'iccid': 'B'}), {})
+        self.assertNotIn(2, fsm.sim_slot_info_cache)
