@@ -1,3 +1,7 @@
 #!/usr/bin/env python3
 """Move GUI callback events into the shared alert pipeline."""
-from vyos.alerts.migration import migrate
+from vyos.alerts.migration import migrate as migrate_alerts
+
+
+def migrate(config):
+    migrate_alerts(config)
