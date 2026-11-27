@@ -719,12 +719,20 @@ def configure_serial_console(config_file: str, console_type: str) -> None:
     with open(config_file, 'w') as f:
         f.write(config.to_string())
 
-def validate_signature(file_path: str, sign_type: str) -> None:
+
+MSG_ERR_ISO_SIGN_NO_PROMPT: str = (
+    'Image signature is missing or not valid; '
+    'refusing to install it without confirmation (--no-prompt).'
+)
+
+
+def validate_signature(file_path: str, sign_type: str, no_prompt: bool = False) -> None:
     """Validate a file by signature and delete a signature file
 
     Args:
         file_path (str): a path to file
         sign_type (str): a signature type
+        no_prompt (bool): refuse an invalid signature instead of asking
     """
     print('Validating signature')
     signature_valid: bool = False
@@ -741,6 +749,9 @@ def validate_signature(file_path: str, sign_type: str) -> None:
 
     # warn or pass
     if not signature_valid:
+        if no_prompt:
+            # raised so image_fetch() removes the downloaded image
+            raise ValueError(MSG_ERR_ISO_SIGN_NO_PROMPT)
         if not ask_yes_no(MSG_WARN_ISO_SIGN_INVALID, default=False):
             exit(MSG_INFO_INSTALL_EXIT)
     else:
@@ -847,12 +858,13 @@ def image_fetch(image_path: str, vrf: str = None,
                     print(f'Could not download {sign_type} signature')
             # Validate the signature if it is available
             if sign_file[0]:
-                validate_signature(ISO_DOWNLOAD_PATH, sign_file[1])
-            else:
-                if (not no_prompt and
-                    not ask_yes_no(MSG_WARN_ISO_SIGN_UNAVAL, default=False)):
-                    cleanup()
-                    exit(MSG_INFO_INSTALL_EXIT)
+                validate_signature(ISO_DOWNLOAD_PATH, sign_file[1], no_prompt)
+            elif no_prompt:
+                # unattended installs (API, cloud) never accept an unsigned image
+                raise ValueError(MSG_ERR_ISO_SIGN_NO_PROMPT)
+            elif not ask_yes_no(MSG_WARN_ISO_SIGN_UNAVAL, default=False):
+                cleanup()
+                exit(MSG_INFO_INSTALL_EXIT)
 
             return Path(ISO_DOWNLOAD_PATH)
         else:

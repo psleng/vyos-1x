@@ -133,5 +133,79 @@ class TestImageDownloadFiles(unittest.TestCase):
             self.assertEqual(list(Path(tmp).iterdir()), [])
 
 
+class TestUnattendedSignature(unittest.TestCase):
+    """--no-prompt (API /image, cloud gateway) never installs unsigned images"""
+
+    def fetch(self, no_prompt, signature_available, answer=True):
+        from urllib.parse import urlparse
+
+        ask = Mock(return_value=answer)
+        validate = Mock()
+        remove = Mock()
+
+        def download_file(local, remote, vrf, **kwargs):
+            if remote.endswith('.minisig') and not signature_available:
+                raise OSError('404')
+
+        ns = load(
+            'image_fetch',
+            urlparse=urlparse,
+            Path=Path,
+            ISO_DOWNLOAD_PATH='',
+            ISO_DOWNLOAD_COMPLETE=False,
+            _image_download_path=lambda url: '/tmp/x.iso',
+            download_file=download_file,
+            _print_resume_hint=Mock(),
+            validate_signature=validate,
+            ask_yes_no=ask,
+            cleanup=Mock(),
+            _remove_downloaded_image=remove,
+            exit=Mock(side_effect=SystemExit),
+            print=Mock(),
+            MSG_WARN_ISO_SIGN_UNAVAL='unavailable?',
+            MSG_ERR_ISO_SIGN_NO_PROMPT='refused',
+            MSG_INFO_INSTALL_EXIT='bye',
+        )
+        try:
+            result = ns['image_fetch']('https://x/a.iso', no_prompt=no_prompt)
+        except SystemExit:
+            result = None
+        return result, ask, validate, remove
+
+    def test_missing_signature_refused_without_prompt(self):
+        result, ask, _, remove = self.fetch(no_prompt=True, signature_available=False)
+        self.assertIsNone(result)
+        ask.assert_not_called()
+        remove.assert_called_once()
+
+    def test_missing_signature_still_asks_interactively(self):
+        result, ask, _, _ = self.fetch(no_prompt=False, signature_available=False)
+        self.assertEqual(result, Path('/tmp/x.iso'))
+        ask.assert_called_once()
+
+    def test_signature_checked_with_no_prompt_flag(self):
+        _, _, validate, _ = self.fetch(no_prompt=True, signature_available=True)
+        validate.assert_called_once_with('/tmp/x.iso', 'minisig', True)
+
+    def test_invalid_signature_raises_without_prompt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            iso = Path(tmp) / 'a.iso'
+            Path(f'{iso}.minisig').write_text('sig')
+            ask = Mock(return_value=True)
+            ns = load(
+                'validate_signature',
+                glob=lambda pattern: ['key.pub'],
+                run=lambda command: 1,
+                Path=Path,
+                ask_yes_no=ask,
+                print=Mock(),
+                MSG_WARN_ISO_SIGN_INVALID='invalid?',
+                MSG_ERR_ISO_SIGN_NO_PROMPT='refused',
+            )
+            with self.assertRaisesRegex(ValueError, 'refused'):
+                ns['validate_signature'](str(iso), 'minisig', no_prompt=True)
+            ask.assert_not_called()
+
+
 if __name__ == '__main__':
     unittest.main()
