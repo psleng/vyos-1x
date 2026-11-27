@@ -459,6 +459,17 @@ recommended.
    impersonate a GUI user. *Decision needed: accept asserted identity from a
    designated key, or move to per-user API credentials.*
 
+   **Resolved (2026-11-27): root-only local API socket.** The GUI and the
+   cloud agent call the API over a second socket, `/run/api-local.sock`
+   (owner root, mode `0600`, never exposed through nginx or TCP), with no
+   key. The API accepts an asserted actor (`X-Igos-User`,
+   `X-Igos-Via: gui|cloud`) **only** on that socket, so only root processes
+   can assert one, and callers through nginx cannot. No designated key is
+   needed, and the shared GUI key goes away (security findings G1;
+   `igos-cloud-connectivity-design.md` §11.2). This is the same trust pattern
+   as the broker socket (§5.2). It settles *who may assert an actor*; the
+   per-commit plumbing in §10.4 is still required.
+
 4. **Command / config accounting.** Per-command accounting is unconfigured
    for every method (§0.5). The realistic device-only win is correct commit-log
    attribution for GUI changes (§10.4). Full per-command TACACS+ accounting is
@@ -523,8 +534,9 @@ phases).
     config requests.
   - `flask/app/auth/routes.py` — Phase 3 identity convergence.
 - Host / deployment
-  - Broker socket group membership for the GUI service; API key designation
-    for asserted identity (§6.3).
+  - Broker socket group membership for the GUI service; GUI calls the API on
+    the root-only local API socket, which is the only place an asserted actor
+    is accepted (§6.3).
 
 ---
 
@@ -574,7 +586,7 @@ whole platform.
 
 | Deliverable | Complexity | Why |
 |---|---|---|
-| Config-change accounting, correctly attributed, local | Low–Medium — 1–2 wks | Commit log already fires. Needs: actor field on GUI→API requests + trust rule (§6.3); explicit actor in `config_mgmt`; per-commit (not process-global) plumbing in the API server; carrying it through `vyos-commitd` on the vyconf backend. |
+| Config-change accounting, correctly attributed, local | Low–Medium — 1–2 wks | Commit log already fires. Needs: actor field on GUI→API requests, trusted on the local API socket (§6.3); explicit actor in `config_mgmt`; per-commit (not process-global) plumbing in the API server; carrying it through `vyos-commitd` on the vyconf backend. |
 | Per-`set`/`delete` granularity (with values), local | Low–Medium — 1–2 wks | The commit diff is already computed; emit it to syslog with user+via from the post-commit hook. Uniform across CLI/API/GUI. |
 | Local command accounting (op-mode/shell → syslog) | Medium — 2–4 wks | No central runner. Options: auditd `execve` rules (noisy), a shell hook (CLI-only), or hooking op-mode dispatch. |
 | Central TACACS+ command accounting (`audisp-tacplus`) | Medium–High — 1–2 mo | Package audisp-tacplus, generate audit rules + plugin config (sourcing `/etc/tacplus_servers`), add a CLI knob + conf_mode. Covers shell execs only — not GUI/API config changes. |
@@ -589,18 +601,19 @@ the commit-log writer on both backends. Doing so:
 
 - fixes the API-user misattribution,
 - gives per-change accounting for the GUI, and
-- gives the same mechanism to any other API client that asserts an actor.
+- gives the same mechanism to the cloud agent (cloud users attributed as
+  `<user> via cloud`) and any other root-only local caller.
 
 ### 10.4 Recommended first slice
 
 1. **Commit log.** Let `_new_log_entry()` take the actor explicitly (it already
    accepts `user=`), with an optional `COMMIT_USER` env fallback that is
    preferred over `_get_user()` when set — parallel to `COMMIT_VIA`.
-2. **API server.** Accept an optional actor on config-changing requests, honour
-   it only from a designated API key (§6.3), and set it for the duration of
-   that one commit under the API's commit lock (or pass it explicitly) rather
-   than leaving it in the shared process environment. Record `via` as `gui`
-   for those requests.
+2. **API server.** Accept an optional actor on config-changing requests,
+   honour it only on the root-only local API socket (§6.3), and set it for the
+   duration of that one commit under the API's commit lock (or pass it
+   explicitly) rather than leaving it in the shared process environment.
+   Record `via` from `X-Igos-Via` (`gui` or `cloud`).
 3. **vyconf backend.** Carry the actor on the session/commit message (e.g. a
    new optional field alongside `user`/`sudo_user`) and have `vyos-commitd`
    expose it to the post-commit hook.
