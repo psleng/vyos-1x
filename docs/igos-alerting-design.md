@@ -243,6 +243,7 @@ Every match produces one record. It is written to the history file, to journald
 | Field | Type | Notes |
 |---|---|---|
 | `id` | string | UUID, unique per record |
+| `kind` | string | `alert`; delivery-result records use `delivery` (§7d) |
 | `sequence` | int | Monotonic, continues across reboots and `clear` (§7d); for ordering and paging |
 | `timestamp` | string | ISO-8601 UTC, taken from the journal entry (`__REALTIME_TIMESTAMP`) |
 | `hostname` | string | `system host-name` |
@@ -439,6 +440,7 @@ show event-handler alerts                       # newest first
 show event-handler alerts count 50
 show event-handler alerts severity critical
 show event-handler alerts since 812             # records after sequence 812 (§7d)
+show event-handler deliveries                   # delivery results by channel (§7d)
 show event-handler alert-types                  # installed catalog
 show event-handler status                       # queue depth, last delivery result per channel
 clear event-handler alerts
@@ -532,6 +534,23 @@ cursor is a possible later improvement.
 - `show event-handler alerts --raw` includes `history_id` and
   `first_sequence` (oldest record still held), and accepts `since <sequence>`,
   so a reader can fetch only new records and detect overflow gaps.
+- **Delivery results are recorded in the same history.** After each send
+  attempt a worker appends a `delivery` record (no alert of its own) with its
+  own `sequence`:
+
+  ```json
+  {"kind": "delivery", "sequence": 815, "alert_id": "…",
+   "channel": "sms:oncall", "result": "sent", "at": "…", "error": null}
+  ```
+
+  `result` is `sent`, `retrying`, `failed`, `gave-up` or `dropped` (queue
+  overflow). Alert records carry `"kind": "alert"`. Readers using `since` pick
+  up late outcomes for older alerts without rewriting past records, and
+  `show event-handler alerts` shows each alert with its delivery results.
+  This answers "was the 03:12 WAN-down alert texted to on-call, and did the
+  email fail?" — which neither `show event-handler status` (last result per
+  channel) nor the queues (items deleted once sent) can. `history size`
+  counts alert records; delivery records are pruned with their alert.
 - Each record is also sent to journald (`SYSLOG_IDENTIFIER=igos-alert`,
   `ALERT_*` fields), which gives remote syslog forwarding and a live feed for
   the GUI with no extra code.

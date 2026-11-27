@@ -1,6 +1,7 @@
 # igOS PerleCLOUD Connectivity — Design Sketch
 
-Status: design draft (no implementation yet)
+Status: design draft (no implementation yet). Two approaches: Option 1 patches
+what exists (§18); Option 2 is the full solution (§2–§16, §19).
 Scope: define how an igOS unit configured for PerleCLOUD **calls out to the
 cloud, establishes a session, stays connected while work is pending, and
 recovers from failures** — and make the configuration, status, and failure
@@ -14,6 +15,48 @@ behavior consistent across the three components involved:
 
 The PerleCLOUD backend (`devices.perleapps.com`) is outside these repositories.
 Whether it can adopt the asks in §10 is an open decision (§13).
+
+Also covered: how information moves today (§0.6), device-originated alerts
+(§15), remote access to the router and connected devices (§16), and a
+hand-off checklist for the cloud and GUI teams (§17).
+
+---
+
+## Approaches at a glance
+
+This document offers two approaches. Both start from the same findings (§0,
+§1, Appendix A).
+
+| | **Option 1 — Patch what exists** (§18) | **Option 2 — Full solution** (§2–§16, §19) |
+| --- | --- | --- |
+| Idea | Keep today's protocol, long-poll and GUI tunnel; fix defects, make status truthful, close the security gaps, add the smallest controls | Rework connection handling for metered links, add a general-purpose stream tunnel, device-sent events and capability negotiation |
+| Remote GUI of the router | Yes (today's GUI tunnel, hardened) | Yes, over the stream tunnel (phase 2) |
+| Web pages of LAN devices | Optional, HTTP only, allow-listed (no WebSockets) | Yes (HTTPS via cloud reverse proxy) |
+| SSH to LAN devices / router / serial ports | **No** | Yes |
+| Web CLI from the cloud | No | Yes (phase 2) |
+| VNC / RDP / GPS live view | No | When the cloud adds clients; no router change |
+| Cloud on cellular | Block it (`egress`) or let the cloud slow polling (`nextPollDelay`) | Metered duty cycle (§2–§7), or block it (`egress`) |
+| Alerts to the cloud | Cloud reads history through the gateway (§15.1) | Plus push (`DEVICE_EVENT`, §15.3) |
+| Cloud user roles on the device | Passed in `PROXY_CONNECT` (small cloud change) | Passed with every session and tunnel |
+| PerleCLOUD effort | **Small** (a few optional fields; status display) | **Large** (relay, browser clients, store-and-forward) |
+| Device effort | Small–medium | Medium–large |
+
+**Option 1 is not wasted work for Option 2.** Its fixes, truthful status,
+`egress` control, capability reporting, unknown-command handling and role
+passing are all needed by Option 2 (§18.4).
+
+Section map:
+
+| Section | Option 1 | Option 2 |
+| --- | --- | --- |
+| §0 Context, §1 Problems, Appendix A Defects | ✔ | ✔ |
+| §2–§7 Metered concept, duty cycle, supervisor | Supervisor and status only (§18.1) | ✔ |
+| §8 Status model, §9 Configuration | Subset (§18.1–§18.2) | ✔ |
+| §10 Protocol touch-points, §10.1 Capability exchange | Capability reporting only (§18.5) | ✔ |
+| §15 Alerts | §15.1–15.2 (read history) | ✔ incl. push |
+| §16 Remote access | — (HTTP-only LAN access via GUI tunnel, §18.3) | ✔ |
+| §17 Hand-off | Option 1 rows (§18.6) | ✔ |
+| §19 Wire protocol details | — | ✔ |
 
 ---
 
@@ -171,8 +214,35 @@ Notes:
 
 - `operator+` has no CLI equivalent, and a GUI operator is not a CLI operator:
   the GUI levels are enforced by Flask, the CLI levels by `vyos-op-run`.
-- **The web CLI does not work through the cloud tunnel**: the proxy rejects
-  WebSocket upgrades with `501`, so cloud users have no terminal.
+
+**CLI access from the cloud.** Cloud users have no interactive terminal:
+
+- The GUI web CLI needs a WebSocket. `XTerm.tsx` opens
+  `ws://<host>/cli/shell/ws` (ttyd protocol), and the iframe variant
+  (`ShellCLI.tsx`) loads ttyd's own page from `/cli/shell`, which opens the
+  same WebSocket. nginx forwards `/cli/shell/ws` to ttyd on `127.0.0.1:7681`.
+- The GUI tunnel carries only request/response HTTP, wrapped in JSON one
+  exchange at a time (protocol §6). `HttpProxySession._handle_request` answers
+  any WebSocket upgrade with `501 Not Implemented`, so a cloud user can open
+  the CLI page but the terminal never connects.
+- What the cloud can do instead, non-interactively:
+  - run individual op-mode or configuration commands through the VyOS gateway
+    (`/show`, `/configure`, `/graphql`, …) — needs the device's API key, and
+    PerleCLOUD must provide its own command-entry screen;
+  - fetch the fixed tech-support bundle through
+    `/api/v1.1/managed-devices/cli` (config, version, memory, storage, log) —
+    no key needed.
+- A cloud terminal would need WebSocket support in both the proxy and the
+  PerleCLOUD relay, or a different terminal transport.
+- Derived from code; not yet confirmed on a unit with a live PerleCLOUD
+  session.
+- Separately, the web CLI builds its URLs from the page's hostname with
+  hard-coded schemes and no port (`react/src/constants/api.ts`:
+  `WEBCLI_URL = ${hostname}/cli/shell`; `ws://…/ws` in `XTerm.tsx`,
+  `http://…` in `ShellCLI.tsx`). Browsers normally block `ws://` and `http://`
+  from an HTTPS page, and it will break when the GUI is served from a cloud
+  subdomain (§16 phase 2). To verify on a unit; fix with relative or
+  same-scheme URLs.
 
 **Findings:**
 
@@ -186,7 +256,11 @@ Notes:
   field, so the cloud user's role never reaches the device.
 - **Tunnel target is not restricted.** `proxyRequestUri` is forwarded exactly
   as supplied, so the cloud can reach any address the device can reach,
-  including LAN hosts, not only the local GUI.
+  including LAN hosts, not only the local GUI. That includes **looping back
+  out to the internet** (e.g. `https://google.com`) over whatever WAN is
+  active, cellular included, appearing to come from the customer's address.
+  The firewall cannot block this selectively: the `output` chain cannot tell
+  proxy traffic from the router's own (no match by process).
 - **Status route is static.** `cloud-services/status` always reports
   `cloudConnectionStatus: "connected"`.
 - **Responses are fire-and-forget.** A failed response send is logged and
@@ -195,7 +269,8 @@ Notes:
 - **Inline transfers only.** Everything travels as JSON in the command channel.
   Gateway limits: 8 MB request, 1 MB response.
 - **No version or capability advertisement.** The cloud cannot tell which
-  routes or gateway endpoints a firmware supports.
+  routes or gateway endpoints a firmware supports, and an unknown command type
+  is dropped without a reply while the proxy backs off polling (§10.1).
 
 **Alerts and events today:**
 
@@ -471,6 +546,7 @@ in-process supervisor that **never exits for recoverable conditions**.
 | `UNPROVISIONED` | No PIN and no token, or invalid serial | stays; wakes on PIN write (SIGHUP) |
 | `REG_REJECTED` | Cloud rejected PIN | stays until new PIN; slow retry? (§13) |
 | `NO_PATH` | No route to the cloud | persistent backoff |
+| `BLOCKED` | Route to the cloud leaves on a denied link (§9 `egress`) | stays, sending nothing; re-evaluates on route change (rtnetlink) or every 60 s (route lookup only); persistent or metered states once the route moves to an allowed link |
 | `PERSISTENT_CONNECTING` | Unmetered egress, token present | `PERSISTENT_CONNECTED` after first successful poll |
 | `PERSISTENT_CONNECTED` | Poll succeeded recently | `PERSISTENT_BACKOFF` on failure; metered states if egress changes |
 | `PERSISTENT_BACKOFF` | Network / 5xx / timeout | re-evaluate egress, then connect |
@@ -523,6 +599,9 @@ Single structure produced by the agent's `/perlecloud/status`, consumed by
   `disconnected`).
 - `wwan_hold` is a read-only query of the egress WWAN (data-limit hold,
   airplane, `disable`) so "why didn't it check in?" is answerable.
+- `BLOCKED` reports `reason: "egress_denied"` with the denied `egress`;
+  `cloud_connection_status` is `blocked`, so the GUI and cloud can show
+  "offline by policy (on wwan0)" rather than a fault.
 - One shared egress/role rule (route-based, override-URL aware) for the status
   API and the REST route.
 
@@ -542,10 +621,40 @@ service cloud
         retry-interval <60-86400>            (s; one early retry after a failed check-in)
         max-connected-time <60-86400>        (s; hard cap per check-in)
     link-class <ifname> metered|unmetered    (override default rule; §4.1, §13)
+    egress
+        metered allow|deny                   (default allow; deny = no cloud traffic on metered links)
+        deny-interface <ifname>              (multi; never send cloud traffic out this interface)
 ```
 
 There is intentionally **no** `connection-mode` knob: behavior follows the
 egress link class.
+
+**Keeping cloud traffic off a link (`egress`).** Before every cloud connection
+— command channel, registration, GUI tunnel (`proxyUri`), remote-access relay
+(`relayUri`, §16) and alert push (§15) — the agent looks up the route to the
+host without sending anything (`ip route get`, §4.2). If the egress is a
+denied interface, or metered while `metered deny` is set, it sends nothing,
+enters `BLOCKED` (§7) and reconnects automatically when the route moves to an
+allowed link. With `metered deny`, the metered duty cycle (§5) never runs.
+Routing still decides the egress: denying `wwan0` does not move the cloud to
+Ethernet; it keeps the cloud offline while the only route is cellular. This
+covers hosts the cloud supplies at runtime, which a firewall rule cannot.
+
+Options available today, without code (operator-configured):
+
+- **Firewall drop:** `firewall group domain-group PERLECLOUD address
+  devices.perleapps.com` (plus every proxy/relay host), and a
+  `firewall ipv4 output filter` rule with `destination group domain-group
+  PERLECLOUD`, `outbound-interface name wwan0`, `action drop`. Packets are
+  dropped inside the router, so no cellular data is used.
+- **Pin to Ethernet:** an `output` rule matching the same group sets a mark;
+  `policy local-route rule … fwmark <n> set table <t>` routes it through a
+  table containing only the Ethernet route.
+- Limits of both: they miss hosts supplied at runtime (`proxyUri`,
+  `relayUri`); the firewall cannot match by process, only by destination; DNS
+  lookups for the cloud host still leave on the active link; and today's
+  status still says "connected" (§1). Keep the firewall rule as a backstop
+  once `egress` exists.
 
 - **PIN stays op-mode** (`set service cloud register <code>`): it is a one-time
   secret and must not land in `config.boot` or config backups. Store it in
@@ -558,8 +667,8 @@ egress link class.
   - render config via a Jinja2 template under
     `data/templates/igos-cloud-proxy/` (repo convention);
   - restart only on change; prefer SIGHUP re-read for timer changes;
-  - `verify()`: URL format, `link-class` interfaces exist, timer sanity
-    (`linger-timeout < max-connected-time`);
+  - `verify()`: URL format, `link-class` and `egress deny-interface`
+    interfaces exist, timer sanity (`linger-timeout < max-connected-time`);
   - **`verify()` enforces the product constraint**: with `service cloud
     enable`, every `wwanN` that is metered (default rule or `link-class`) must
     have `connection-mode dial-on-demand`, else `ConfigError`. Because
@@ -603,6 +712,36 @@ Cloud-side asks:
 Without 1–3 the duty cycle still works, but queued work may be lost and the
 cloud will show the device offline between check-ins.
 
+### 10.1 Capability exchange (prerequisite for any new message type)
+
+Today an unknown `messageType` is not answered. `CommandFactory.create()`
+raises `CommandError`, `poll_command` turns it into "invalid cloud command
+response", and `Proxy.arun()` backs off polling (2 → 30 s). A cloud that sends
+`TUNNEL_OPEN` (§16) or any future command to older firmware gets no reply, and
+other commands for that device are delayed.
+
+Proposal:
+
+- The proxy advertises what it supports in `REGISTER_ROUTER_REQUEST` and in
+  the first `GET_NEXT_COMMAND` after each start (and whenever it changes), as
+  a `device` block in `messageParams`:
+
+  ```json
+  "device": {
+    "protocolVersion": 2,
+    "firmware": "igOS 1.5.x",
+    "capabilities": ["TUNNEL_OPEN", "DEVICE_EVENT", "EVENT_HANDLER_ALERTS"]
+  }
+  ```
+
+  Full schema: §19.1.
+
+- The cloud stores this per device and **never sends a type the device did
+  not advertise**. No capabilities field means protocol version 1 (today).
+- The proxy answers an unknown type with `ERROR` `UNSUPPORTED_COMMAND`
+  carrying the original `messageId`, and keeps polling without backoff
+  (Appendix A).
+
 ---
 
 ## 11. Identity and secrets (interim vs. target)
@@ -620,9 +759,9 @@ cloud will show the device offline between check-ins.
 
 | Repo | Change |
 | --- | --- |
-| igos-cloud-proxy | supervisor (`proxy/supervisor.py`), egress classifier (`proxy/core/net/egress.py`), metered scheduler (traffic discipline, `idle-timeout`-aware poll hold), truthful `CloudProxyState`, status model, SIGHUP reload, systemd limits, Appendix A fixes, docs |
-| vyos-1x | `service cloud` XML (`metered …`, `link-class`), `service_cloud.py` template + change-only reload + dial-on-demand constraint check (both directions), op-mode `connect cloud now` and `show cloud status`, PIN single-store + upgrade cleanup |
-| flask-react-dev | status widget (`state`, `link_class`, `next_check_in`, `standby`), enable/disable via config API, "check in now" |
+| igos-cloud-proxy | supervisor (`proxy/supervisor.py`), egress classifier (`proxy/core/net/egress.py`) with `egress` deny check, metered scheduler (traffic discipline, `idle-timeout`-aware poll hold), truthful `CloudProxyState`, status model, capability exchange (§10.1), SIGHUP reload, systemd limits, Appendix A fixes, docs |
+| vyos-1x | `service cloud` XML (`metered …`, `link-class`, `egress`), `service_cloud.py` template + change-only reload + dial-on-demand constraint check (both directions), op-mode `connect cloud now` and `show cloud status`, PIN single-store + upgrade cleanup |
+| flask-react-dev | status widget (`state`, `link_class`, `next_check_in`, `standby`, `blocked`), enable/disable via config API, "check in now" |
 
 ---
 
@@ -649,6 +788,11 @@ cloud will show the device offline between check-ins.
     reclassified metered via `link-class` (e.g. Ethernet satellite modem) has
     no dial-on-demand to bring it up/down; the agent would duty-cycle traffic
     only. Acceptable, or restrict `metered` to WWAN?
+12. **`egress` defaults** — `metered allow` (today's behavior) or `deny` out of
+    the box? Should `BLOCKED` raise an alert (alerting design catalog)?
+13. **Capability exchange** (§10.1) — fields and where they travel
+    (registration, first poll, every poll); can PerleCLOUD store and honor
+    them?
 
 ---
 
@@ -723,6 +867,9 @@ history is.
 - **`since <sequence>` and `first_sequence`** in `show event-handler alerts
   --raw` let the cloud fetch only new records and detect records lost to
   history overflow.
+- **Delivery results** (alerting design §7d) appear in the same history as
+  `delivery` records with their own `sequence`, so the cloud and GUI see late
+  SMS/email outcomes for older alerts with the same `since` read.
 
 Cloud algorithm: remember `(history_id, last_sequence)`; request
 `since last_sequence`; on a different `history_id`, read everything; on
@@ -808,6 +955,765 @@ vyos-event-handler ── cloud queue ── cloud worker ──► igos-cloud-p
 
 ---
 
+## 16. Remote access to the router and connected devices (proposed)
+
+Status: proposed solution; not yet agreed with the PerleCLOUD team.
+
+The product is a router. Cloud users need browser-based access to devices
+connected to it (SSH and HTTPS first), and ideally to the router's own GUI,
+CLI, serial ports and GPS stream, through one mechanism.
+
+### 16.1 Requirements (decided)
+
+1. The PerleCLOUD relay and browser clients are a **requirement**; the cloud
+   team builds them.
+2. **Browser only.** No support for a cloud user's own SSH client.
+3. **SSH and HTTPS are required.** VNC is desirable (especially), RDP and
+   Telnet nice to have; each depends on the cloud implementing a browser
+   client.
+4. Works over metered links with bounded, visible data use (§16.7).
+
+### 16.2 What exists today
+
+- **SSH: not possible.** The only remote-access path is the GUI tunnel
+  (`PROXY_CONNECT`), which carries request/response HTTP wrapped in JSON, one
+  exchange at a time. There is no raw TCP stream.
+- **HTTP to LAN devices: works by accident, unsafely.** `proxyRequestUri` is
+  forwarded as supplied and certificates are not checked
+  (`VERIFY_VYOS_SSL = False`), so plain HTTP(S) to a LAN address partly works,
+  but:
+  - no WebSockets, one request per exchange;
+  - the router's **administrator** session cookie (`IGOS_CLOUD_SESSION`) is
+    added to every response regardless of target, and whatever headers the
+    cloud sends (including cookies) are forwarded to the target — a LAN device
+    can receive a token that Flask accepts from any client while the session
+    is open;
+  - no opt-in, no allow-list, no audit;
+  - the cloud can also make the router fetch from the **internet** (loop-out)
+    over the active WAN, cellular included (§0.6).
+- See §0.6 for user levels and the web CLI.
+
+### 16.3 Proposal: device-initiated stream tunnel
+
+```text
+PerleCLOUD ── TUNNEL_OPEN ──► igos-cloud-proxy (via the command channel)
+                                1. check local policy (target allowed?)
+                                2. TCP connect to the target
+                                3. open an outbound wss to relayUri
+                                4. copy bytes both ways until closed
+
+browser ◄──► PerleCLOUD relay ◄══ wss (router-initiated) ══► proxy ◄──► target
+             (xterm.js + SSH client,
+              HTTPS reverse proxy,
+              noVNC, …)
+```
+
+- **The router only dials out**, as today, so it works behind NAT and carrier
+  NAT on cellular.
+- **Protocol-agnostic on the router.** The proxy checks the target and copies
+  bytes; it does not understand SSH, HTTPS or VNC. Each protocol is a
+  cloud-side browser client:
+  - **SSH** — browser terminal (xterm.js) with a cloud-side SSH client. The
+    user logs in with the target's own credentials.
+  - **HTTPS** — cloud reverse proxy on a **per-session subdomain**, so each
+    device's cookies stay separate and absolute links work. The cloud is the
+    HTTPS client to the target.
+  - **VNC** (later) — noVNC, which already speaks RFB over WebSocket.
+  - **RDP** (later) — e.g. Apache Guacamole in the cloud.
+- **One mechanism for every target:**
+
+  | Target | Example | Benefit |
+  | --- | --- | --- |
+  | LAN device | `192.168.1.20:22`, `:443`, `:5900` | SSH, web UI or VNC of equipment behind the router |
+  | Router serial port | Perle serial service on the port (SSH/Telnet/TCP server, `interface-definitions/include/serial/service/`) | Out-of-band console of equipment wired to the router (switch or firewall console, PLC, meter), even when that equipment's network is down. Reuses the cloud SSH terminal; no new cloud client. |
+  | Router GPS | gpsd `127.0.0.1:2947` or the `service gps stream` port (`igos-wwan-gps-design.md` §6b) | On-demand live position view. Continuous fleet tracking is better as device-sent position reports (§15 `DEVICE_EVENT` or `service gps stream remote`), not a permanently open tunnel. |
+  | Router SSH | `127.0.0.1:22` (phase 2) | Cloud CLI with real device accounts, so CLI levels (admin, operator with command policy) apply as locally |
+  | Router GUI | `127.0.0.1:443` (phase 2) | Replaces `PROXY_CONNECT` (§16.8) |
+
+### 16.4 Protocol
+
+Summary below; full schemas, refusal reasons, close handling and the relay
+WebSocket protocol are in §19.2–§19.6.
+
+New command `TUNNEL_OPEN` (cloud → proxy, `requiresResponse: true`):
+
+```json
+{
+  "tunnelId": "t-8f2c…",
+  "target": {"host": "192.168.1.20", "port": 22},
+  "relayUri": "wss://relay.perleapps.com/tunnel",
+  "relayToken": "<one-time token>",
+  "idleTimeout": 600,
+  "maxDuration": 3600,
+  "user": {"id": "…", "name": "…", "role": "administrator"}
+}
+```
+
+- The proxy replies `TUNNEL_OPEN_RESPONSE` with `accepted` or a reason
+  (`not_enabled`, `target_not_allowed`, `route_not_allowed`,
+  `name_not_resolved`, `role_not_allowed`, `limit_reached`, `connect_failed`,
+  `metered_not_allowed`, `egress_blocked`).
+- The proxy opens `relayUri` presenting `relayToken` (single use, short-lived);
+  the relay pairs that connection with the user's browser session.
+- Either side closes the tunnel; the proxy also closes it on idle timeout, max
+  duration, byte cap, `service cloud` disable, or a local `reset` command.
+- Optional later: multiplex all connections of one user session over one
+  WebSocket (a `streamId` per TCP connection). Start with one WebSocket per
+  connection; add multiplexing when HTTPS browsing needs it (§16.7).
+
+**Target names are resolved by the router, not the cloud.** A name like
+`www.myequipmentonthelan.com` that exists only on the customer's network is
+unknown to public DNS, so the cloud sends it unchanged in `target.host`:
+
+1. The proxy resolves it with the router's resolver.
+2. It checks the **resolved address** against the allow-list and the route
+   check (§16.5), so a name cannot be used to reach a disallowed address, and
+   a name that resolves publicly is refused unless public addresses are
+   allowed.
+3. It connects to that address. For HTTPS, the cloud still uses the typed
+   name for the `Host` header and TLS server name, so name-based sites and
+   name-matched certificates behave normally. LAN devices usually have
+   self-signed certificates; the cloud needs a warn-and-continue policy.
+
+Name sources the router's own processes can use:
+
+| Source | Configured with | Resolves for the proxy? |
+| --- | --- | --- |
+| `/etc/hosts` | `system static-host-mapping host-name <name> inet <addr>` | Yes |
+| DHCP lease names | `service dhcp-server … hostfile-update` (lease hostnames into `/etc/hosts`) | Yes, for clients that send a hostname |
+| Upstream DNS | `system name-server <addr>` (`/etc/resolv.conf`) | Yes, for names those servers know (e.g. a customer's internal DNS) |
+| Router DNS service | `service dns forwarding` (PowerDNS recursor): `authoritative-domain … records`, per-domain forwarding to a LAN DNS server, `/etc/hosts` export | Only if the router's own lookups are pointed at it; router-originated lookups use `system name-server` (from config reading; to verify) |
+| mDNS `.local` | `service mdns-repeater` | Probably not; the repeater relays between interfaces only |
+
+Convenience: the cloud can offer a pick list of known local devices (DHCP
+leases with hostnames, static host mappings) read through the gateway instead
+of free typing.
+
+### 16.5 Router-side controls and configuration
+
+The cloud is fully trusted today (§0.6); remote access adds explicit local
+policy:
+
+```text
+service cloud remote-access
+    enable                                     (default: off)
+    allow <network|address> port <list>        (LAN targets, e.g. 192.168.1.0/24 port 22,443)
+    allow-interface <ifname>                   (multi; route to the target must leave here, e.g. br0 eth1)
+    allow-local serial|gps|ssh|https           (router-local services)
+    max-sessions <n>
+    idle-timeout <s>
+    max-duration <s>
+    max-bytes <n>                              (per session; optional)
+    metered allow|deny                         (on a metered egress, §4)
+    role administrator|operator+               (minimum cloud role)
+```
+
+- Denied unless enabled and the target matches an `allow` entry.
+- **No loop-out to the internet.** In addition to the address check, the
+  route to the resolved target (`ip route get`, no packet sent) must leave
+  through an `allow-interface` (LAN side) — or be a router-local service.
+  Even an over-broad `allow` entry or an unexpected DNS answer cannot send
+  tunnel traffic out a WAN or cellular interface. The same check applies to
+  the GUI tunnel's `proxyRequestUri` until `PROXY_CONNECT` is retired. Router
+  connectivity tests from the cloud use the gateway (`/traceroute`, `show`),
+  not tunnels.
+- The firewall is only a coarse backstop here: tunnel connections are
+  router-originated, and the `output` chain cannot tell them from the router's
+  own DNS, NTP, updates or cloud connection.
+- `metered allow|deny` here applies to tunnels; `service cloud egress` (§9)
+  applies to all cloud traffic and takes precedence.
+- The cloud must send the user's role; below `role` is refused. This fixes the
+  hard-coded administrator for this path.
+- No router session cookie is ever added to tunnel traffic.
+- Op-mode: `show cloud remote-access sessions` (user, target, start, bytes,
+  idle), `reset cloud remote-access session <id>`.
+- Every open and close is logged with cloud user, target, duration and bytes,
+  and offered as a `cloud-remote-access` alert type in
+  `igos-alerting-design.md`.
+- Router-originated connections to LAN targets pass the firewall `output`
+  chain; the target sees the router's LAN address as the client.
+
+### 16.6 Effect on `igos-cloud-proxy`
+
+Not a replacement — it adds one capability and later retires one part:
+
+| Part (today) | Size | With the tunnel |
+| --- | --- | --- |
+| Registration, token, TPM (`cloud/`, `core/`) | ~630 lines | Unchanged |
+| Command channel (`protocol/`, `proxy.py`) | ~900 lines | Unchanged; carries `TUNNEL_OPEN` |
+| Built-in REST routes and VyOS gateway (`vyos/`, `rest_command.py`) | ~650 lines | Unchanged |
+| Status API, JWT keys, session checks (`state/`, `session/auth/`) | ~460 lines | Unchanged; gains tunnel session list and close route |
+| GUI tunnel (`http_proxy.py`, `proxy_connect.py`) | ~480 lines | Kept in phase 1; removable in phase 2 |
+
+### 16.7 Data overhead (estimates, not measured)
+
+| Item | Approximate cost |
+| --- | --- |
+| No tunnel open | **0** — tunnels exist only on demand |
+| Opening a tunnel | ~5–8 KB (`TUNNEL_OPEN` ~1 KB, TLS 1.3 handshake to the relay ~4–6 KB, WebSocket upgrade ~0.5–1 KB); ~1 KB with TLS session resumption |
+| Per packet | ~25–35 bytes (WebSocket 2–14 B + TLS record ~22 B) |
+| Bulk transfer | < 3 % |
+| Interactive SSH | ~+30 bytes per keystroke packet; a few hundred bytes per keystroke including echo, about the same as direct SSH |
+| Open but idle | ~10–15 KB/hour with a 60 s keepalive (needed for carrier NAT); capped by `idle-timeout` |
+
+For comparison, today's GUI tunnel base64-encodes bodies (+33 %), sends each
+response as a separate HTTPS POST with headers, and issues an idle poll every
+≤ 30 s while a session is open (~120 KB/hour doing nothing). Moving the router
+GUI onto the tunnel reduces data use.
+
+**Content dominates:** SSH is small; a LAN device's web UI first load can be
+hundreds of KB to several MB, plus a ~3–5 KB TLS handshake per browser
+connection; VNC is the heaviest (hundreds of KB to MB per minute). The inner
+traffic is already encrypted, so tunnel compression does not help.
+
+Metered controls: on demand only; idle timeout and max duration; per-session
+byte counter and optional `max-bytes`; `metered allow|deny`; multiplexing
+connections over one WebSocket and TLS resumption to save handshakes; cloud
+defaults of browser caching and low VNC quality on metered links.
+
+### 16.8 Phasing
+
+1. **Phase 1a — SSH to LAN devices and router serial ports.** Single
+   connection, no URL or cookie handling; the fastest end-to-end result.
+2. **Phase 1b — HTTPS to LAN devices.** Per-session subdomains; add
+   multiplexing if handshake and keepalive cost warrants.
+3. **Phase 2 — router GUI and SSH over the tunnel.** Fixes the web CLI
+   (WebSocket), binary uploads, the hard-coded administrator role and the
+   GUI tunnel's data cost. Keep `PROXY_CONNECT` for older cloud/firmware
+   combinations during the transition, then retire it.
+4. **Later — VNC, RDP, Telnet, GPS live view**, as the cloud adds clients. No
+   router change beyond allow-list entries.
+
+Independent of the polling / metered-link redesign (§2–§7).
+
+### 16.9 Changes by repository
+
+| Repo | Work | Relative size |
+| --- | --- | --- |
+| igos-cloud-proxy | `TUNNEL_OPEN` / response, policy check, TCP connect, outbound WebSocket (`aiohttp`, already a dependency) with byte pump, limits and byte counter, audit log, status-API session list and close route; later multiplexing | Small–medium: ~400–700 lines (+200–300 for multiplexing) |
+| vyos-1x | `service cloud remote-access` XML, `verify()`, render into the proxy config; op-mode `show cloud remote-access sessions` / `reset …`; `cloud-remote-access` alert type | Small |
+| flask-react-dev | Phase 1: none (optional sessions view). Phase 2: GUI works when served from a cloud subdomain | Small |
+| PerleCLOUD | Relay (WebSocket endpoint, pairing, one-time tokens, scaling and node routing), browser SSH (xterm.js + server-side SSH), HTTPS reverse proxy with per-session subdomains (wildcard DNS/cert, cookie and redirect handling), UI, audit; later noVNC / Guacamole | **Large — most of the effort** |
+
+### 16.10 Alternatives considered
+
+- **Extend the GUI tunnel:** HTTP only; no SSH, no WebSockets. Rejected.
+- **Full VPN to the cloud (WireGuard/OpenVPN):** exposes the whole LAN, and
+  customer subnets overlap (most use `192.168.1.0/24`), so the cloud would need
+  per-router NAT or namespaces. Too heavy for this purpose. Rejected.
+- **Customer SSH client to a cloud endpoint:** out of scope (browser only).
+
+### 16.11 Open decisions
+
+1. Allow-list form: networks + ports, named targets, or both.
+2. Default `idle-timeout`, `max-duration`, `max-sessions`.
+3. Minimum cloud role for remote access, and whether operator+ may open
+   tunnels to some targets.
+4. On metered egress: deny by default, or allow with `max-bytes`?
+5. One WebSocket per connection vs multiplexed from the start.
+6. Relay certificate trust on the router: public CA, or pinned to PerleCLOUD
+   (ties to DevID mTLS, §11).
+7. Phase 2 GUI single sign-on: keep the `IGOS_CLOUD_SESSION` JWT (with the
+   cloud user's real role) or a different mechanism.
+8. Should the router's own lookups also query its DNS forwarding service
+   (local zones, forwarded domains) — automatically when `remote-access` is
+   enabled?
+9. Allow-list by domain as well as network (e.g. `allow-domain
+   plant.example.com`)?
+10. `allow-interface` default: required, or derived from interfaces that are
+    not WAN / not the cloud egress?
+
+---
+
+## 17. Hand-off: cloud team and GUI team
+
+What each team needs from this document, and what is still open. Rows marked
+**O1** are needed for Option 1 (§18); all rows apply to Option 2.
+
+### 17.1 Prerequisites for both
+
+1. **Capability exchange (§10.1, §19.1)** before any new message type is sent:
+   `TUNNEL_OPEN` (§16), `DEVICE_EVENT` (§15.3). Older firmware drops unknown
+   commands without replying. Recommended in Option 1 too (§18.5).
+2. **Role mapping**: PerleCLOUD user levels → `administrator` / `operator+` /
+   `operator`, and what each may do (GUI, gateway, tunnels). Today the device
+   always grants administrator (§0.6). Option 1 passes it in `PROXY_CONNECT`
+   (§18.3).
+3. **Gateway API key provisioning** (§11, §13 item 9): who creates the
+   per-device key and how the cloud obtains it. Every gateway call, including
+   reading alerts, needs it.
+
+### 17.2 Cloud (PerleCLOUD) team
+
+| Item | Where | Status |
+| --- | --- | --- |
+| **O1** Capability report and `UNSUPPORTED_COMMAND` | §19.1 | Drafted. To confirm: the cloud ignores unknown `messageParams` fields |
+| **O1** Optional `role` in `PROXY_CONNECT` | §18.3 | Drafted |
+| **O1** `nextPollDelay` for metered devices | §18.2 | Drafted; choose the delay |
+| **O1** Status display | §8, §18.1 | States and reasons, including `blocked` (and `standby` in Option 2) |
+| **O1** Alert reading | §15.1–15.2, §19.8 f | Drafted; exact GraphQL query and `--raw` output schema to be fixed with the alerting implementation |
+| `TUNNEL_OPEN` / response / close | §19.2–§19.4 | Drafted |
+| Relay wire protocol `igos-tunnel.v1` | §19.5 | Drafted (token header, binary frames, flow control, keepalive, close codes) |
+| Multiplexing `igos-tunnel.v2` | §19.6 | Sketched; deferred |
+| `DEVICE_EVENT` and ack | §19.7 | Drafted |
+| Sequence diagrams | §19.8 | Drafted |
+| Relay security | §16.3–16.5, §19.5 | Single-use short-lived tokens; per-session subdomain; cookie isolation; self-signed certificate policy for LAN devices; audit; certificate trust/pinning (§16.11 item 6) |
+| Browser clients | §16.3, §16.8 | SSH (xterm.js + server-side SSH) first, then HTTPS reverse proxy; later noVNC, Guacamole |
+| Target names | §16.4 | Send names unchanged; use the typed name for `Host`/SNI; optional device pick list from the gateway |
+| Store-and-forward and short polls | §10 | Asks 1–5 (metered duty cycle) |
+| Transition | §16.8, §19.8 g | Protocol-1 devices get `PROXY_CONNECT` and gateway only; retire `PROXY_CONNECT` after phase 2 |
+
+### 17.3 GUI (flask-react-dev) team
+
+| Item | Where | Work |
+| --- | --- | --- |
+| **O1** Cloud status widget | §8, §18.1 | Show `state`, `reason`, egress, `blocked` (Option 2 adds `next_check_in`, `standby`) instead of connected/disconnected |
+| **O1** Connect/disconnect | §9 | Configure `service cloud enable` through the VyOS API instead of `systemctl` (Option 2 adds "check in now" → `connect cloud now`) |
+| **O1** Cloud egress policy | §9, §18.2 | Settings for `service cloud egress` (`metered`, `deny-interface`) |
+| Remote-access settings and sessions | §16.5, §18.3 | `service cloud remote-access` page; session list with end-session action (Option 1: the HTTP-only subset, no session list) |
+| **O1** Alarm page | §15, alerting design §8 | Read `show event-handler alerts` with `since`; keep only read/dismissed state in Flask; remove `/callback`; show delivery results |
+| **O1** Web CLI URLs | §0.6 | Replace hard-coded `ws://` / `http://` and missing port in `constants/api.ts`, `XTerm.tsx`, `ShellCLI.tsx` with relative or same-scheme URLs |
+| **O1** Web CLI authorization | §0.6 | Verify nginx `/cli/shell/ws` → ttyd bypassing Flask's administrator check, and which account the ttyd shell runs as |
+| Phase 2 readiness | §16.8 | GUI served from a cloud subdomain: relative URLs, cookie path/SameSite, Socket.IO over the tunnel, real cloud role in the session token |
+| Phase 2 readiness | §16.8 | GUI served from a cloud subdomain: relative URLs, cookie path/SameSite, Socket.IO over the tunnel, real cloud role in the session token |
+
+---
+
+## 18. Option 1 — Patch what exists
+
+Keep today's protocol, long-poll and GUI tunnel. Fix what is broken, make
+status truthful, close the security gaps, and add only the smallest controls.
+No new transport, no SSH, no metered duty cycle. PerleCLOUD changes are small
+and mostly optional.
+
+### 18.1 Reliability and truthful status (igos-cloud-proxy)
+
+- **Truthful `connected`.** Set only after a successful poll; cleared on poll
+  failure, `AUTH_FAILED`, unregister and shutdown (§1 item 1).
+- **Status gains a state and a reason** — a subset of §7: `UNPROVISIONED`,
+  `REG_REJECTED`, `CONNECTING`, `CONNECTED`, `BACKOFF`, `BLOCKED`,
+  `AUTH_FAILED`, `UNREGISTERED` — plus `last_success`, `last_error`, egress
+  interface and link class. The existing `cloud_connection_*` fields stay;
+  the `cloud-services/status` route reports the real state instead of a fixed
+  `"connected"`.
+- **Never stop silently.** Recoverable conditions (no PIN, rejected PIN,
+  `AUTH_FAILED`, `UNREGISTER_ROUTER`) keep the process alive in a waiting
+  state that status explains, instead of exiting 0. A minimal loop around the
+  existing connect/poll code; it wakes on SIGHUP when a new PIN is written
+  (op-mode `register` sends SIGHUP instead of stop/start).
+- **Bounded restarts and backoff.** systemd `RestartSec=10`,
+  `StartLimitIntervalSec=300`, `StartLimitBurst=5`. Poll and registration
+  backoff 2 s → 300 s with full jitter.
+- **TPM seal failure** after registration: keep the token in memory, report
+  it, retry sealing later — never re-register in a loop.
+- **All Appendix A fixes.**
+
+### 18.2 Cellular control without the duty cycle
+
+- **Block it:** `service cloud egress metered deny` / `deny-interface <if>`
+  (§9) — route check before every connection, `BLOCKED` state, automatic
+  return when the route moves back. The firewall recipe in §9 works today and
+  remains a backstop.
+- **Or slow it down from the cloud, using an existing field.** The cloud sees
+  the link class (status route or capability report, §18.5) and answers
+  metered devices with `EMPTY_COMMAND` `nextPollDelay` (e.g. 600 s). No device
+  change beyond reporting the link class. Command latency becomes up to the
+  delay.
+
+  Rough data estimate (not measured): today's continuous 30 s long-poll is
+  ~120 polls/hour at ~1 KB each with keep-alive, about **120 KB/hour
+  (~85 MB/month)**. With a 600 s delay, ~6 polls/hour; carrier NAT will likely
+  drop the idle connection, so each poll pays a TLS handshake (~5 KB): about
+  **35 KB/hour (~25 MB/month)**.
+- Option 1 does not integrate with WWAN dial-on-demand; an always-on cellular
+  link stays busy with polls (§2–§5 are Option 2).
+
+### 18.3 GUI tunnel hardening — and optional HTTP-only LAN access
+
+- **Default target: the local GUI only.** `proxyRequestUri` must be the
+  router's own GUI (`https://127.0.0.1:<service https port>`, the `routerURI`
+  advertised in `PROXY_CONNECT_RESPONSE`). Anything else gets a `403`
+  response for that request. This closes LAN and internet loop-out (§0.6).
+- **Optional "just get by" LAN web access.** A subset of §16.5:
+
+  ```text
+  service cloud remote-access
+      enable
+      allow <network|address> port <list>
+      allow-interface <ifname>
+  ```
+
+  The same allow-list and route check as §16.5, applied to
+  `proxyRequestUri`. Limits: HTTP(S) request/response only, one request per
+  exchange, no WebSockets; pages that use absolute links back to their own
+  address or need WebSockets break; all LAN devices share the cloud origin in
+  the browser, so their cookies can collide (unless the cloud uses a
+  per-target path or subdomain).
+- **No router session leaks.** `IGOS_CLOUD_SESSION` is added only to responses
+  from the router GUI, and stripped from the `Cookie` header forwarded to any
+  other target.
+- **Cloud user role.** New optional `PROXY_CONNECT` parameter
+  `role` (`administrator` | `operator+` | `operator`), placed in the session
+  JWT. Absent → `administrator` (today's behavior, for compatibility).
+- **Audit.** Log each `PROXY_CONNECT` (proxy id, role, user if supplied) and
+  each request to a non-GUI target.
+- **Fixes:** poll retry without delay, binary request bodies (Appendix A).
+
+### 18.4 Alerts
+
+Cloud reads alert history through the gateway (§15.1–15.2), once the
+alerting design is implemented. No push.
+
+### 18.5 Capability reporting and unknown commands (recommended)
+
+- Answer unknown command types with `ERROR` `UNSUPPORTED_COMMAND` instead of
+  dropping them and backing off (Appendix A).
+- Send the §19.1 `device` block (version, capabilities, link class) on the
+  first poll after start. It feeds the `nextPollDelay` decision (§18.2) and
+  lets the cloud adopt Option 2 features device by device later.
+
+### 18.6 Work by repository
+
+| Repo | Work | Size |
+| --- | --- | --- |
+| igos-cloud-proxy | §18.1, `egress` check (§18.2), §18.3, §18.5, Appendix A | Small–medium |
+| vyos-1x | `service cloud egress` and optional `remote-access` subset (XML, `verify()`, render); `register` → SIGHUP; `show cloud status` state/reason; restart only on change; per-unit API key instead of `mykey` | Small |
+| flask-react-dev | Status widget states and reasons; connect/disconnect through config; web CLI URL fix (local use) | Small |
+| PerleCLOUD | Show device state/reason; optional `role` in `PROXY_CONNECT`; set `nextPollDelay` for metered devices; ignore the `device` block if unused; handle `UNSUPPORTED_COMMAND`; read alert history | Small |
+
+**What Option 1 does not give:** SSH (LAN devices, router, serial ports); the
+web CLI from the cloud; VNC, RDP, GPS live view; WebSockets through the cloud;
+low idle data on cellular beyond blocking or slower polling; alert push;
+store-and-forward for sleeping devices.
+
+**Carries over to Option 2 unchanged:** §18.1 (the supervisor grows into §7),
+`egress`, status state/reason, role passing, capability reporting,
+unknown-command handling, allow-list and route check, Appendix A fixes.
+
+---
+
+## 19. Option 2 — Wire protocol details
+
+Drafts for the PerleCLOUD team. Field names are proposals until agreed.
+Envelope rules from the protocol doc apply (`messageParams` is a JSON string;
+examples show the decoded object).
+
+### 19.1 Capability report
+
+Carried as `messageParams.device` in `REGISTER_ROUTER_REQUEST` and in the
+first `GET_NEXT_COMMAND` after each proxy start, and again whenever it changes
+(firmware upgrade, `remote-access` or `egress` change, link class change).
+
+```json
+"device": {
+  "protocolVersion": 2,
+  "firmware": "igOS 1.5.2",
+  "proxyVersion": "2.0.0",
+  "capabilities": [
+    "EXECUTE_REST_COMMAND", "PROXY_CONNECT", "PROXY_CONNECT_ROLE",
+    "TUNNEL_OPEN", "TUNNEL_CLOSE", "DEVICE_EVENT", "EVENT_HANDLER_ALERTS"
+  ],
+  "tunnel": {
+    "subprotocols": ["igos-tunnel.v1"],
+    "maxSessions": 4,
+    "remoteAccess": "enabled",
+    "localServices": ["ssh", "https", "gps", "serial:ttyS1", "serial:ttyS2"]
+  },
+  "link": {"egress": "wwan0", "class": "metered", "state": "CONNECTED"}
+}
+```
+
+Rules:
+
+- No `device` block → protocol version 1 (today's firmware).
+- The cloud sends only advertised message types and hides UI for features the
+  device lacks or has disabled (`remoteAccess: "disabled"`).
+- **To confirm with PerleCLOUD:** the cloud must ignore unknown
+  `messageParams` fields in `GET_NEXT_COMMAND` and `REGISTER_ROUTER_REQUEST`.
+  If it rejects them, use a separate `DEVICE_INFO` message only after the
+  cloud has advertised support.
+
+Unknown command reply (proxy → cloud):
+
+```json
+{"messageType": "ERROR", "messageId": 57, "requiresResponse": false,
+ "messageParams": {"errorCode": "UNSUPPORTED_COMMAND",
+                   "errorMessage": "TUNNEL_OPEN not supported"}}
+```
+
+### 19.2 `TUNNEL_OPEN` (cloud → proxy, `requiresResponse: true`)
+
+```json
+{
+  "tunnelId": "t-8f2c41",
+  "target": {"host": "www.myequipmentonthelan.com", "port": 443},
+  "relayUri": "wss://relay.perleapps.com/tunnel",
+  "relayToken": "<opaque, single use>",
+  "subprotocol": "igos-tunnel.v1",
+  "idleTimeout": 600,
+  "maxDuration": 3600,
+  "maxBytes": 52428800,
+  "keepalive": 60,
+  "user": {"id": "u-1234", "name": "jsmith@example.com", "role": "administrator"},
+  "client": {"address": "203.0.113.7"}
+}
+```
+
+| Field | Required | Notes |
+| --- | --- | --- |
+| `tunnelId` | yes | 1–128 of `[A-Za-z0-9_-]`; unique per device |
+| `target.host` + `target.port` | one of | Name or address; names resolved by the router (§16.4) |
+| `target.service` | one of | Router-local service from `localServices`: `ssh`, `https`, `gps`, `serial:<tty>`; the router maps it to its local port |
+| `relayUri`, `relayToken` | yes | §19.5 |
+| `subprotocol` | no | Default `igos-tunnel.v1`; must be in `tunnel.subprotocols` |
+| `idleTimeout`, `maxDuration`, `maxBytes` | no | The lower of the cloud's and the router's configured limit applies |
+| `keepalive` | no | Seconds between WebSocket pings; default 60 |
+| `user` | yes | `role` checked against `remote-access role`; `id`/`name` for audit |
+| `client.address` | no | End user's address, for audit only |
+
+### 19.3 `TUNNEL_OPEN_RESPONSE` (proxy → cloud)
+
+Sent after the target connection **and** the relay WebSocket are both
+established, or immediately on refusal. Timeouts: target connect 10 s, relay
+connect 15 s.
+
+```json
+{
+  "tunnelId": "t-8f2c41",
+  "status": "accepted",
+  "reason": null,
+  "detail": null,
+  "resolved": {"address": "192.168.1.20", "interface": "br0"},
+  "limits": {"idleTimeout": 600, "maxDuration": 3600, "maxBytes": 52428800}
+}
+```
+
+`status` is `accepted` or `refused`. Refusal `reason`:
+
+| Reason | Meaning |
+| --- | --- |
+| `not_enabled` | `remote-access` not enabled |
+| `target_not_allowed` | Resolved address/port not in the allow-list |
+| `route_not_allowed` | Route to the target does not leave through an `allow-interface` |
+| `name_not_resolved` | Router could not resolve `target.host` |
+| `service_unknown` | `target.service` not available |
+| `role_not_allowed` | `user.role` below `remote-access role` |
+| `limit_reached` | `max-sessions` reached |
+| `metered_not_allowed` | Cloud egress is metered and tunnels are denied on metered |
+| `egress_blocked` | Cloud egress denied by `service cloud egress` |
+| `connect_failed` | Target refused or timed out (`detail` has the error) |
+| `relay_failed` | Relay unreachable, TLS failure, or relay rejected the token (`detail`) |
+| `subprotocol_unsupported` | Requested subprotocol not supported |
+
+### 19.4 `TUNNEL_CLOSE` and `TUNNEL_CLOSED`
+
+`TUNNEL_CLOSE` (cloud → proxy, `requiresResponse: false`) — close a tunnel
+the relay has lost track of, or end a session from the cloud UI:
+
+```json
+{"tunnelId": "t-8f2c41", "reason": "user_closed"}
+```
+
+`TUNNEL_CLOSED` (proxy → cloud, `requiresResponse: false`) — sent when any
+tunnel ends, for the cloud audit trail (best effort; the router also logs it):
+
+```json
+{
+  "tunnelId": "t-8f2c41",
+  "code": 4001,
+  "reason": "idle_timeout",
+  "opened": "2026-11-27T15:02:11Z",
+  "closed": "2026-11-27T15:14:40Z",
+  "bytesToTarget": 18234,
+  "bytesFromTarget": 402118
+}
+```
+
+### 19.5 Relay WebSocket — `igos-tunnel.v1`
+
+**Connect.** The proxy opens `relayUri`:
+
+```http
+GET /tunnel HTTP/1.1
+Host: relay.perleapps.com
+Upgrade: websocket
+Connection: Upgrade
+Sec-WebSocket-Protocol: igos-tunnel.v1
+Authorization: Bearer <relayToken>
+X-Igos-Router-Id: 123-456789M01234
+X-Igos-Tunnel-Id: t-8f2c41
+```
+
+- TLS is verified against the system CAs, as for the command channel
+  (DevID mTLS later, §11).
+- The relay accepts the token once, only for that router and tunnel, and only
+  within 60 s of issuing `TUNNEL_OPEN`. Otherwise it answers `401` before the
+  upgrade; the proxy refuses with `relay_failed`.
+- The relay selects `igos-tunnel.v1` in its response; any other selection is
+  a failure.
+
+**Data.**
+
+- Binary frames only; payload is raw TCP bytes, at most 64 KiB per frame.
+  The proxy reads the target in chunks of up to 16 KiB.
+- Text frames are reserved; receiving one closes the tunnel with `1003`.
+- No compression extension (the inner traffic is already encrypted).
+
+**Flow control.** The proxy stops reading from the target while more than
+256 KiB is queued toward the relay, and stops reading the WebSocket while the
+target's send buffer is full. The relay applies the same rule toward the
+browser.
+
+**Keepalive and idle.** The proxy pings every `keepalive` seconds; no pong
+within twice that closes with `4011`. Pings do not count as activity; no
+payload in either direction for `idleTimeout` closes with `4001`.
+
+**Close.** Either side sends a Close frame with a code from the table. When
+the target closes its side, the proxy flushes pending data and closes `4000`.
+When the relay closes, the proxy flushes and closes the target connection.
+
+| Code | Sent by | Meaning |
+| --- | --- | --- |
+| `4000` | proxy | Target closed the connection |
+| `4001` | proxy | Idle timeout |
+| `4002` | proxy | Max duration reached |
+| `4003` | proxy | Max bytes reached |
+| `4004` | proxy | Ended locally (`reset cloud remote-access session`) |
+| `4005` | proxy | `remote-access` disabled or `service cloud` stopped |
+| `4006` | proxy | Cloud egress became blocked (`egress`) |
+| `4007` | proxy | Target connection error |
+| `4008` | relay | User closed the session |
+| `4009` | relay | Session ended by the cloud (`TUNNEL_CLOSE`, admin action) |
+| `4010` | either | Shutting down |
+| `4011` | either | Keepalive timeout |
+| `4012` | relay | Browser side lost |
+
+### 19.6 Multiplexing — `igos-tunnel.v2` (deferred)
+
+Carries several TCP connections of one user session over one WebSocket
+(§16.7). Negotiated through `tunnel.subprotocols` and `subprotocol`. Frame
+layout:
+
+| Bytes | Field |
+| --- | --- |
+| 0 | Type: `0x01` OPEN, `0x02` OPEN_OK, `0x03` DATA, `0x04` CLOSE, `0x05` WINDOW |
+| 1–4 | Stream id (big-endian) |
+| 5… | Payload: OPEN = JSON target (`host`/`port` or `service`); OPEN_OK = empty; DATA = bytes; CLOSE = 2-byte code; WINDOW = 4-byte credit |
+
+Each stream is checked against the allow-list and route check like a v1
+tunnel. Per-stream credit-based flow control (WINDOW). To be specified when
+HTTPS browsing needs it.
+
+### 19.7 `DEVICE_EVENT` and acknowledgement
+
+**Local API** (event-handler cloud worker → proxy, unix socket):
+
+```http
+POST /perlecloud/events
+{"eventType": "alert", "historyId": "…", "records": [ … ]}
+```
+
+Answers: `200 {"accepted": ["id", …]}`, `503` not connected (retry),
+`501` cloud does not support `DEVICE_EVENT` (stop pushing).
+
+**Cloud message** (proxy → cloud on `routers/command`,
+`requiresResponse: true`), at most 50 records or 64 KB:
+
+```json
+{"eventType": "alert", "historyId": "h-5b1e",
+ "records": [{"kind": "alert", "id": "…", "sequence": 812, "severity": "critical", "…": "…"},
+             {"kind": "delivery", "id": "…", "sequence": 815, "alert_id": "…", "channel": "sms:oncall", "result": "sent"}]}
+```
+
+**Acknowledgement** — the HTTP response body:
+
+```json
+{"messageType": "DEVICE_EVENT_ACK",
+ "messageParams": {"accepted": ["…"], "rejected": [{"id": "…", "reason": "invalid"}]}}
+```
+
+Accepted ids leave the queue; rejected ids with a permanent reason are
+dropped; anything missing is retried. The cloud deduplicates on `id`.
+
+### 19.8 Sequence diagrams
+
+**a) Start-up and capability report**
+
+```text
+proxy                                   PerleCLOUD
+  │ GET_NEXT_COMMAND {timeout, device}  │
+  │────────────────────────────────────►│ store capabilities, link class
+  │ EMPTY_COMMAND {nextPollDelay}       │ (metered → longer delay, Option 1)
+  │◄────────────────────────────────────│
+```
+
+**b) SSH to a LAN device**
+
+```text
+browser      PerleCLOUD (UI + relay)          proxy                 LAN device
+  │ open SSH to  │                              │                        │
+  │ 192.168.1.20 │                              │                        │
+  │─────────────►│ TUNNEL_OPEN (next poll)      │                        │
+  │              │─────────────────────────────►│ resolve, allow-list,   │
+  │              │                              │ route check            │
+  │              │                              │ TCP connect :22 ──────►│
+  │              │◄═══ wss + relayToken ════════│                        │
+  │              │ TUNNEL_OPEN_RESPONSE accepted│                        │
+  │              │◄─────────────────────────────│                        │
+  │ xterm.js ◄──►│ cloud SSH client ◄══ bytes ══╪══ bytes ══════════════►│ sshd
+  │ (user logs in with the device's own credentials)                     │
+```
+
+**c) Refused tunnel**
+
+```text
+PerleCLOUD                         proxy
+  │ TUNNEL_OPEN 8.8.8.8:443         │
+  │────────────────────────────────►│ route leaves wwan0, not an allow-interface
+  │ TUNNEL_OPEN_RESPONSE refused    │
+  │  reason route_not_allowed       │
+  │◄────────────────────────────────│ (no connection made, nothing sent)
+```
+
+**d) Closing**
+
+```text
+user closes tab:   relay ── Close 4008 ──► proxy ── FIN ──► target
+                   proxy ── TUNNEL_CLOSED {4008, bytes} ──► PerleCLOUD
+idle timeout:      proxy ── Close 4001 ──► relay;  proxy ── FIN ──► target
+                   proxy ── TUNNEL_CLOSED {4001, bytes} ──► PerleCLOUD
+cloud admin:       PerleCLOUD ── TUNNEL_CLOSE ──► proxy ── Close 4009 ──► relay
+```
+
+**e) HTTPS to a LAN device**
+
+As (b) with port 443. The cloud reverse proxy serves the session at its own
+subdomain (e.g. `s-8f2c41.remote.perleapps.com`), acts as the HTTPS client to
+the device with `Host`/SNI set to the typed name, and applies its
+self-signed-certificate policy. Additional browser connections open more
+tunnels (v1) or streams (v2).
+
+**f) Alerts**
+
+```text
+baseline (pull):  PerleCLOUD ── gateway /graphql "alerts since 812" ──► proxy ──► VyOS API
+                  ◄── {history_id, first_sequence, records} ─────────────────────
+push (optional):  event-handler ── POST /perlecloud/events ──► proxy
+                  proxy ── DEVICE_EVENT ──► PerleCLOUD ── DEVICE_EVENT_ACK ──► proxy
+                  proxy ── 200 accepted ──► event-handler (items removed from queue)
+```
+
+**g) Older firmware**
+
+```text
+proxy (protocol 1)                     PerleCLOUD
+  │ GET_NEXT_COMMAND {timeout}          │ no device block → protocol 1:
+  │────────────────────────────────────►│ never send TUNNEL_OPEN / DEVICE_EVENT,
+  │                                     │ use PROXY_CONNECT and gateway only
+```
+
+---
+
 ## Appendix A — Defects to fix alongside (igos-cloud-proxy)
 
 - `EmptyCommand.execute` raises `AttributeError` when `keepAlive` /
@@ -819,5 +1725,19 @@ vyos-event-handler ── cloud queue ── cloud worker ──► igos-cloud-p
   override.
 - JWT signing key regenerated per process → active cloud GUI sessions are
   invalidated by any agent restart (including every `service cloud` commit).
+- `HttpProxySession._poll_loop` retries immediately after a failed poll, with
+  no delay — a tight loop that burns CPU and, on cellular, data while the link
+  is down or flapping during a GUI session.
+- `HttpProxyRequest.body()` decodes request bodies as UTF-8 text, so binary
+  uploads through the GUI tunnel (firmware image, config restore,
+  certificates) can fail.
+- GUI tunnel: role hard-coded `administrator`, `proxyRequestUri` not
+  restricted (LAN and internet loop-out, any WAN including cellular), and
+  `IGOS_CLOUD_SESSION` added to every response regardless of target (§0.6,
+  §16.2). Interim fix: apply the §16.5 route check (`allow-interface`) to
+  `proxyRequestUri`.
+- Unknown `messageType` raises `CommandError`, which `poll_command` treats as a
+  bad response: no reply to the cloud and polling backs off. Reply `ERROR`
+  `UNSUPPORTED_COMMAND` with the `messageId` and keep polling (§10.1).
 - Docs: token path (`/var/lib/…` vs `/config/igos/…`), CLI syntax, backoff
   values.
