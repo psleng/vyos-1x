@@ -15,6 +15,7 @@ leave a pointer here.
 | ID | Feature | Area | Repos | Status |
 |---|---|---|---|---|
 | F1 | Bind an OpenVPN client certificate to a user (username must match certificate CN) | VPN / OpenVPN | vyos-1x | Proposed |
+| F2 | Make the REST API form handler tolerate newer starlette (`_get_form` accepts extra keyword arguments) | HTTP API | vyos-1x | Deferred — do with the next vyos-http-api-tools bump |
 
 ---
 
@@ -98,7 +99,62 @@ Per-certificate configuration is keyed by the certificate Common Name (CN):
 
 ---
 
+## 3. F2 — REST API form handler: tolerate newer starlette
+
+**Request.** Make the REST API's form handling robust against an upgrade of
+the API's Python libraries (vyos-http-api-tools), so that an upgrade can't
+break every form-based REST request, including the GUI's.
+
+### 3.1 What exists today
+
+- `src/services/api/rest/routers.py`, `MultipartRequest._get_form()`,
+  overrides starlette's private `Request._get_form()` so it can turn form
+  posts (`data=` + `key=`) into JSON for the endpoint models. Its signature
+  accepts only `max_files` and `max_fields`.
+- This code comes from upstream VyOS; it isn't igOS-specific.
+- Units ship starlette 0.41.3 (fastapi 0.115.5) from vyos-http-api-tools,
+  which calls `_get_form(max_files=..., max_fields=...)`. This works today.
+- Upstream check (2026-11-27): `vyos/vyos-http-api-tools` `rolling` still
+  pins fastapi 0.115.5 / starlette 0.41.3. Its 2026 updates (pyjwt,
+  python-multipart, anyio, graphql-core) didn't touch fastapi or starlette,
+  and no fastapi/starlette bump PR is open. Upstream vyos-1x `current` has
+  the same `_get_form` signature, so it's exposed in the same way.
+
+### 3.2 Gap
+
+- Starlette 0.44.0 and later call `_get_form(..., max_part_size=...)`.
+  The override doesn't accept that argument, so it raises `TypeError` and
+  **every form-encoded REST request fails with 400**. JSON requests are not
+  affected.
+- Nothing breaks until vyos-http-api-tools is bumped to a fastapi/starlette
+  that includes 0.44.0+, but then the failure is total and the first symptom
+  would be the GUI's API calls failing.
+
+### 3.3 Proposed approach
+
+1. Add `**kwargs` to the override's signature (or an explicit
+   `max_part_size` that is passed to the multipart parser where the
+   installed starlette supports it). This is a one-line change.
+2. Do it when vyos-http-api-tools is bumped, or at the next upstream merge
+   if upstream hasn't already fixed it. Check upstream first to avoid a
+   merge conflict.
+
+### 3.4 Tests
+
+- A unit test that calls `MultipartRequest._get_form()` with an extra
+  keyword argument (`max_part_size=...`) and gets the converted form back.
+- A form POST to `/retrieve` (`data=` + `key=`) returns 200 with the new
+  libraries installed. Run it on a unit after the bump.
+
+### 3.5 Open questions
+
+- Whether upstream has already changed this override by the time we bump.
+
+---
+
 ## Revision notes
 
 - 2026-11-18: Document created; F1 (OpenVPN certificate-to-user binding)
   added.
+- 2026-11-27: F2 (REST API form handler vs newer starlette) added; deferred
+  until the next vyos-http-api-tools bump.
